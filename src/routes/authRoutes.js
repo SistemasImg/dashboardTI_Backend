@@ -4,20 +4,39 @@ const { login, getCurrentUser } = require("../controllers/loginController");
 const validateLogin = require("../middlewares/validateLogin");
 const authMiddleware = require("../middlewares/authMiddleware");
 const {
-  createTest,
-  getTests,
-  updateTest,
-  deleteTest,
+  createTestLanding,
+  createTestDid,
+  getTestLanding,
+  getTestDid,
+  updateTestLanding,
+  updateTestDid,
 } = require("../controllers/uatController");
+const { allUsers } = require("../controllers/allUserController");
+const { allProducts } = require("../controllers/productController");
+const { allDomains } = require("../controllers/domainController");
+
+// PUBLIC ROUTES
+router.post("/login", login);
+
+// PROTECTED ROUTES
+router.use(authMiddleware);
 
 //user
-router.post("/login", validateLogin, login);
-router.get("/validateUser", authMiddleware, getCurrentUser);
+router.get("/allUsers", allUsers);
+router.get("/validateUser", getCurrentUser);
 
-router.use(authMiddleware);
+//product
+router.get("/allProducts", allProducts);
+
+//Domain
+router.get("/allDomains", allDomains);
+
 //uat
-router.post("/uatCreate", createTest);
-router.get("/uatGet", getTests);
-router.put("/uatUpdate/:id", updateTest);
-router.delete("/uatDelete/:id", deleteTest);
+router.post("/landingUatCreate", createTestLanding);
+router.post("/didUatCreate", createTestDid);
+router.get("/landingUatGet", getTestLanding);
+router.get("/didUatGet", getTestDid);
+router.put("/uatLandingUpdate/:id", updateTestLanding);
+router.put("/uatDidUpdate/:id", updateTestDid);
+
 module.exports = router;
