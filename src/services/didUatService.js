@@ -76,6 +76,7 @@ async function getDidUAT(filters = {}) {
     });
     const formatDate = results.map((item) => ({
       ...item,
+      didDate: formatDidDate(item.didDate),
       created_at: formatDateToDDMMYYYY(item.created_at),
       updated_at: formatDateToDDMMYYYY(item.updated_at),
     }));
@@ -114,6 +115,13 @@ function formatDateToDDMMYYYY(date) {
   const month = String(d.getMonth() + 1).padStart(2, "0");
   const year = d.getFullYear();
   return `${day}/${month}/${year}`;
+}
+
+function formatDidDate(dateStr) {
+  if (!dateStr) return null;
+  const [year, month, day] = dateStr.split("-");
+  if (!year || !month || !day) return dateStr;
+  return `${day}-${month}-${year}`;
 }
 
 module.exports = {
