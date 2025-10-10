@@ -11,9 +11,15 @@ const {
   updateTestLanding,
   updateTestDid,
 } = require("../controllers/uatController");
-const { allUsers } = require("../controllers/allUserController");
+const {
+  allUsers,
+  createUser,
+  updateUsers,
+  deleteUsers,
+} = require("../controllers/allUserController");
 const { allProducts } = require("../controllers/productController");
 const { allDomains } = require("../controllers/domainController");
+const { allRoles } = require("../controllers/rolesController");
 
 // PUBLIC ROUTES
 router.post("/login", login);
@@ -24,6 +30,9 @@ router.use(authMiddleware);
 //user
 router.get("/allUsers", allUsers);
 router.get("/validateUser", getCurrentUser);
+router.post("/createUser", createUser);
+router.put("/updateUser/:id", updateUsers);
+router.delete("/deleteUser/:id", deleteUsers);
 
 //product
 router.get("/allProducts", allProducts);
@@ -38,5 +47,8 @@ router.get("/landingUatGet", getTestLanding);
 router.get("/didUatGet", getTestDid);
 router.put("/uatLandingUpdate/:id", updateTestLanding);
 router.put("/uatDidUpdate/:id", updateTestDid);
+
+//roles
+router.get("/allRoles", allRoles);
 
 module.exports = router;
