@@ -6,8 +6,10 @@ app.use(
   cors({
     origin: [
       "http://localhost:5173", // dev
-      "https://dashboardtifronted.vercel.app", // prod
+      "https://dashboardtifronted.vercel.app", // prod viejo
+      "https://dashboard.img360.com", // prod nuevo
     ],
+
     methods: ["GET", "POST", "PUT", "DELETE", "PATCH"],
     credentials: true,
   })
