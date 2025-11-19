@@ -64,7 +64,7 @@ const LandingUat = sequelize.define(
     },
   },
   {
-    tableName: "landingUat",
+    tableName: "landinguat",
     timestamps: true,
     createdAt: "created_at",
     updatedAt: "updated_at",

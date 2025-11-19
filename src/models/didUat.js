@@ -80,7 +80,7 @@ const DidUat = sequelize.define(
     },
   },
   {
-    tableName: "didUat",
+    tableName: "diduat",
     timestamps: true,
     createdAt: "created_at",
     updatedAt: "updated_at",
