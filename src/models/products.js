@@ -30,6 +30,8 @@ const Product = sequelize.define(
   {
     tableName: "products",
     timestamps: true,
+    underscored: true,
+    freezeTableName: true,
     createdAt: "created_at",
     updatedAt: "updated_at",
   }

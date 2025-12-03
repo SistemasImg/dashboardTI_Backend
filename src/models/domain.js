@@ -38,6 +38,8 @@ const Domain = sequelize.define(
   {
     tableName: "domains",
     timestamps: true,
+    underscored: true,
+    freezeTableName: true,
     createdAt: "created_at",
     updatedAt: "updated_at",
   }

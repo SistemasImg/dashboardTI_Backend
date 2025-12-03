@@ -1,9 +1,14 @@
-const DidUat = require("../models/didUat");
+const logger = require("../utils/logger");
+const { DidUat } = require("../models");
 const { Op } = require("sequelize");
 
-async function createDidUAT(data) {
+// ---------------------
+// CREATE
+// ---------------------
+exports.createDidUAT = async (data) => {
+  logger.info("DidUatService → createDidUAT() started");
+
   try {
-    // Lista de campos que SÍ van en la tabla
     const {
       nameRegister,
       testType,
@@ -19,14 +24,11 @@ async function createDidUAT(data) {
       status,
       observations,
       checklist,
-      // Los demás campos van a metric
       ...metricFields
     } = data;
 
-    // Crea el objeto metric con los campos extra
     const metric = { ...metricFields };
 
-    // Construye el objeto para guardar en la tabla
     const saveData = {
       nameRegister,
       testType,
@@ -44,28 +46,40 @@ async function createDidUAT(data) {
       checklist,
       metris: JSON.stringify(metric),
     };
+
     const newUAT = await DidUat.create(saveData);
+
+    logger.success("DidUatService → createDidUAT() OK");
     return newUAT;
   } catch (error) {
-    console.error("Error creating UAT:", error);
+    logger.error("DidUatService → createDidUAT() error");
     throw error;
   }
-}
+};
 
-async function getDidUAT(filters = {}) {
+// ---------------------
+// GET
+// ---------------------
+exports.getDidUAT = async (filters = {}) => {
+  logger.info("DidUatService → getDidUAT() started");
+
   try {
     const where = {};
+
     if (filters.contact) where.contact = filters.contact;
     if (filters.did) where.did = filters.did;
     if (filters.user) where.user = filters.user;
     if (filters.testerId) where.testerId = filters.testerId;
     if (filters.idProduct) where.idProduct = filters.idProduct;
+
     if (filters.filterCreatedDate) {
       let [day, month, year] = filters.filterCreatedDate.split("/");
       if (day.length === 1) day = "0" + day;
       if (month.length === 1) month = "0" + month;
+
       const start = new Date(`${year}-${month}-${day}T00:00:00`);
       const end = new Date(`${year}-${month}-${day}T23:59:59`);
+
       where.created_at = { [Op.between]: [start, end] };
     }
 
@@ -74,41 +88,55 @@ async function getDidUAT(filters = {}) {
       raw: true,
       order: [["id", "DESC"]],
     });
-    const formatDate = results.map((item) => ({
+
+    const formatted = results.map((item) => ({
       ...item,
       didDate: formatDidDate(item.didDate),
-      created_at: formatDateToDDMMYYYY(item.created_at),
-      updated_at: formatDateToDDMMYYYY(item.updated_at),
+      created_at: formatDate(item.created_at),
+      updated_at: formatDate(item.updated_at),
     }));
-    return formatDate;
+
+    logger.success("DidUatService → getDidUAT() OK");
+    return formatted;
   } catch (error) {
-    console.error("Error fetching UATs:", error);
+    logger.error("DidUatService → getDidUAT() error");
     throw error;
   }
-}
+};
 
-async function updateDidUAT(id, data) {
+// ---------------------
+// UPDATE
+// ---------------------
+exports.updateDidUAT = async (id, data) => {
+  logger.info("DidUatService → updateDidUAT() started");
+
   try {
     const [updated] = await DidUat.update(data, { where: { id } });
-    if (!updated) throw new Error("Test not found");
-    const updatedRecord = await DidUat.findByPk(id, { raw: true });
-    if (!updatedRecord) throw new Error("Test not found");
+
+    if (!updated) {
+      logger.warn("DidUatService → record not found");
+      const err = new Error("Test not found");
+      err.status = 404;
+      throw err;
+    }
+
+    const record = await DidUat.findByPk(id, { raw: true });
+
+    logger.success("DidUatService → updateDidUAT() OK");
+
     return {
-      ...updatedRecord,
-      created_at: updatedRecord.created_at
-        ? new Date(updatedRecord.created_at).toLocaleDateString("es-PE")
-        : null,
-      updated_at: updatedRecord.updated_at
-        ? new Date(updatedRecord.updated_at).toLocaleDateString("es-PE")
-        : null,
+      ...record,
+      created_at: formatDate(record.created_at),
+      updated_at: formatDate(record.updated_at),
     };
   } catch (error) {
-    console.error("Error updating UAT:", error);
+    logger.error("DidUatService → updateDidUAT() error");
     throw error;
   }
-}
+};
 
-function formatDateToDDMMYYYY(date) {
+// Helpers
+function formatDate(date) {
   if (!date) return null;
   const d = new Date(date);
   const day = String(d.getDate()).padStart(2, "0");
@@ -120,12 +148,5 @@ function formatDateToDDMMYYYY(date) {
 function formatDidDate(dateStr) {
   if (!dateStr) return null;
   const [year, month, day] = dateStr.split("-");
-  if (!year || !month || !day) return dateStr;
   return `${day}-${month}-${year}`;
 }
-
-module.exports = {
-  createDidUAT,
-  getDidUAT,
-  updateDidUAT,
-};
