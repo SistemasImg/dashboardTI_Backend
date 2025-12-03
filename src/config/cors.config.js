@@ -2,6 +2,7 @@ const cors = require("cors");
 
 const allowedOrigins = [
   "http://localhost:5173",
+  "https://dashboard-ti-backend.onrender.com",
   "https://dashboardtifronted.vercel.app",
   "https://dashboard.img360.com",
 ];
