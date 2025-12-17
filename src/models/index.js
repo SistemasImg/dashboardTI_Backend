@@ -1,7 +1,7 @@
 const User = require("./user");
 const Role = require("./roles");
 const Domain = require("./domain");
-const Product = require("./products");
+const Product = require("./Products");
 const LandingUat = require("./LandingUat");
 const DidUat = require("./DidUat");
 

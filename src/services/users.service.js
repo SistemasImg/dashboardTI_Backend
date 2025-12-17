@@ -19,32 +19,38 @@ exports.allUsers = async () => {
 };
 
 exports.createUser = async (data) => {
-  logger.info("UsersService → createUser() started");
+  try {
+    logger.info("UsersService → createUser() started");
+    console.log("data received in createUser:", data); // Debugging line
+    const { email, password } = data;
 
-  const { name, email, password, role } = data;
+    const exists = await User.findOne({ where: { email } });
+    if (exists) {
+      logger.warn("UsersService → User already exists");
+      const err = new Error("User already exists");
+      err.status = 400;
+      throw err;
+    }
 
-  const exists = await User.findOne({ where: { email } });
-  if (exists) {
-    logger.warn("UsersService → User already exists");
-    const err = new Error("User already exists");
-    err.status = 400;
-    throw err;
+    const hashedPassword = bcrypt.hashSync(password, 10);
+
+    const newUser = await User.create({
+      ...data,
+      password: hashedPassword,
+    });
+    logger.success("UsersService → User created");
+    return {
+      message: "User created successfully",
+      user: newUser,
+    };
+  } catch (error) {
+    logger.error("Error in createUser:", error);
+    const statusCode = error.status || 500;
+    return {
+      message: error.message || "Internal Server Error",
+      statusCode,
+    };
   }
-
-  const hashedPassword = bcrypt.hashSync(password, 10);
-
-  const newUser = await User.create({
-    name,
-    email,
-    password: hashedPassword,
-    role,
-  });
-
-  logger.success("UsersService → User created");
-  return {
-    message: "User created successfully",
-    user: newUser,
-  };
 };
 
 exports.updateUsers = async (id, data) => {

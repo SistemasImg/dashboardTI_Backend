@@ -1,6 +1,9 @@
 const express = require("express");
 const router = express.Router();
 const authMiddleware = require("../middlewares/authMiddleware");
+const didUatSchema = require("../schemas/didUatSchema");
+const landingUatSchema = require("../schemas/landingUatSchema");
+const validate = require("../middlewares/validate");
 
 const {
   createTestLanding,
@@ -14,8 +17,8 @@ const {
 // All protected
 router.use(authMiddleware);
 
-router.post("/landingCreate", createTestLanding);
-router.post("/didCreate", createTestDid);
+router.post("/landingCreate", validate(landingUatSchema), createTestLanding);
+router.post("/didCreate", validate(didUatSchema), createTestDid);
 router.get("/landingGet", getTestLanding);
 router.get("/didGet", getTestDid);
 router.put("/landingUpdate/:id", updateTestLanding);

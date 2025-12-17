@@ -20,7 +20,6 @@ exports.createUser = async (req, res, next) => {
 
   try {
     const result = await usersService.createUser(req.body);
-
     logger.success("UsersController → createUser() completed successfully");
     return res.json(result);
   } catch (error) {
