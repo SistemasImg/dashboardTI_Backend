@@ -1,5 +1,5 @@
 const logger = require("../utils/logger");
-const LandingUat = require("../models/LandingUat");
+const LandingUat = require("../models/landingUat");
 const { Op } = require("sequelize");
 
 exports.createLandingUAT = async (data) => {
