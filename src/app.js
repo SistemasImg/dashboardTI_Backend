@@ -51,6 +51,17 @@ app.use("/owner", require("./routes/owner.routes"));
 app.use("/infobit", require("./routes/infobit.routes"));
 
 // ------------------------------
+// HEALTH CHECK (Render / Monitoring)
+// ------------------------------
+app.get("/health", (req, res) => {
+  res.status(200).json({
+    status: "ok",
+    uptime: process.uptime(),
+    timestamp: new Date().toISOString(),
+  });
+});
+
+// ------------------------------
 // 6. GLOBAL ERROR HANDLER
 // ------------------------------
 app.use((err, req, res, next) => {
