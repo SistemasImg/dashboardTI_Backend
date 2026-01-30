@@ -5,8 +5,8 @@ exports.allProducts = async () => {
   logger.info("ProductService → allProducts() started");
 
   const products = await Product.findAll({
-    where: { status: 1 }, // ← TU FILTRO ORIGINAL
-    raw: true, // ← PARA DEVOLVER JSON PLANO (más rápido)
+    where: { status: 1 },
+    raw: true,
   });
 
   if (!products || products.length === 0) {

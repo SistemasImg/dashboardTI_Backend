@@ -5,7 +5,14 @@ const bcrypt = require("bcryptjs");
 exports.allUsers = async () => {
   logger.info("UsersService → allUsers() started");
 
-  const users = await User.findAll();
+  const users = await User.findAll({
+    where: {
+      status: "active",
+    },
+    attributes: {
+      exclude: ["password", "updated_at"],
+    },
+  });
 
   if (!users || users.length === 0) {
     logger.warn("UsersService → No users found");
@@ -13,17 +20,29 @@ exports.allUsers = async () => {
     err.status = 404;
     throw err;
   }
+  logger.success("UsersService → allUsers() OK");
+  const formattedUsers = users.map((user) => {
+    const u = user.toJSON();
+
+    const date = new Date(u.created_at);
+    const day = String(date.getDate()).padStart(2, "0");
+    const month = String(date.getMonth() + 1).padStart(2, "0");
+    const year = date.getFullYear();
+
+    u.created_at = `${day}/${month}/${year}`;
+
+    return u;
+  });
 
   logger.success("UsersService → allUsers() OK");
-  return users;
+  return formattedUsers;
 };
 
 exports.createUser = async (data) => {
   try {
     logger.info("UsersService → createUser() started");
-    console.log("data received in createUser:", data); // Debugging line
     const { email, password } = data;
-
+    console.log("createUser data:", data);
     const exists = await User.findOne({ where: { email } });
     if (exists) {
       logger.warn("UsersService → User already exists");
@@ -44,12 +63,8 @@ exports.createUser = async (data) => {
       user: newUser,
     };
   } catch (error) {
-    logger.error("Error in createUser:", error);
-    const statusCode = error.status || 500;
-    return {
-      message: error.message || "Internal Server Error",
-      statusCode,
-    };
+    error.status = error.status || 500;
+    throw error;
   }
 };
 
@@ -65,7 +80,14 @@ exports.updateUsers = async (id, data) => {
     throw err;
   }
 
-  await user.update(data);
+  const updateData = { ...data };
+  if (data.password && data.password.trim() !== "") {
+    updateData.password = bcrypt.hashSync(data.password, 10);
+  } else {
+    delete updateData.password;
+  }
+
+  await user.update(updateData);
 
   logger.success("UsersService → User updated");
   return {
@@ -78,7 +100,7 @@ exports.deleteUsers = async (id) => {
   logger.info("UsersService → deleteUsers() started");
 
   const user = await User.findByPk(id);
-
+  console.log("Deleting user:", user);
   if (!user) {
     logger.warn("UsersService → User not found");
     const err = new Error("User not found");
@@ -86,9 +108,10 @@ exports.deleteUsers = async (id) => {
     throw err;
   }
 
-  await user.destroy();
+  await user.update({ status: "inactive" });
 
-  logger.success("UsersService → User deleted");
+  logger.success("UsersService → User status updated to inactive");
+
   return {
     message: "User deleted successfully",
   };

@@ -1,6 +1,8 @@
 const express = require("express");
 const app = express();
 
+app.set("trust proxy", 1);
+
 // ------------------------------
 // 1. SECURITY MIDDLEWARES
 // ------------------------------
@@ -21,7 +23,15 @@ app.use("/auth/login", loginLimiter);
 // ------------------------------
 // 4. JSON PARSER
 // ------------------------------
-app.use(express.json());
+app.use(express.json({ limit: "200kb" }));
+
+// specific route with larger limit
+// const controller = require("./controllers/uat.controller").handleUAT;
+// app.post(
+//   "/api/uat",
+//   express.json({ limit: "300kb" }),
+//   controller
+// );
 
 // ------------------------------
 // 5. ROUTES
@@ -32,6 +42,13 @@ app.use("/roles", require("./routes/roles.routes"));
 app.use("/domains", require("./routes/domain.routes"));
 app.use("/products", require("./routes/product.routes"));
 app.use("/uat", require("./routes/uat.routes"));
+app.use("/salesforce", require("./routes/salesforce.routes"));
+app.use("/agents", require("./routes/agents.routes"));
+app.use("/assign", require("./routes/caseAssignments.routes"));
+app.use("/state", require("./routes/state.routes"));
+app.use("/api", require("./routes/apiSend.routes"));
+app.use("/owner", require("./routes/owner.routes"));
+app.use("/infobit", require("./routes/infobit.routes"));
 
 // ------------------------------
 // 6. GLOBAL ERROR HANDLER

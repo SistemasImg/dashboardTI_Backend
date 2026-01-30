@@ -4,6 +4,12 @@ const Domain = require("./domain");
 const Product = require("./Products");
 const LandingUat = require("./LandingUat");
 const DidUat = require("./DidUat");
+const Agents = require("./Agents");
+const CaseAssignment = require("./caseAssignments");
+const AttemptsDaily = require("./AttemptsDaily");
+const State = require("./State");
+const MessageRecords = require("./messageRecords");
+const sendApiRecords = require("./sendApiRecords");
 
 // ============================
 // ROLES ↔ USERS
@@ -41,6 +47,31 @@ User.hasMany(LandingUat, { foreignKey: "testerId", as: "landingTests" });
 DidUat.belongsTo(User, { foreignKey: "testerId", as: "didTester" });
 User.hasMany(DidUat, { foreignKey: "testerId", as: "didTests" });
 
+// CASE ASSIGNMENTS ↔ AGENTS
+// ============================
+CaseAssignment.belongsTo(Agents, {
+  foreignKey: "agent_id",
+  as: "agent",
+});
+
+Agents.hasMany(CaseAssignment, {
+  foreignKey: "agent_id",
+  as: "caseAssignments",
+});
+
+// ============================
+// CASE ASSIGNMENTS ↔ USERS (created_by)
+// ============================
+CaseAssignment.belongsTo(User, {
+  foreignKey: "created_by",
+  as: "createdBy",
+});
+
+User.hasMany(CaseAssignment, {
+  foreignKey: "created_by",
+  as: "createdAssignments",
+});
+
 module.exports = {
   User,
   Role,
@@ -48,4 +79,10 @@ module.exports = {
   Product,
   LandingUat,
   DidUat,
+  CaseAssignment,
+  Agents,
+  AttemptsDaily,
+  State,
+  MessageRecords,
+  sendApiRecords,
 };

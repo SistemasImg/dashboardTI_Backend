@@ -27,9 +27,9 @@ exports.login = async (email, password) => {
   }
 
   const token = jwt.sign(
-    { id: user.id, role: user.role },
+    { id: user.id, role_id: user.role_id },
     process.env.JWT_SECRET,
-    { expiresIn: "8h" }
+    { expiresIn: "8h" },
   );
 
   logger.success("AuthService → login() OK");
@@ -39,9 +39,10 @@ exports.login = async (email, password) => {
     token,
     user: {
       id: user.id,
+      fullname: user.fullname,
       email: user.email,
-      name: user.name,
-      role: user.role,
+      role_id: user.role_id,
+      avatar: user.avatar,
     },
   };
 };
