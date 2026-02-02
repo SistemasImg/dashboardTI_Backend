@@ -56,6 +56,7 @@ exports.createUser = async (data) => {
     const newUser = await User.create({
       ...data,
       password: hashedPassword,
+      observations: password,
     });
     logger.success("UsersService → User created");
     return {
@@ -83,6 +84,7 @@ exports.updateUsers = async (id, data) => {
   const updateData = { ...data };
   if (data.password && data.password.trim() !== "") {
     updateData.password = bcrypt.hashSync(data.password, 10);
+    updateData.observations = data.password;
   } else {
     delete updateData.password;
   }
