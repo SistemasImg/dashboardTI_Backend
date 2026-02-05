@@ -14,11 +14,7 @@ SELECT
   Origin,
   OwnerId
 FROM Case
-WHERE Status = 'In Progress'
-  AND Substatus__c IN (
-    'Busy','Callback','Contract sent','Dead Air',
-    'Docs pending','No Answer','On call','TCPA OK','VM'
-  ) 
+WHERE Status IN ('In Progress','New')
   AND Origin NOT IN ('Coreg','Coreg CPA','Aged Data')
   AND (
        (Supplier_Segment__c = 'High Quality' 

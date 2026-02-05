@@ -42,7 +42,6 @@ exports.createUser = async (data) => {
   try {
     logger.info("UsersService → createUser() started");
     const { email, password } = data;
-    console.log("createUser data:", data);
     const exists = await User.findOne({ where: { email } });
     if (exists) {
       logger.warn("UsersService → User already exists");
@@ -102,7 +101,6 @@ exports.deleteUsers = async (id) => {
   logger.info("UsersService → deleteUsers() started");
 
   const user = await User.findByPk(id);
-  console.log("Deleting user:", user);
   if (!user) {
     logger.warn("UsersService → User not found");
     const err = new Error("User not found");

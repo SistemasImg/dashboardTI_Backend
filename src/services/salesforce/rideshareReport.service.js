@@ -69,13 +69,15 @@ async function getRideshareReport(token) {
 
     // 4️⃣ Agent Assignments
     const assignmentMap = new Map();
-
     activeAssignments.forEach(({ case_number, agent }) => {
-      assignmentMap.set(case_number, agent.fullname);
+      assignmentMap.set(case_number, {
+        fullname: agent.fullname,
+        call_center: agent.call_center,
+      });
     });
+
     // 5️⃣ Merge Cases with Users
     const usersMap = new Map(usersData.map((user) => [user.id, user.name]));
-
     const casesWithSupplier = allCases.map((item) => {
       const phone = normalizeSFPhone(item.phoneNumber);
 
@@ -116,6 +118,7 @@ async function getRideshareReport(token) {
       return {
         ...item,
         ownerName: item?.ownerName || "Marketing Digital",
+        substatus: item?.substatus || "Pending",
         date1: today,
         attempts1: todayMap.get(phone) ?? 0,
 

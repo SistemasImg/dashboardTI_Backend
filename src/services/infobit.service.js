@@ -18,7 +18,6 @@ async function InfobitService(payload, user) {
     where: { fullname: dataValues.fullname },
   });
   logger.info("InfobitService → InfobitService() started");
-  console.log("Payload received in InfobitService:", payload);
   const { numberPhone, message } = payload;
   try {
     const { data } = await axios.post(
