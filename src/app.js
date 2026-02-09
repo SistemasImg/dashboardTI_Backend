@@ -49,6 +49,7 @@ app.use("/state", require("./routes/state.routes"));
 app.use("/api", require("./routes/apiSend.routes"));
 app.use("/owner", require("./routes/owner.routes"));
 app.use("/infobit", require("./routes/infobit.routes"));
+app.use("/mediaFiles", require("./routes/mediaFile.routes"));
 
 // ------------------------------
 // HEALTH CHECK (Render / Monitoring)

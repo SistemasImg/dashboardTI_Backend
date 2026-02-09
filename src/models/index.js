@@ -10,6 +10,7 @@ const AttemptsDaily = require("./attemptsDaily");
 const State = require("./state");
 const MessageRecords = require("./messageRecords");
 const sendApiRecords = require("./sendApiRecords");
+const MediaFiles = require("./mediaFile");
 
 // ============================
 // ROLES ↔ USERS
@@ -85,4 +86,5 @@ module.exports = {
   State,
   MessageRecords,
   sendApiRecords,
+  MediaFiles,
 };
