@@ -6,6 +6,8 @@ const { getPool } = require("./pool.service");
 
 async function getAttemptsByDate() {
   const pool = await getPool();
+  logger.info("💾 Upserting into MySQL...");
+
   return pool.request().query(buildAttemptsByDateQuery());
 }
 

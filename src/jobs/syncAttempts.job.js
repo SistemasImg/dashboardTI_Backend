@@ -22,10 +22,13 @@ async function syncAttemptsDaily() {
   logger.info("🔄 Starting syncAttemptsDaily job");
 
   try {
+    logger.info("📡 Fetching data from SQL Server...");
     const result = await getAttemptsByDate();
-    const rows = result.recordset || [];
 
-    logger.info(`📥 SQL Server rows: ${rows.length}`);
+    logger.info("📊 Raw SQL result received");
+
+    const rows = result?.recordset;
+    logger.info(`📥 Rows length: ${rows?.length}`);
 
     if (!rows.length) {
       logger.warn("⚠️ No rows returned from SQL Server");
@@ -58,6 +61,7 @@ async function syncAttemptsDaily() {
     logger.error("❌ syncAttemptsDaily failed", {
       message: error.message,
       stack: error.stack,
+      name: error.name,
     });
   }
 }
