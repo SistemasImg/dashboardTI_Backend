@@ -16,15 +16,3 @@ cron.schedule("*/10 * * * *", async () => {
     });
   }
 });
-
-// OPTIONAL: Run once at startup
-(async () => {
-  logger.info("🚀 Initial syncAttemptsDaily on server start");
-
-  try {
-    await syncAttemptsDaily();
-    logger.info("✅ Initial sync completed");
-  } catch (error) {
-    logger.error("❌ Initial sync failed", error);
-  }
-})();
