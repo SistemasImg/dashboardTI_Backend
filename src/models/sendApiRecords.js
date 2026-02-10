@@ -47,7 +47,7 @@ const sendApiRecords = sequelize.define(
     },
   },
   {
-    tableName: "sendApi_records",
+    tableName: "sendapi_records",
     timestamps: true,
     createdAt: "created_at",
     updatedAt: "updated_at",

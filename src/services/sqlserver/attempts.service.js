@@ -5,10 +5,27 @@ const { buildAttemptsTotalQuery } = require("./queries/totalAttemps.query");
 const { getPool } = require("./pool.service");
 
 async function getAttemptsByDate() {
-  const pool = await getPool();
-  logger.info("💾 Upserting into MySQL...");
+  try {
+    logger.info("📡 Connecting to SQL Server...");
 
-  return pool.request().query(buildAttemptsByDateQuery());
+    const pool = await sql.connect(sqlConfig);
+
+    logger.info("📡 SQL Server connected");
+
+    const result = await pool.request().query(MY_QUERY);
+
+    logger.info("📊 SQL query executed successfully");
+
+    return result;
+  } catch (error) {
+    logger.error("❌ SQL Server query failed", {
+      message: error.message,
+      stack: error.stack,
+      code: error.code,
+      name: error.name,
+    });
+    throw error; // 🔥 esto es CLAVE
+  }
 }
 
 async function getAttemptsTotal() {
