@@ -6,9 +6,10 @@ const PORT = process.env.PORT || 4000;
 
 sequelize
   .authenticate()
-  .then(() => {
+  .then(async () => {
     console.log("Connection to the established database");
     require("./jobs");
+
     app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
   })
   .catch((err) => console.error("Error connecting to database: ", err));

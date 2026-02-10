@@ -21,35 +21,45 @@ function normalizePhone(phone) {
 async function syncAttemptsDaily() {
   logger.info("🔄 Starting syncAttemptsDaily job");
 
-  const result = await getAttemptsByDate();
-  const rows = result.recordset;
+  try {
+    const result = await getAttemptsByDate();
+    const rows = result.recordset || [];
 
-  logger.info(`📥 SQL Server rows: ${rows.length}`);
+    logger.info(`📥 SQL Server rows: ${rows.length}`);
 
-  const grouped = new Map();
+    if (!rows.length) {
+      logger.warn("⚠️ No rows returned from SQL Server");
+      return;
+    }
 
-  for (const row of rows) {
-    const phone = normalizePhone(row.ANI);
-    if (!phone) continue;
+    const grouped = new Map();
 
-    const date = row.CallDate.toISOString().split("T")[0];
-    const key = `${phone}_${date}`;
+    for (const row of rows) {
+      const phone = normalizePhone(row.ANI);
+      if (!phone || !row.CallDate) continue;
 
-    grouped.set(key, {
-      phone,
-      call_date: date,
-      attempts: row.AttemptsSQL || 0,
+      const date = row.CallDate.toISOString().split("T")[0];
+
+      grouped.set(`${phone}_${date}`, {
+        phone,
+        call_date: date,
+        attempts: row.AttemptsSQL || 0,
+      });
+    }
+
+    logger.info(`📦 Records to upsert: ${grouped.size}`);
+
+    for (const record of grouped.values()) {
+      await AttemptsDaily.upsert(record);
+    }
+
+    logger.info("✅ syncAttemptsDaily completed");
+  } catch (error) {
+    logger.error("❌ syncAttemptsDaily failed", {
+      message: error.message,
+      stack: error.stack,
     });
   }
-
-  logger.info(`📦 Records to upsert: ${grouped.size}`);
-
-  // UPSERT en MySQL
-  for (const record of grouped.values()) {
-    await AttemptsDaily.upsert(record);
-  }
-
-  logger.info("✅ syncAttemptsDaily completed");
 }
 
 module.exports = {
