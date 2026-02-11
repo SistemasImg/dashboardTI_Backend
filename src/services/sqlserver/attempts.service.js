@@ -9,6 +9,7 @@ async function getAttemptsByDate() {
 
     const pool = await sqlServerPool.getPool();
 
+    console.log("SQL Server connection pool:", pool);
     logger.info("💾 Upserting into MySQL...");
 
     logger.info("📊 SQL query executed successfully");
