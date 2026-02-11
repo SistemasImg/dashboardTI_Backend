@@ -22,13 +22,10 @@ async function syncAttemptsDaily() {
   logger.info("🔄 Starting syncAttemptsDaily job");
 
   try {
-    logger.info("📡 Fetching data from SQL Server...");
     const result = await getAttemptsByDate();
+    const rows = result.recordset || [];
 
-    logger.info("📊 Raw SQL result received");
-
-    const rows = result?.recordset;
-    logger.info(`📥 Rows length: ${rows?.length}`);
+    logger.info(`📥 SQL Server rows: ${rows.length}`);
 
     if (!rows.length) {
       logger.warn("⚠️ No rows returned from SQL Server");
@@ -41,7 +38,16 @@ async function syncAttemptsDaily() {
       const phone = normalizePhone(row.ANI);
       if (!phone || !row.CallDate) continue;
 
-      const date = row.CallDate.toISOString().split("T")[0];
+      const callDateObj = new Date(row.CallDate);
+
+      if (isNaN(callDateObj.getTime())) {
+        logger.warn("⚠️ Invalid CallDate detected", {
+          rawValue: row.CallDate,
+        });
+        continue;
+      }
+
+      const date = callDateObj.toISOString().split("T")[0];
 
       grouped.set(`${phone}_${date}`, {
         phone,
@@ -58,11 +64,10 @@ async function syncAttemptsDaily() {
 
     logger.info("✅ syncAttemptsDaily completed");
   } catch (error) {
-    logger.error("❌ syncAttemptsDaily failed", {
-      message: error.message,
-      stack: error.stack,
-      name: error.name,
-    });
+    console.error("❌ FULL ERROR OBJECT:");
+    console.dir(error, { depth: null });
+
+    logger.error("❌ syncAttemptsDaily failed", error);
   }
 }
 

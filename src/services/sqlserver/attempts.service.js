@@ -1,22 +1,19 @@
-const sql = require("mssql");
-const sqlConfig = require("../../config/sqlserver");
+const logger = require("../../utils/logger");
 const { buildAttemptsByDateQuery } = require("./queries/attempts.query");
 const { buildAttemptsTotalQuery } = require("./queries/totalAttemps.query");
-const { getPool } = require("./pool.service");
+const sqlServerPool = require("../../services/sqlserver/pool.service");
 
 async function getAttemptsByDate() {
   try {
     logger.info("📡 Connecting to SQL Server...");
 
-    const pool = await sql.connect(sqlConfig);
+    const pool = await sqlServerPool.getPool();
 
-    logger.info("📡 SQL Server connected");
-
-    const result = await pool.request().query(MY_QUERY);
+    logger.info("💾 Upserting into MySQL...");
 
     logger.info("📊 SQL query executed successfully");
 
-    return result;
+    return pool.request().query(buildAttemptsByDateQuery());
   } catch (error) {
     logger.error("❌ SQL Server query failed", {
       message: error.message,
@@ -24,12 +21,11 @@ async function getAttemptsByDate() {
       code: error.code,
       name: error.name,
     });
-    throw error; // 🔥 esto es CLAVE
   }
 }
 
 async function getAttemptsTotal() {
-  const pool = await sql.connect(sqlConfig);
+  const pool = await sqlServerPool.getPool();
 
   const results = await pool.request().query(buildAttemptsTotalQuery());
   return results;
