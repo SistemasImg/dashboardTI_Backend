@@ -13,15 +13,22 @@ async function getAttemptsByDate() {
     logger.info("💾 Upserting into MySQL...");
 
     logger.info("📊 SQL query executed successfully");
+    const query = buildAttemptsByDateQuery();
+    console.log("QUERY BEING EXECUTED:", query);
 
     return pool.request().query(buildAttemptsByDateQuery());
+    // } catch (error) {
+    //   logger.error("❌ SQL Server query failed", {
+    //     message: error.message,
+    //     stack: error.stack,
+    //     code: error.code,
+    //     name: error.name,
+    //   });
+    // }
   } catch (error) {
-    logger.error("❌ SQL Server query failed", {
-      message: error.message,
-      stack: error.stack,
-      code: error.code,
-      name: error.name,
-    });
+    console.error("❌ SQL SERVER REAL ERROR:");
+    console.dir(error, { depth: null });
+    throw error;
   }
 }
 
