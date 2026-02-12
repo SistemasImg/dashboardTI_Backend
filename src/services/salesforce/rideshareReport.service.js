@@ -75,12 +75,10 @@ async function getRideshareReport(token) {
         call_center: agent.call_center,
       });
     });
-
     // 5️⃣ Merge Cases with Users
     const usersMap = new Map(usersData.map((user) => [user.id, user.name]));
     const casesWithSupplier = allCases.map((item) => {
       const phone = normalizeSFPhone(item.phoneNumber);
-
       return {
         ...item,
         phone,
@@ -143,7 +141,9 @@ async function getRideshareReport(token) {
       });
       if (agent) {
         finalCases = finalCases.filter(
-          (item) => item?.assignedAgent === agent.dataValues.fullname,
+          (item) =>
+            item.assignedAgent &&
+            item.assignedAgent.fullname === agent.dataValues.fullname,
         );
       } else {
         finalCases = [];

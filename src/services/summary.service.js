@@ -1,6 +1,9 @@
+const { Op, fn, col } = require("sequelize");
+
 const {
   User,
   Agents,
+  Role,
   CaseAssignment,
   AttemptsDaily,
   MessageRecords,
@@ -9,6 +12,7 @@ const {
 
 const sqlServerPool = require("./sqlserver/pool.service");
 const { authenticateSalesforce } = require("./salesforce/auth.service");
+const { sendServiceAlertEmail } = require("./email.service");
 
 const getSummary = async () => {
   // ========================
@@ -16,8 +20,23 @@ const getSummary = async () => {
   // ========================
   const totalUsers = await User.count();
   const lastUser = await User.findOne({
-    order: [["id", "DESC"]],
-    attributes: ["id", "fullname", "role_id", "created_at"],
+    where: {
+      email: {
+        [Op.notLike]: "%@abc.com",
+        [Op.and]: [
+          { [Op.notLike]: "%@callzent.com" },
+          { [Op.notLike]: "%@vendamolo.com" },
+        ],
+      },
+    },
+    include: [
+      {
+        model: Role,
+        attributes: ["name"], // 👈 nombre del rol
+      },
+    ],
+    order: [["created_at", "DESC"]],
+    attributes: ["id", "fullname", "created_at"],
   });
 
   // ========================
@@ -36,7 +55,31 @@ const getSummary = async () => {
   // ========================
   // ATTEMPTS DAILY
   // ========================
-  const totalAttemptsDaily = await AttemptsDaily.count();
+  const lastDateResult = await AttemptsDaily.findOne({
+    attributes: [[fn("MAX", col("call_date")), "lastDate"]],
+    raw: true,
+  });
+
+  const lastDate = lastDateResult?.lastDate;
+
+  let attemptsDailyProm = 0;
+
+  if (lastDate) {
+    const attemptsOfLastDate = await AttemptsDaily.findAll({
+      where: { call_date: lastDate },
+      attributes: ["attempts"],
+      raw: true,
+    });
+
+    const total = attemptsOfLastDate.reduce(
+      (sum, row) => sum + Number(row.attempts || 0),
+      0,
+    );
+    attemptsDailyProm =
+      attemptsOfLastDate.length > 0
+        ? Math.round(total / attemptsOfLastDate.length)
+        : 0;
+  }
 
   // ========================
   // INFOBIT MESSAGES
@@ -67,6 +110,11 @@ const getSummary = async () => {
     sqlServerStatus = "error";
   }
 
+  await sendServiceAlertEmail({
+    salesforce: salesforceStatus,
+    sqlserver: sqlServerStatus,
+  });
+
   return {
     users: {
       total: totalUsers,
@@ -80,7 +128,7 @@ const getSummary = async () => {
       total: totalCaseAssignments,
     },
     attemptsDaily: {
-      total: totalAttemptsDaily,
+      total: attemptsDailyProm,
     },
     infobitMessages: {
       total: totalInfobitMessages,
