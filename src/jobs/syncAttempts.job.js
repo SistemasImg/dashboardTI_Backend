@@ -23,7 +23,6 @@ async function syncAttemptsDaily() {
 
   try {
     const result = await getAttemptsByDate();
-    console.log("SQL Server query result:", result);
     const rows = result?.recordset || [];
 
     logger.info(`📥 SQL Server rows: ${rows.length}`);
