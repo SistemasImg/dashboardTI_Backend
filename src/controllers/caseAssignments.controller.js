@@ -1,5 +1,26 @@
 const logger = require("../utils/logger");
-const { assignAgent } = require("../services/caseAssignments.service");
+const {
+  assignAgent,
+  getActiveAssignments,
+} = require("../services/caseAssignments.service");
+
+async function activeAssignments(req, res, next) {
+  logger.info("CaseAssignmentsController → getActiveAssignments() called");
+
+  try {
+    const result = await getActiveAssignments();
+
+    logger.success(
+      "CaseAssignmentsController → getActiveAssignments() completed successfully",
+    );
+    return res.json(result);
+  } catch (error) {
+    logger.error(
+      `CaseAssignmentsController → getActiveAssignments() error: ${error.message}`,
+    );
+    next(error);
+  }
+}
 
 async function assignAgentToCase(req, res) {
   try {
@@ -20,13 +41,13 @@ async function assignAgentToCase(req, res) {
     logger.info(
       `Assignment updated successfully | case: ${caseNumber} | agent: ${
         agentId ?? "removed"
-      } | user: ${userId}`
+      } | user: ${userId}`,
     );
 
     res.json({ message: "Assignment updated successfully" });
   } catch (error) {
     logger.error(
-      `Assign Agent Error | case: ${req.body.caseNumber} | error: ${error.message}`
+      `Assign Agent Error | case: ${req.body.caseNumber} | error: ${error.message}`,
     );
 
     res.status(500).json({ message: "Error assigning agent" });
@@ -35,4 +56,5 @@ async function assignAgentToCase(req, res) {
 
 module.exports = {
   assignAgentToCase,
+  activeAssignments,
 };

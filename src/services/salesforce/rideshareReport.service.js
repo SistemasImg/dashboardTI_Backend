@@ -75,8 +75,10 @@ async function getRideshareReport(token) {
         call_center: agent.call_center,
       });
     });
+
     // 5️⃣ Merge Cases with Users
     const usersMap = new Map(usersData.map((user) => [user.id, user.name]));
+
     const casesWithSupplier = allCases.map((item) => {
       const phone = normalizeSFPhone(item.phoneNumber);
       return {
