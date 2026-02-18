@@ -32,7 +32,7 @@ const getSummary = async () => {
     include: [
       {
         model: Role,
-        attributes: ["name"], // 👈 nombre del rol
+        attributes: ["name"],
       },
     ],
     order: [["created_at", "DESC"]],
