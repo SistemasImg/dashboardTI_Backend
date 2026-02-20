@@ -1,3 +1,4 @@
+const { Op, fn, col, where } = require("sequelize");
 const { CaseAssignment, Agents } = require("../models");
 const logger = require("../utils/logger");
 
@@ -5,11 +6,21 @@ const logger = require("../utils/logger");
  * Get all active case assignments
  */
 async function getActiveAssignments() {
-  logger.info("Fetching active case assignments");
+  logger.info("Fetching active case assignments (today only)");
+
+  const todayStart = new Date();
+  todayStart.setHours(0, 0, 0, 0);
+
+  const tomorrowStart = new Date(todayStart);
+  tomorrowStart.setDate(tomorrowStart.getDate() + 1);
 
   return CaseAssignment.findAll({
     where: {
       unassigned_at: null,
+      created_at: {
+        [Op.gte]: todayStart,
+        [Op.lt]: tomorrowStart,
+      },
     },
     include: [
       {
@@ -48,14 +59,14 @@ async function closeActiveAssignment(caseNumber) {
         case_number: caseNumber,
         unassigned_at: null,
       },
-    }
+    },
   );
 }
 
 //Create a new case assignment
 async function createAssignment({ caseNumber, agentId, userId }) {
   logger.info(
-    `Creating new assignment | case: ${caseNumber} | agent: ${agentId} | user: ${userId}`
+    `Creating new assignment | case: ${caseNumber} | agent: ${agentId} | user: ${userId}`,
   );
 
   return CaseAssignment.create({

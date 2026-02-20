@@ -1,4 +1,4 @@
-const { Op, fn, col } = require("sequelize");
+const { Op, fn, col, where } = require("sequelize");
 
 const {
   User,
@@ -50,7 +50,22 @@ const getSummary = async () => {
   // ========================
   // CASE ASSIGNMENTS
   // ========================
-  const totalCaseAssignments = await CaseAssignment.count();
+  const lastAssignmentDateResult = await CaseAssignment.findOne({
+    attributes: [[fn("MAX", fn("DATE", col("created_at"))), "lastDate"]],
+    raw: true,
+  });
+
+  const lastAssignmentDate = lastAssignmentDateResult?.lastDate;
+
+  let totalCaseAssignments = 0;
+
+  if (lastAssignmentDate) {
+    totalCaseAssignments = await CaseAssignment.count({
+      distinct: true,
+      col: "case_number",
+      where: where(fn("DATE", col("created_at")), lastAssignmentDate),
+    });
+  }
 
   // ========================
   // ATTEMPTS DAILY
