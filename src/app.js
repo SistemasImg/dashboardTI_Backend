@@ -21,17 +21,10 @@ const { loginLimiter } = require("./config/rateLimiter.config");
 app.use("/auth/login", loginLimiter);
 
 // ------------------------------
-// 4. JSON PARSER
+// 4. BODY PARSER
 // ------------------------------
 app.use(express.json({ limit: "200kb" }));
-
-// specific route with larger limit
-// const controller = require("./controllers/uat.controller").handleUAT;
-// app.post(
-//   "/api/uat",
-//   express.json({ limit: "300kb" }),
-//   controller
-// );
+app.use(express.urlencoded({ extended: true }));
 
 // ------------------------------
 // 5. ROUTES
@@ -51,6 +44,9 @@ app.use("/owner", require("./routes/owner.routes"));
 app.use("/infobit", require("./routes/infobit.routes"));
 app.use("/mediaFiles", require("./routes/mediaFile.routes"));
 app.use("/summary", require("./routes/summary.routes"));
+app.use("/gravity-to-ghl", require("./routes/ghl/gravityForms.routes"));
+app.use("/ghl-to-salesforce", require("./routes/ghl/ghlSubStatus.routes"));
+app.use("/salesforce-to-ghl", require("./routes/ghl/subStatus.routes"));
 
 // ------------------------------
 // HEALTH CHECK (Render / Monitoring)
