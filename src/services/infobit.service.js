@@ -36,7 +36,7 @@ async function InfobitService(payload, user) {
       {
         headers: {
           Authorization:
-            "App 2418b40d853e9a5bcacc1b8978752985-37b0cfc5-b640-4b8c-a3ac-cf3d13ba13b9",
+            "App 95cd9e5ab9b979b42403ef6d8ff68464-c833e533-3301-4d55-84a1-92520cef9647",
           "Content-Type": "application/json",
         },
         httpsAgent,
@@ -49,7 +49,7 @@ async function InfobitService(payload, user) {
     await MessageRecords.create({
       numberphone: numberPhone,
       message,
-      id_agent: agent.dataValues.id,
+      id_agent: agent?.dataValues.id || 1,
       bulkId: data.bulkId,
       messageId: response.messageId,
       groupName: response.status.groupName,
