@@ -47,6 +47,7 @@ app.use("/summary", require("./routes/summary.routes"));
 app.use("/gravity-to-ghl", require("./routes/ghl/gravityForms.routes"));
 app.use("/ghl-to-salesforce", require("./routes/ghl/ghlSubStatus.routes"));
 app.use("/salesforce-to-ghl", require("./routes/ghl/subStatus.routes"));
+app.use("/chatbot", require("./modules/chatbot/chatbot.routes"));
 
 // ------------------------------
 // HEALTH CHECK (Render / Monitoring)

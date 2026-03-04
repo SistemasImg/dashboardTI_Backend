@@ -17,7 +17,7 @@ async function runSoqlQuery(sf, soql, retries = 2) {
           Authorization: `Bearer ${sf.accessToken}`,
         },
         params: { q: soql },
-      }
+      },
     );
 
     return response.data.records;
@@ -30,6 +30,31 @@ async function runSoqlQuery(sf, soql, retries = 2) {
   }
 }
 
+async function runSoqlQueryFull(sf, soql, retries = 2) {
+  try {
+    const response = await axios.get(
+      `${sf.instanceUrl}/services/data/${salesforceConfig.apiVersion}/query`,
+      {
+        httpsAgent,
+        timeout: 30000,
+        headers: {
+          Authorization: `Bearer ${sf.accessToken}`,
+        },
+        params: { q: soql },
+      },
+    );
+
+    return response.data;
+  } catch (error) {
+    if (retries > 0) {
+      console.warn("Retrying SOQL query...", retries);
+      return runSoqlQueryFull(sf, soql, retries - 1);
+    }
+    throw error;
+  }
+}
+
 module.exports = {
   runSoqlQuery,
+  runSoqlQueryFull,
 };
