@@ -1,16 +1,10 @@
 const { AzureOpenAI } = require("openai");
 const logger = require("../../utils/logger");
-const https = require("https");
-
-const httpsAgent = new https.Agent({
-  rejectUnauthorized: false,
-});
 
 const client = new AzureOpenAI({
   apiKey: process.env.AZURE_OPENAI_KEY,
   endpoint: process.env.AZURE_OPENAI_ENDPOINT.replace(/\/$/, ""),
   apiVersion: process.env.AZURE_OPENAI_API_VERSION,
-  httpsAgent,
 });
 
 exports.askModel = async (messages) => {
@@ -91,6 +85,144 @@ exports.askModel = async (messages) => {
               email: { type: "string" },
             },
             required: ["email"],
+          },
+        },
+        {
+          name: "getCasesByOrigin",
+          description: "Get cases filtered by Origin",
+          parameters: {
+            type: "object",
+            properties: {
+              origin: { type: "string" },
+            },
+            required: ["origin"],
+          },
+        },
+        {
+          name: "getCasesBySupplierSegment",
+          description: "Get cases filtered by Supplier Segment",
+          parameters: {
+            type: "object",
+            properties: {
+              segment: { type: "string" },
+            },
+            required: ["segment"],
+          },
+        },
+        {
+          name: "getCasesBySubstatus",
+          description: "Get cases filtered by Substatus",
+          parameters: {
+            type: "object",
+            properties: {
+              substatus: { type: "string" },
+            },
+            required: ["substatus"],
+          },
+        },
+        {
+          name: "getCasesByType",
+          description: "Get cases filtered by Type",
+          parameters: {
+            type: "object",
+            properties: {
+              type: { type: "string" },
+            },
+            required: ["type"],
+          },
+        },
+        {
+          name: "getCasesGroupedByField",
+          description:
+            "Group cases by a specific field like Status, Origin, Type or Supplier_Segment__c",
+          parameters: {
+            type: "object",
+            properties: {
+              field: { type: "string" },
+              dateKeyword: {
+                type: "string",
+                enum: ["today", "yesterday"],
+              },
+            },
+            required: ["field"],
+          },
+        },
+        {
+          name: "getCasesByFilters",
+          description:
+            "Get cases using combined filters such as status, origin, segment, type, substatus and date",
+          parameters: {
+            type: "object",
+            properties: {
+              status: { type: "string" },
+              origin: { type: "string" },
+              segment: { type: "string" },
+              type: { type: "string" },
+              substatus: { type: "string" },
+              dateKeyword: {
+                type: "string",
+                enum: ["today", "yesterday"],
+              },
+            },
+          },
+        },
+        {
+          name: "getOperationalSummary",
+          description:
+            "Get operational summary of cases for today or yesterday",
+          parameters: {
+            type: "object",
+            properties: {
+              dateKeyword: {
+                type: "string",
+                enum: ["today", "yesterday"],
+              },
+            },
+            required: ["dateKeyword"],
+          },
+        },
+        {
+          name: "getCasesByAgent",
+          description: "Get cases assigned to a specific agent",
+          parameters: {
+            type: "object",
+            properties: {
+              agentName: { type: "string" },
+            },
+            required: ["agentName"],
+          },
+        },
+        {
+          name: "getCasesByCallCenter",
+          description: "Get cases assigned to a specific call center",
+          parameters: {
+            type: "object",
+            properties: {
+              callCenter: { type: "string" },
+            },
+            required: ["callCenter"],
+          },
+        },
+        {
+          name: "getTotalAttemptsByAgent",
+          description: "Get total attempts of a specific agent",
+          parameters: {
+            type: "object",
+            properties: {
+              agentName: { type: "string" },
+            },
+            required: ["agentName"],
+          },
+        },
+        {
+          name: "getCasesByTypeFromReport",
+          description: "Get cases filtered by type from rideshare report",
+          parameters: {
+            type: "object",
+            properties: {
+              type: { type: "string" },
+            },
+            required: ["type"],
           },
         },
       ],

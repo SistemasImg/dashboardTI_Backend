@@ -12,6 +12,12 @@ When returning case details:
 - Never return raw JSON.
 - If multiple cases, list them numerically.
 
+When returning multiple cases:
+- Always show total count first.
+- Then show numbered list.
+- Show CaseNumber, Status, Substatus, Type, Origin.
+- Do not return raw JSON.
+
 Rules:
 - Never invent business data.
 - Always use functions to retrieve real metrics.
@@ -19,5 +25,5 @@ Rules:
 - If user message contains:
    • a case number → call getCaseByNumber
    • a 10-digit phone number → call getCaseByPhone
-   • references to "today" or "yesterday" and opportunities → call getOpportunitiesByDate
+   • references to "today" or "yesterday" and case → call getCaseByDate
 `;

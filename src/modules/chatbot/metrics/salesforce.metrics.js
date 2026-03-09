@@ -1,4 +1,5 @@
 const logger = require("../../../utils/logger");
+const { normalizeDateRange } = require("../../../utils/dateNormalizer");
 
 const {
   authenticateSalesforce,
@@ -56,8 +57,21 @@ exports.getCaseByNumber = async (caseNumber) => {
     const sf = await authenticateSalesforce();
 
     const soql = `
-      SELECT Id, CaseNumber, Status, Substatus__c, Owner.Name, CreatedDate
-      FROM Case
+   SELECT   
+        Id,
+        CaseNumber,
+        Status,
+        Substatus__c,
+        Type,
+        Origin,
+        Supplier_Segment__c,
+        Email__c,
+        Phone_Numbercontact__c,
+        Owner.Name,
+        FullName__c,
+        CreatedDate,
+        LastModifiedDate
+        FROM Case
       WHERE CaseNumber = '${caseNumber}'
       LIMIT 1
     `;
@@ -87,10 +101,23 @@ exports.getCasesByStatus = async (status) => {
     const sf = await authenticateSalesforce();
 
     const soql = `
-      SELECT Id, CaseNumber, Status, Substatus__c
-      FROM Case
+   SELECT   
+        Id,
+        CaseNumber,
+        Status,
+        Substatus__c,
+        Type,
+        Origin,
+        Supplier_Segment__c,
+        Email__c,
+        Phone_Numbercontact__c,
+        Owner.Name,
+        FullName__c,
+        CreatedDate,
+        LastModifiedDate
+        FROM Case
       WHERE Status = '${status}'
-      LIMIT 50
+      LIMIT 30
     `;
 
     const result = await runSoqlQueryFull(sf, soql);
@@ -107,6 +134,7 @@ exports.getCasesByStatus = async (status) => {
 exports.getCasesByDateRange = async (startDate, endDate) => {
   try {
     const sf = await authenticateSalesforce();
+    const { startUTC, endUTC } = normalizeDateRange(startDate, endDate);
 
     const soql = `
         SELECT   
@@ -124,8 +152,8 @@ exports.getCasesByDateRange = async (startDate, endDate) => {
         CreatedDate,
         LastModifiedDate
         FROM Case
-        WHERE CreatedDate >= ${startDate}
-        AND CreatedDate <= ${endDate}
+      WHERE CreatedDate >= ${startUTC}
+      AND CreatedDate < ${endUTC}
         ORDER BY CreatedDate DESC
     `;
 
@@ -162,7 +190,7 @@ exports.getCaseByPhone = async (phone) => {
         CreatedDate,
         LastModifiedDate
         FROM Case
-      WHERE Phone LIKE '%${cleanPhone}'
+      WHERE Phone_Numbercontact__c LIKE '%${cleanPhone}'
     `;
 
     const result = await runSoqlQueryFull(sf, soql);
@@ -193,7 +221,7 @@ exports.getCaseByEmail = async (email) => {
         CreatedDate,
         LastModifiedDate
         FROM Case
-      WHERE ContactEmail LIKE '%${email}%'
+      WHERE Email__c LIKE '%${email}%'
     `;
 
     const result = await runSoqlQueryFull(sf, soql);
@@ -201,5 +229,268 @@ exports.getCaseByEmail = async (email) => {
     return result.records;
   } catch (error) {
     throw new Error("SF_EMAIL_QUERY_FAILED");
+  }
+};
+
+exports.getCasesByOrigin = async (origin) => {
+  try {
+    const sf = await authenticateSalesforce();
+
+    const soql = `
+      SELECT
+        Id,
+        CaseNumber,
+        Status,
+        Substatus__c,
+        Type,
+        Origin,
+        Supplier_Segment__c,
+        Owner.Name,
+        CreatedDate
+      FROM Case
+      WHERE Origin = '${origin}'
+      ORDER BY CreatedDate DESC
+      LIMIT 30
+    `;
+
+    const result = await runSoqlQueryFull(sf, soql);
+
+    return {
+      total: result.totalSize,
+      records: result.records,
+    };
+  } catch (error) {
+    throw new Error("SF_ORIGIN_QUERY_FAILED");
+  }
+};
+
+exports.getCasesBySupplierSegment = async (segment) => {
+  try {
+    const sf = await authenticateSalesforce();
+
+    const soql = `
+      SELECT
+        Id,
+        CaseNumber,
+        Status,
+        Substatus__c,
+        Type,
+        Origin,
+        Supplier_Segment__c,
+        Owner.Name,
+        CreatedDate
+      FROM Case
+      WHERE Supplier_Segment__c = '${segment}'
+      ORDER BY CreatedDate DESC
+      LIMIT 30
+    `;
+
+    const result = await runSoqlQueryFull(sf, soql);
+
+    return {
+      total: result.totalSize,
+      records: result.records,
+    };
+  } catch (error) {
+    throw new Error("SF_SEGMENT_QUERY_FAILED");
+  }
+};
+
+exports.getCasesBySubstatus = async (substatus) => {
+  try {
+    const sf = await authenticateSalesforce();
+
+    const soql = `
+      SELECT
+        Id,
+        CaseNumber,
+        Status,
+        Substatus__c,
+        Type,
+        Origin,
+        Supplier_Segment__c,
+        Owner.Name,
+        CreatedDate
+      FROM Case
+      WHERE Substatus__c = '${substatus}'
+      ORDER BY CreatedDate DESC
+      LIMIT 30
+    `;
+
+    const result = await runSoqlQueryFull(sf, soql);
+
+    return {
+      total: result.totalSize,
+      records: result.records,
+    };
+  } catch (error) {
+    throw new Error("SF_SUBSTATUS_QUERY_FAILED");
+  }
+};
+
+exports.getCasesByType = async (type) => {
+  try {
+    const sf = await authenticateSalesforce();
+
+    const soql = `
+      SELECT
+        Id,
+        CaseNumber,
+        Status,
+        Substatus__c,
+        Type,
+        Origin,
+        Supplier_Segment__c,
+        Owner.Name,
+        CreatedDate
+      FROM Case
+      WHERE Type = '${type}'
+      ORDER BY CreatedDate DESC
+      LIMIT 30
+    `;
+
+    const result = await runSoqlQueryFull(sf, soql);
+
+    return {
+      total: result.totalSize,
+      records: result.records,
+    };
+  } catch (error) {
+    throw new Error("SF_TYPE_QUERY_FAILED");
+  }
+};
+
+exports.getCasesGroupedByField = async (field, dateKeyword = null) => {
+  try {
+    const sf = await authenticateSalesforce();
+
+    let dateFilter = "";
+    if (dateKeyword) {
+      dateFilter = `AND CreatedDate = ${dateKeyword}`;
+    }
+
+    const soql = `
+      SELECT
+        Id,
+        CaseNumber,
+        Status,
+        Substatus__c,
+        Type,
+        Origin,
+        Supplier_Segment__c,
+        Owner.Name,
+        ${field}
+      FROM Case
+      WHERE ${field} != null
+      ${dateFilter}
+      ORDER BY ${field}, CreatedDate DESC
+      LIMIT 200
+    `;
+
+    const result = await runSoqlQueryFull(sf, soql);
+
+    return result.records;
+  } catch (error) {
+    throw new Error("SF_GROUP_QUERY_FAILED");
+  }
+};
+
+exports.getCasesByFilters = async (filters) => {
+  try {
+    const sf = await authenticateSalesforce();
+
+    const conditions = [];
+
+    if (filters.status) conditions.push(`Status = '${filters.status}'`);
+
+    if (filters.origin) conditions.push(`Origin = '${filters.origin}'`);
+
+    if (filters.segment)
+      conditions.push(`Supplier_Segment__c = '${filters.segment}'`);
+
+    if (filters.type) conditions.push(`Type = '${filters.type}'`);
+
+    if (filters.substatus)
+      conditions.push(`Substatus__c = '${filters.substatus}'`);
+
+    if (filters.dateKeyword)
+      conditions.push(`CreatedDate = ${filters.dateKeyword}`);
+
+    const whereClause = conditions.length
+      ? `WHERE ${conditions.join(" AND ")}`
+      : "";
+
+    const soql = `
+      SELECT
+        Id,
+        CaseNumber,
+        Status,
+        Substatus__c,
+        Type,
+        Origin,
+        Supplier_Segment__c,
+        Owner.Name,
+        CreatedDate
+      FROM Case
+      ${whereClause}
+      ORDER BY CreatedDate DESC
+      LIMIT 30
+    `;
+
+    const result = await runSoqlQueryFull(sf, soql);
+
+    return {
+      total: result.totalSize,
+      records: result.records,
+    };
+  } catch (error) {
+    throw new Error("SF_DYNAMIC_FILTER_FAILED");
+  }
+};
+
+exports.getOperationalSummary = async (dateKeyword) => {
+  try {
+    const sf = await authenticateSalesforce();
+
+    const soql = `
+      SELECT
+        Id,
+        CaseNumber,
+        Status,
+        Substatus__c,
+        Origin,
+        Supplier_Segment__c,
+        Owner.Name
+      FROM Case
+      WHERE CreatedDate = ${dateKeyword}
+      LIMIT 100
+    `;
+
+    const result = await runSoqlQueryFull(sf, soql);
+
+    const records = result.records;
+
+    const summary = {
+      total: records.length,
+      byStatus: {},
+      byOrigin: {},
+      bySegment: {},
+    };
+
+    records.forEach((c) => {
+      summary.byStatus[c.Status] = (summary.byStatus[c.Status] || 0) + 1;
+
+      summary.byOrigin[c.Origin] = (summary.byOrigin[c.Origin] || 0) + 1;
+
+      summary.bySegment[c.Supplier_Segment__c] =
+        (summary.bySegment[c.Supplier_Segment__c] || 0) + 1;
+    });
+
+    return {
+      summary,
+      sampleCases: records.slice(0, 10),
+    };
+  } catch (error) {
+    throw new Error("SF_SUMMARY_FAILED");
   }
 };
