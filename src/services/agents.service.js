@@ -4,7 +4,11 @@ const { Agents } = require("../models");
 exports.allAgents = async () => {
   logger.info("AgentsService → allAgents() started");
 
-  const agents = await Agents.findAll();
+  const agents = await Agents.findAll({
+    where: {
+      status: "active",
+    },
+  });
 
   if (!agents || agents.length === 0) {
     logger.warn("AgentsService → No agents found");
