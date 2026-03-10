@@ -1,4 +1,5 @@
-const { Op, fn, col, where } = require("sequelize");
+const { DateTime } = require("luxon");
+const { Op } = require("sequelize");
 const { CaseAssignment, Agents } = require("../models");
 const logger = require("../utils/logger");
 
@@ -8,11 +9,13 @@ const logger = require("../utils/logger");
 async function getActiveAssignments() {
   logger.info("Fetching active case assignments (today only)");
 
-  const todayStart = new Date();
-  todayStart.setHours(0, 0, 0, 0);
-
-  const tomorrowStart = new Date(todayStart);
-  tomorrowStart.setDate(tomorrowStart.getDate() + 1);
+  const peruNow = DateTime.now().setZone("America/Lima");
+  const todayStart = peruNow.startOf("day").toUTC().toJSDate();
+  const tomorrowStart = peruNow
+    .plus({ days: 1 })
+    .startOf("day")
+    .toUTC()
+    .toJSDate();
 
   return CaseAssignment.findAll({
     where: {
