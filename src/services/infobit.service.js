@@ -3,6 +3,7 @@ const https = require("https");
 const logger = require("../utils/logger");
 const jwt = require("jsonwebtoken");
 const { MessageRecords, User, Agents } = require("../models");
+const e = require("cors");
 
 const httpsAgent = new https.Agent({
   rejectUnauthorized: false,
@@ -66,6 +67,7 @@ async function InfobitService(payload, user) {
       "InfobitService → error",
       error.response?.data || error.message,
     );
+    console.error(error);
     throw error;
   }
 }

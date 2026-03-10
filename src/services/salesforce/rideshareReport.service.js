@@ -39,11 +39,14 @@ function normalizeSFPhone(phone) {
 
 async function getRideshareReport(token) {
   try {
-    const decoded = jwt.verify(token, process.env.JWT_SECRET);
-    const userId = decoded.id;
-    logger.info(
-      `Usuario ejecutando reporte: ${userId}, Role: ${decoded.role_id}`,
-    );
+    let decoded = null;
+    if (token) {
+      const decoded = jwt.verify(token, process.env.JWT_SECRET);
+      const userId = decoded.id;
+      logger.info(
+        `Usuario ejecutando reporte: ${userId}, Role: ${decoded.role_id}`,
+      );
+    }
 
     // 1️⃣ Auth Salesforce
     const sf = await authenticateSalesforce();
@@ -96,7 +99,6 @@ async function getRideshareReport(token) {
     const twoDaysAgo = new Date(Date.now() - 2 * 86400000)
       .toISOString()
       .split("T")[0];
-
     const todayMap = new Map();
     const yesterdayMap = new Map();
     const twoDaysAgoMap = new Map();
@@ -135,20 +137,22 @@ async function getRideshareReport(token) {
     });
 
     //Intake User Role Filtering
-    if (decoded.role_id === 4 || decoded.role_id === 5) {
-      const { dataValues } = await User.findByPk(userId);
-      if (!dataValues) throw new Error("user not found");
-      const agent = await Agents.findOne({
-        where: { fullname: dataValues.fullname },
-      });
-      if (agent) {
-        finalCases = finalCases.filter(
-          (item) =>
-            item.assignedAgent &&
-            item.assignedAgent.fullname === agent.dataValues.fullname,
-        );
-      } else {
-        finalCases = [];
+    if (decoded) {
+      if (decoded.role_id === 4 || decoded.role_id === 5) {
+        const { dataValues } = await User.findByPk(userId);
+        if (!dataValues) throw new Error("user not found");
+        const agent = await Agents.findOne({
+          where: { fullname: dataValues.fullname },
+        });
+        if (agent) {
+          finalCases = finalCases.filter(
+            (item) =>
+              item.assignedAgent &&
+              item.assignedAgent.fullname === agent.dataValues.fullname,
+          );
+        } else {
+          finalCases = [];
+        }
       }
     }
 

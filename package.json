@@ -15,6 +15,7 @@
     "axios": "^1.13.2",
     "bcryptjs": "^3.0.2",
     "cors": "^2.8.5",
+    "dayjs": "^1.11.19",
     "dotenv": "^16.4.7",
     "express": "^4.21.2",
     "express-mongo-sanitize": "^2.2.0",
@@ -26,6 +27,7 @@
     "mysql2": "^3.14.0",
     "node-cron": "^4.2.1",
     "nodemailer": "^8.0.1",
+    "openai": "^6.25.0",
     "sequelize": "^6.37.6",
     "xss-clean": "^0.1.4"
   },
