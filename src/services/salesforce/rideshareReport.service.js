@@ -40,9 +40,10 @@ function normalizeSFPhone(phone) {
 async function getRideshareReport(token) {
   try {
     let decoded = null;
+    let userId = null;
     if (token) {
-      const decoded = jwt.verify(token, process.env.JWT_SECRET);
-      const userId = decoded.id;
+      decoded = jwt.verify(token, process.env.JWT_SECRET);
+      userId = decoded.id;
       logger.info(
         `Usuario ejecutando reporte: ${userId}, Role: ${decoded.role_id}`,
       );
@@ -137,7 +138,7 @@ async function getRideshareReport(token) {
     });
 
     //Intake User Role Filtering
-    if (decoded) {
+    if (token) {
       if (decoded.role_id === 4 || decoded.role_id === 5) {
         const { dataValues } = await User.findByPk(userId);
         if (!dataValues) throw new Error("user not found");

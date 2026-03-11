@@ -6,6 +6,7 @@ const {
 
 const handleGhlWebhook = async (req, res) => {
   try {
+    console.log("Received GHL webhook:", req.body);
     const contact = req.body;
     logger.info(`Incoming GHL webhook received`);
     logger.info(`Processing contact: ${contact?.email}`);

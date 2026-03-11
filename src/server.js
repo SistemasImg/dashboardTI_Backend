@@ -9,7 +9,7 @@ sequelize
   .authenticate()
   .then(async () => {
     console.log("Connection to the established database");
-    // require("./jobs");
+    require("./jobs");
 
     app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
   })
