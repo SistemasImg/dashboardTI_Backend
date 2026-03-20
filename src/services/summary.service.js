@@ -2,7 +2,6 @@ const { Op, fn, col, where } = require("sequelize");
 
 const {
   User,
-  Agents,
   Role,
   CaseAssignment,
   AttemptsDaily,
@@ -42,8 +41,19 @@ const getSummary = async () => {
   // ========================
   // AGENTS
   // ========================
-  const totalAgents = await Agents.count();
-  const lastAgent = await Agents.findOne({
+  const totalAgents = await User.count({
+    where: {
+      role_id: {
+        [Op.in]: [4, 5],
+      },
+    },
+  });
+  const lastAgent = await User.findOne({
+    where: {
+      role_id: {
+        [Op.in]: [4, 5],
+      },
+    },
     order: [["id", "DESC"]],
   });
 

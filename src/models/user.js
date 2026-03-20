@@ -16,21 +16,18 @@ const User = sequelize.define(
       unique: true,
       validate: { isEmail: true },
     },
-    username: {
-      type: DataTypes.STRING(50),
-      allowNull: false,
-      unique: true,
-      validate: { len: [3, 50] },
-    },
     password: { type: DataTypes.STRING(255), allowNull: false },
     role_id: { type: DataTypes.INTEGER.UNSIGNED, allowNull: false },
     status: {
       type: DataTypes.ENUM("active", "inactive", "suspended"),
       defaultValue: "active",
     },
-    phone: { type: DataTypes.STRING(20), allowNull: true },
+    call_center_id: {
+      type: DataTypes.INTEGER.UNSIGNED,
+      allowNull: false,
+    },
     avatar: { type: DataTypes.STRING(255), allowNull: true },
-    observations: { type: DataTypes.STRING(255), allowNull: true },
+    log_pass: { type: DataTypes.STRING(255), allowNull: true },
   },
   {
     tableName: "users",

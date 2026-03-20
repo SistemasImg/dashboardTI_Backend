@@ -36,7 +36,6 @@ app.use("/domains", require("./routes/domain.routes"));
 app.use("/products", require("./routes/product.routes"));
 app.use("/uat", require("./routes/uat.routes"));
 app.use("/salesforce", require("./routes/salesforce.routes"));
-app.use("/agents", require("./routes/agents.routes"));
 app.use("/assign", require("./routes/caseAssignments.routes"));
 app.use("/state", require("./routes/state.routes"));
 app.use("/api", require("./routes/apiSend.routes"));
@@ -48,6 +47,7 @@ app.use("/gravity-to-ghl", require("./routes/ghl/gravityForms.routes"));
 app.use("/ghl-to-salesforce", require("./routes/ghl/ghlSubStatus.routes"));
 app.use("/salesforce-to-ghl", require("./routes/ghl/subStatus.routes"));
 app.use("/chatbot", require("./modules/chatbot/chatbot.routes"));
+app.use("/callcenter", require("./routes/callCenter.routes"));
 
 // ------------------------------
 // HEALTH CHECK (Render / Monitoring)

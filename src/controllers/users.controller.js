@@ -2,10 +2,17 @@ const logger = require("../utils/logger");
 const usersService = require("../services/users.service");
 
 exports.allUsers = async (req, res, next) => {
+  const { role_id, call_center_id } = req.query;
+
+  const filters = {
+    ...(call_center_id && { call_center_id }),
+    ...(role_id && { role_id }),
+  };
+
   logger.info("UsersController → allUsers() called");
 
   try {
-    const result = await usersService.allUsers();
+    const result = await usersService.allUsers(filters);
 
     logger.success("UsersController → allUsers() completed successfully");
     return res.json(result);

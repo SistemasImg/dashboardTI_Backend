@@ -1,22 +1,50 @@
 const logger = require("../utils/logger");
 const {
   assignAgent,
-  getActiveAssignments,
+  ActiveAssignmentsDaily,
+  ActiveAssignmentsAll,
 } = require("../services/caseAssignments.service");
 
 async function activeAssignments(req, res, next) {
-  logger.info("CaseAssignmentsController → getActiveAssignments() called");
+  logger.info("CaseAssignmentsController → ActiveAssignmentsDaily() called");
 
   try {
-    const result = await getActiveAssignments();
+    const result = await ActiveAssignmentsDaily();
 
     logger.success(
-      "CaseAssignmentsController → getActiveAssignments() completed successfully",
+      "CaseAssignmentsController → ActiveAssignmentsDaily() completed successfully",
     );
     return res.json(result);
   } catch (error) {
     logger.error(
-      `CaseAssignmentsController → getActiveAssignments() error: ${error.message}`,
+      `CaseAssignmentsController → ActiveAssignmentsDaily() error: ${error.message}`,
+    );
+    next(error);
+  }
+}
+
+async function AllactiveAssignments(req, res, next) {
+  logger.info("CaseAssignmentsController → AllactiveAssignments() called");
+
+  try {
+    const filters = {
+      date_from: req.query.date_from,
+      date_to: req.query.date_to,
+      agent_id: req.query.agent_id,
+      created_by: req.query.created_by,
+      case_number: req.query.case_number,
+      call_center_id: req.query.call_center_id,
+    };
+
+    const result = await ActiveAssignmentsAll(filters);
+
+    logger.success(
+      "CaseAssignmentsController → AllactiveAssignments() completed successfully",
+    );
+    return res.json(result);
+  } catch (error) {
+    logger.error(
+      `CaseAssignmentsController → AllactiveAssignments() error: ${error.message}`,
     );
     next(error);
   }
@@ -57,4 +85,5 @@ async function assignAgentToCase(req, res) {
 module.exports = {
   assignAgentToCase,
   activeAssignments,
+  AllactiveAssignments,
 };

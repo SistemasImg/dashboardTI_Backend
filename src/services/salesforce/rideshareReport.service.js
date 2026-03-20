@@ -1,6 +1,10 @@
 const logger = require("../../utils/logger");
 const jwt = require("jsonwebtoken");
-const { User, Agents } = require("../../models");
+const { User } = require("../../models");
+const { DateTime } = require("luxon");
+const {
+  updateActiveAssignmentAttempts,
+} = require("../../services/caseAssignments.service");
 
 const {
   authenticateSalesforce,
@@ -27,7 +31,7 @@ const {
 } = require("../../services/attemptsDaily.service");
 
 const {
-  getActiveAssignments,
+  ActiveAssignmentsDaily,
 } = require("../../services/caseAssignments.service");
 
 function normalizeSFPhone(phone) {
@@ -37,6 +41,9 @@ function normalizeSFPhone(phone) {
   return digits.length === 10 ? digits : null;
 }
 
+const peruNow = DateTime.now().setZone("America/Lima");
+const todayStr = peruNow.toFormat("yyyy-MM-dd");
+
 async function getRideshareReport(token) {
   try {
     let decoded = null;
@@ -44,9 +51,6 @@ async function getRideshareReport(token) {
     if (token) {
       decoded = jwt.verify(token, process.env.JWT_SECRET);
       userId = decoded.id;
-      logger.info(
-        `Usuario ejecutando reporte: ${userId}, Role: ${decoded.role_id}`,
-      );
     }
 
     // 1️⃣ Auth Salesforce
@@ -62,7 +66,7 @@ async function getRideshareReport(token) {
       await Promise.all([
         getAttemptsLastNDays(3),
         getTotalAttempts(),
-        getActiveAssignments(),
+        ActiveAssignmentsDaily(),
       ]);
 
     // 2️⃣ Table Case
@@ -76,7 +80,7 @@ async function getRideshareReport(token) {
     activeAssignments.forEach(({ case_number, agent }) => {
       assignmentMap.set(case_number, {
         fullname: agent.fullname,
-        call_center: agent.call_center,
+        call_center: agent.callCenter.name,
       });
     });
 
@@ -137,13 +141,24 @@ async function getRideshareReport(token) {
       };
     });
 
+    // 🔥 Update assignment attempts
+    const updates = finalCases
+      .filter((item) => item.assignedAgent !== null)
+      .map((item) => {
+        return updateActiveAssignmentAttempts({
+          case_number: item.caseNumber,
+          attempts: item.attempts1,
+        });
+      });
+    await Promise.allSettled(updates);
+
     //Intake User Role Filtering
     if (token) {
       if (decoded.role_id === 4 || decoded.role_id === 5) {
         const { dataValues } = await User.findByPk(userId);
         if (!dataValues) throw new Error("user not found");
-        const agent = await Agents.findOne({
-          where: { fullname: dataValues.fullname },
+        const agent = await User.findOne({
+          where: { id: dataValues.id },
         });
         if (agent) {
           finalCases = finalCases.filter(

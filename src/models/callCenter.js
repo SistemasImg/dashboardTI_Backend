@@ -1,8 +1,8 @@
 const { DataTypes } = require("sequelize");
 const sequelize = require("../config/db");
 
-const Roles = sequelize.define(
-  "Roles",
+const CallCenter = sequelize.define(
+  "CallCenter",
   {
     id: {
       type: DataTypes.BIGINT.UNSIGNED,
@@ -10,13 +10,14 @@ const Roles = sequelize.define(
       primaryKey: true,
     },
     name: { type: DataTypes.STRING(100), allowNull: false },
-    description: {
-      type: DataTypes.STRING(255),
-      allowNull: true,
+    status: {
+      type: DataTypes.TINYINT,
+      allowNull: false,
+      defaultValue: 1,
     },
   },
   {
-    tableName: "roles",
+    tableName: "call_center",
     timestamps: true,
     underscored: false,
     freezeTableName: true,
@@ -25,4 +26,4 @@ const Roles = sequelize.define(
   },
 );
 
-module.exports = Roles;
+module.exports = CallCenter;

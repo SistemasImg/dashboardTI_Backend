@@ -2,7 +2,7 @@ const axios = require("axios");
 const https = require("https");
 const logger = require("../utils/logger");
 const jwt = require("jsonwebtoken");
-const { MessageRecords, User, Agents } = require("../models");
+const { MessageRecords, User } = require("../models");
 const e = require("cors");
 
 const httpsAgent = new https.Agent({
@@ -15,9 +15,6 @@ async function InfobitService(payload, user) {
   const userId = decoded.id;
   const { dataValues } = await User.findByPk(userId);
   if (!dataValues) throw new Error("Usuario no encontrado");
-  const agent = await Agents.findOne({
-    where: { fullname: dataValues.fullname },
-  });
   logger.info("InfobitService → InfobitService() started");
   const { numberPhone, message } = payload;
   try {
@@ -50,7 +47,7 @@ async function InfobitService(payload, user) {
     await MessageRecords.create({
       numberphone: numberPhone,
       message,
-      id_agent: agent?.dataValues.id || 1,
+      id_agent: dataValues.id || 1,
       bulkId: data.bulkId,
       messageId: response.messageId,
       groupName: response.status.groupName,
@@ -79,9 +76,6 @@ async function logMessageRecord(user) {
   const userId = decoded.id;
   const { dataValues } = await User.findByPk(userId);
   if (!dataValues) throw new Error("Usuario no encontrado");
-  const agent = await Agents.findOne({
-    where: { fullname: dataValues.fullname },
-  });
   let recordMessage = await MessageRecords.findAll({
     raw: true,
     order: [["id", "DESC"]],
@@ -91,7 +85,7 @@ async function logMessageRecord(user) {
   if (decoded.role_id === 4 || decoded.role_id === 5) {
     if (recordMessage) {
       recordMessage = recordMessage.filter(
-        (item) => item?.id_agent === agent.dataValues.id,
+        (item) => item?.id_agent === dataValues.id,
       );
     } else {
       logger.warn("InfobitService → No message records found");

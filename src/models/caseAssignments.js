@@ -19,7 +19,7 @@ const CaseAssignment = sequelize.define(
       type: DataTypes.INTEGER.UNSIGNED,
       allowNull: true,
     },
-
+    attempts: { type: DataTypes.STRING(100), allowNull: true },
     assigned_at: {
       type: DataTypes.DATE,
       allowNull: false,
@@ -42,7 +42,7 @@ const CaseAssignment = sequelize.define(
     freezeTableName: true,
     createdAt: "created_at",
     updatedAt: "updated_at",
-  }
+  },
 );
 
 module.exports = CaseAssignment;
