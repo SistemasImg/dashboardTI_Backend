@@ -8,6 +8,7 @@ const {
   AttemptsDaily,
   MessageRecords,
   sendApiRecords,
+  CallCenter,
 } = require("../models");
 
 const sqlServerPool = require("./sqlserver/pool.service");
@@ -56,7 +57,20 @@ const getSummary = async () => {
         [Op.in]: [4, 5],
       },
     },
-    attributes: ["fullname", "email", "role_id", "call_center_id"],
+    include: [
+      {
+        model: CallCenter,
+        as: "callCenter",
+        attributes: ["id", "name"],
+      },
+    ],
+    attributes: [
+      "fullname",
+      "email",
+      "role_id",
+      "call_center_id",
+      "created_at",
+    ],
     order: [["id", "DESC"]],
   });
 
