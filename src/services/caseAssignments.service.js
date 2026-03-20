@@ -1,26 +1,19 @@
-const { DateTime } = require("luxon");
 const { Op } = require("sequelize");
 const { CaseAssignment, User, CallCenter } = require("../models");
 const logger = require("../utils/logger");
-
-const peruNow = DateTime.now().setZone("America/Lima");
-const todayStart = peruNow.startOf("day").toUTC().toJSDate();
-const tomorrowStart = peruNow
-  .plus({ days: 1 })
-  .startOf("day")
-  .toUTC()
-  .toJSDate();
+const { getPeruDayRange } = require("../utils/dateToday");
 
 /**
  * Get all active case assignments
  */
 async function ActiveAssignmentsDaily() {
+  const { start: todayStart, end: tomorrowStart } = getPeruDayRange();
   logger.info("Fetching active case assignments (today only)");
 
   return CaseAssignment.findAll({
     where: {
       unassigned_at: null,
-      created_at: {
+      assigned_at: {
         [Op.gte]: todayStart,
         [Op.lt]: tomorrowStart,
       },

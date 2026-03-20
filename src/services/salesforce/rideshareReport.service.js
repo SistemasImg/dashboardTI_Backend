@@ -1,7 +1,6 @@
 const logger = require("../../utils/logger");
 const jwt = require("jsonwebtoken");
 const { User } = require("../../models");
-const { DateTime } = require("luxon");
 const {
   updateActiveAssignmentAttempts,
 } = require("../../services/caseAssignments.service");
@@ -40,9 +39,6 @@ function normalizeSFPhone(phone) {
   const digits = phone.replace(/\D/g, "");
   return digits.length === 10 ? digits : null;
 }
-
-const peruNow = DateTime.now().setZone("America/Lima");
-const todayStr = peruNow.toFormat("yyyy-MM-dd");
 
 async function getRideshareReport(token) {
   try {

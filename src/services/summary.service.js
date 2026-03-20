@@ -1,4 +1,5 @@
 const { Op, fn, col, where } = require("sequelize");
+const { getPeruDayRange } = require("../utils/dateToday");
 
 const {
   User,
@@ -12,6 +13,7 @@ const {
 const sqlServerPool = require("./sqlserver/pool.service");
 const { authenticateSalesforce } = require("./salesforce/auth.service");
 const { sendServiceAlertEmail } = require("./email.service");
+const { start: todayStart, end: tomorrowStart } = getPeruDayRange();
 
 const getSummary = async () => {
   // ========================
@@ -54,28 +56,23 @@ const getSummary = async () => {
         [Op.in]: [4, 5],
       },
     },
+    attributes: ["fullname", "email", "role_id", "call_center_id"],
     order: [["id", "DESC"]],
   });
 
   // ========================
   // CASE ASSIGNMENTS
   // ========================
-  const lastAssignmentDateResult = await CaseAssignment.findOne({
-    attributes: [[fn("MAX", fn("DATE", col("created_at"))), "lastDate"]],
-    raw: true,
+  const totalCaseAssignments = await CaseAssignment.count({
+    distinct: true,
+    col: "case_number",
+    where: {
+      assigned_at: {
+        [Op.gte]: todayStart,
+        [Op.lt]: tomorrowStart,
+      },
+    },
   });
-
-  const lastAssignmentDate = lastAssignmentDateResult?.lastDate;
-
-  let totalCaseAssignments = 0;
-
-  if (lastAssignmentDate) {
-    totalCaseAssignments = await CaseAssignment.count({
-      distinct: true,
-      col: "case_number",
-      where: where(fn("DATE", col("created_at")), lastAssignmentDate),
-    });
-  }
 
   // ========================
   // ATTEMPTS DAILY
