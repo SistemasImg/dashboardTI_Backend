@@ -142,17 +142,16 @@ async function closeActiveAssignment(caseNumber) {
 async function updateActiveAssignmentAttempts(updates) {
   logger.info(`Updating attempts`);
 
-  const existingCase = await CaseAssignment.findOne({
-    where: {
-      case_number: updates.case_number,
-    },
-  });
-
-  if (existingCase) {
-    await existingCase.update({
+  await CaseAssignment.update(
+    {
       attempts: updates.attempts,
-    });
-  }
+    },
+    {
+      where: {
+        case_number: updates.case_number,
+      },
+    },
+  );
 }
 
 //Create a new case assignment
