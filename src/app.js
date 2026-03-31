@@ -48,6 +48,8 @@ app.use("/ghl-to-salesforce", require("./routes/ghl/ghlSubStatus.routes"));
 app.use("/salesforce-to-ghl", require("./routes/ghl/subStatus.routes"));
 app.use("/chatbot", require("./modules/chatbot/chatbot.routes"));
 app.use("/callcenter", require("./routes/callCenter.routes"));
+app.use("/vicidial", require("./routes/vicidial.routes"));
+app.use("/sqlserver", require("./routes/sqlserver/insertApi.routes"));
 
 // ------------------------------
 // HEALTH CHECK (Render / Monitoring)
