@@ -2,6 +2,8 @@ const logger = require("../utils/logger");
 const {
   InfobitService,
   logMessageRecord,
+  updateMessageStatus,
+  saveInboundMessages,
 } = require("../services/infobit.service");
 
 //CREATE MESSAGE INFOBIT
@@ -55,4 +57,41 @@ async function logMessageRecords(req, res, next) {
   }
 }
 
-module.exports = { sendInfobitMessage, logMessageRecords };
+// UPDATED MESSAGE STATUS
+async function infobitStatusWebhook(req, res, next) {
+  logger.info("InfobitController → status webhook");
+
+  try {
+    const { results } = req.body;
+
+    await updateMessageStatus(results);
+
+    return res.sendStatus(200);
+  } catch (error) {
+    logger.error("Status webhook error", error);
+    next(error);
+  }
+}
+
+//METHOD TO SAVE INBOUND MESSAGES
+async function infobitInboundWebhook(req, res, next) {
+  logger.info("InfobitController → inbound webhook");
+
+  try {
+    const { results } = req.body;
+
+    await saveInboundMessages(results);
+
+    return res.sendStatus(200);
+  } catch (error) {
+    logger.error("Inbound webhook error", error);
+    next(error);
+  }
+}
+
+module.exports = {
+  sendInfobitMessage,
+  logMessageRecords,
+  infobitStatusWebhook,
+  infobitInboundWebhook,
+};

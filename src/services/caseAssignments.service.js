@@ -140,8 +140,6 @@ async function closeActiveAssignment(caseNumber) {
 
 //Update AttemptsDaily
 async function updateActiveAssignmentAttempts(updates) {
-  logger.info(`Updating attempts`);
-
   await CaseAssignment.update(
     {
       attempts: updates.attempts,

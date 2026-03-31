@@ -138,6 +138,8 @@ async function getRideshareReport(token) {
     });
 
     // 🔥 Update assignment attempts
+
+    logger.info(`Updating attempts`);
     const updates = finalCases
       .filter((item) => item.assignedAgent !== null)
       .map((item) => {

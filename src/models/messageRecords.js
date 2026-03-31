@@ -37,6 +37,11 @@ const MessageRecords = sequelize.define(
       type: DataTypes.STRING(50),
       allowNull: false,
     },
+    direction: {
+      type: DataTypes.ENUM("OUTBOUND", "INBOUND"),
+      allowNull: false,
+      defaultValue: "OUTBOUND",
+    },
     description: {
       type: DataTypes.STRING(255),
       allowNull: false,

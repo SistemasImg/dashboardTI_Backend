@@ -1,9 +1,8 @@
 const axios = require("axios");
-const https = require("https");
+const https = require("node:https");
 const logger = require("../utils/logger");
 const jwt = require("jsonwebtoken");
 const { MessageRecords, User } = require("../models");
-const e = require("cors");
 
 const httpsAgent = new https.Agent({
   rejectUnauthorized: false,
@@ -24,7 +23,7 @@ async function InfobitService(payload, user) {
         messages: [
           {
             from: "+17576599670",
-            destinations: [{ to: `+1${numberPhone}` }],
+            destinations: [{ to: `+51${numberPhone}` }],
             content: {
               text: `${message}`,
             },
@@ -55,6 +54,7 @@ async function InfobitService(payload, user) {
       description: response.status.description,
       groupId: response.status.groupId,
       id_extern: response.status.id,
+      direction: "OUTBOUND",
     });
 
     logger.success("InfobitService → Message saved successfully");
@@ -97,7 +97,51 @@ async function logMessageRecord(user) {
   return recordMessage;
 }
 
+// UPDATED MESSAGE STATUS
+async function updateMessageStatus(results) {
+  for (const item of results) {
+    await MessageRecords.update(
+      {
+        status: item.status.name,
+        description: item.status.description,
+        groupName: item.status.groupName,
+      },
+      {
+        where: { messageId: item.messageId },
+      },
+    );
+  }
+
+  return { success: true };
+}
+
+//METHOD TO SAVE INBOUND MESSAGES
+async function saveInboundMessages(results) {
+  const messages = [];
+
+  for (const msg of results) {
+    const newMessage = await MessageRecords.create({
+      numberphone: msg.from,
+      message: msg.text,
+      id_agent: null,
+      bulkId: "inbound",
+      messageId: `in_${Date.now()}`,
+      groupName: "INBOUND",
+      status: "RECEIVED",
+      description: "Incoming message",
+      groupId: 0,
+      id_extern: 0,
+      direction: "INBOUND",
+    });
+
+    messages.push(newMessage);
+  }
+
+  return messages;
+}
 module.exports = {
   InfobitService,
   logMessageRecord,
+  updateMessageStatus,
+  saveInboundMessages,
 };
