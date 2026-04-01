@@ -1,16 +1,21 @@
 process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0";
+require("dotenv").config();
+
 const app = require("./app");
 const sequelize = require("./config/db");
-require("dotenv").config();
 
 const PORT = process.env.PORT || 4000;
 
 sequelize
   .authenticate()
-  .then(async () => {
+  .then(() => {
     console.log("Connection to the established database");
     require("./jobs");
-
-    app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
   })
-  .catch((err) => console.error("Error connecting to database: ", err));
+  .catch((err) => {
+    console.error("Error connecting to database: ", err);
+  });
+
+app.listen(PORT, () => {
+  console.log(`Server running on port ${PORT}`);
+});
