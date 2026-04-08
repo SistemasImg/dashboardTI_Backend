@@ -9,7 +9,6 @@ const getRealtimeFromVicidial = async () => {
     const username = process.env.VICIDIAL_USER;
     const password = process.env.VICIDIAL_PASS;
 
-    console.log("Using Vicidial credentials:", password);
     const token = Buffer.from(`${username}:${password}`).toString("base64");
 
     const response = await axios.post(

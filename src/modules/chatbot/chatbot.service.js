@@ -2,9 +2,71 @@ const metrics = require("./metrics");
 const logger = require("../../utils/logger");
 const { askModel } = require("./ai.config");
 const { systemPrompt } = require("./prompts");
+const excelService = require("./excel.service");
+const { DateTime } = require("luxon");
 
 // Simple in-memory session storage
 const sessionMemory = {};
+
+// Constant for bulk case threshold
+const BULK_THRESHOLD = 3; // If more than 3 cases, generate Excel
+
+/**
+ * Format a date string to a readable format: DD/MM/YYYY HH:mm
+ * @param {String} dateString - ISO date string from Salesforce
+ * @returns {String} Formatted date or "N/A" if invalid
+ */
+function formatDate(dateString) {
+  if (!dateString) return "N/A";
+
+  try {
+    const date = DateTime.fromISO(dateString);
+    if (!date.isValid) return "N/A";
+
+    return date.toFormat("dd/MM/yyyy HH:mm");
+  } catch (error) {
+    logger.warn(`Error formatting date: ${dateString} - ${error.message}`);
+    return "N/A";
+  }
+}
+
+function detectDateRange(message) {
+  const text = message.toLowerCase();
+
+  const today = DateTime.now();
+  const todayStr = today.toISODate();
+  const yesterdayStr = today.minus({ days: 1 }).toISODate();
+
+  if (text.includes("hoy y ayer")) {
+    return {
+      startDate: yesterdayStr,
+      endDate: todayStr,
+    };
+  }
+
+  if (text.includes("últimos 2 días") || text.includes("last 2 days")) {
+    return {
+      startDate: today.minus({ days: 2 }).toISODate(),
+      endDate: todayStr,
+    };
+  }
+
+  if (text.includes("última semana") || text.includes("last week")) {
+    return {
+      startDate: today.minus({ days: 7 }).toISODate(),
+      endDate: todayStr,
+    };
+  }
+
+  if (text.includes("último mes") || text.includes("last month")) {
+    return {
+      startDate: today.minus({ days: 30 }).toISODate(),
+      endDate: todayStr,
+    };
+  }
+
+  return null;
+}
 
 exports.processMessage = async (userMessage, sessionId = "default") => {
   try {
@@ -23,6 +85,23 @@ exports.processMessage = async (userMessage, sessionId = "default") => {
     ];
 
     const response = await askModel(messages);
+    const detectedRange = detectDateRange(userMessage);
+
+    if (detectedRange) {
+      logger.info("Date range detected locally");
+
+      const functionResult = await metrics.sf.getCasesByDateRange(
+        detectedRange.startDate,
+        detectedRange.endDate,
+      );
+
+      const formattedResponse = await formatResult(
+        "getCasesByDateRange",
+        functionResult,
+      );
+
+      return formattedResponse;
+    }
     const message = response.choices?.[0]?.message;
 
     if (!message) throw new Error("AI_INVALID_RESPONSE");
@@ -39,7 +118,6 @@ exports.processMessage = async (userMessage, sessionId = "default") => {
       } catch {
         throw new Error("INVALID_FUNCTION_ARGUMENTS");
       }
-
       let functionResult;
 
       switch (functionName) {
@@ -138,79 +216,149 @@ exports.processMessage = async (userMessage, sessionId = "default") => {
 
       sessionMemory[sessionId].lastResults = functionResult;
 
-      return formatResult(functionName, functionResult);
+      const formattedResponse = await formatResult(
+        functionName,
+        functionResult,
+      );
+      return formattedResponse;
     }
 
     // 🟢 Normal conversation
-    return message.content;
+    return { message: message.content };
   } catch (error) {
     logger.error(`Chatbot processing error: ${error.message}`);
 
     switch (error.message) {
       case "AI_SERVICE_FAILURE":
-        return "El servicio de inteligencia artificial no está disponible.";
+        return {
+          message: "The artificial intelligence service is not available.",
+        };
 
       case "INVALID_FUNCTION_ARGUMENTS":
-        return "Hubo un problema procesando la solicitud.";
+        return { message: "There was a problem processing the request." };
 
       default:
-        return "Ocurrió un error inesperado.";
+        return { message: "An unexpected error occurred." };
     }
   }
 };
 
-function formatResult(type, data) {
-  if (!data) return "No se encontraron resultados.";
+async function formatResult(type, data) {
+  if (!data) return { message: "No results found." };
 
+  // Single case - show full details
   if (type === "getCaseByNumber") {
-    return `
-📌 Case: ${data.CaseNumber}
-Status: ${data.Status}
-Substatus: ${data.Substatus__c}
-Type: ${data.Type}
-Origin: ${data.Origin}
-Segment: ${data.Supplier_Segment__c}
-Owner: ${data.Owner?.Name}
-Created: ${data.CreatedDate}
-`;
+    return {
+      message: `
+📌 **Case: ${data.CaseNumber}**
+• **Status:** ${data.Status}
+• **Substatus:** ${data.Substatus__c}
+• **Type:** ${data.Type}
+• **Origin:** ${data.Origin}
+• **Supplier Segment:** ${data.Supplier_Segment__c}
+• **Owner:** ${data.Owner?.Name}
+• **Created:** ${formatDate(data.CreatedDate)}
+`,
+    };
   }
 
-  if (data.records) {
-    let output = `Total: ${data.total}\n\n`;
+  // Multiple cases - determine if bulk or not
+  let casesArray = [];
+  let totalCount = 0;
 
-    data.records.slice(0, 20).forEach((c, i) => {
-      output += `${i + 1}. ${c.CaseNumber} | ${c.Substatus__c} | ${c.Owner?.Name}\n`;
-    });
+  if (data.records && Array.isArray(data.records)) {
+    casesArray = data.records;
+    totalCount = data.total || data.records.length;
+  } else if (Array.isArray(data)) {
+    casesArray = data;
+    totalCount = data.length;
+  } else if (data.summary) {
+    // Operational summary
+    return {
+      message: `
+📊 **Operational Summary**
 
-    return output;
+• **Total:** ${data.summary.total}
+
+**By Status:**
+${formatSummary(data.summary.byStatus)}
+
+**By Origin:**
+${formatSummary(data.summary.byOrigin)}
+
+**By Segment:**
+${formatSummary(data.summary.bySegment)}
+`,
+    };
   }
 
-  if (Array.isArray(data)) {
-    let output = `Total: ${data.length}\n\n`;
+  // If cases exist, determine if bulk
+  if (casesArray.length > 0) {
+    // BULK CASES: Generate Excel
+    if (casesArray.length > BULK_THRESHOLD) {
+      try {
+        const excelFile = await excelService.generateCasesExcel(casesArray);
 
-    data.slice(0, 20).forEach((c, i) => {
-      output += `${i + 1}. ${c.CaseNumber} | ${c.Substatus__c} | ${c.Owner?.Name}\n`;
-    });
+        return {
+          message: `
+📊 **Bulk Results Found**
 
-    return output;
+✅ A total of **${totalCount} cases** were found.
+
+Due to the number of records, I have prepared a complete Excel file with all the details for you to download and analyze:
+
+📥 **File:** ${excelFile.fileName}
+
+The file contains:
+• Case Number
+• Status and Substatus
+• Case Type
+• Origin
+• Supplier Segment
+• Assigned Owner
+• Contact Information
+• And more details...
+`,
+          excelFile,
+        };
+      } catch (error) {
+        logger.error(`Error generating Excel: ${error.message}`);
+        // Fallback: show first cases in chat
+        return {
+          message: formatSmallResultSet(casesArray, totalCount),
+        };
+      }
+    }
+
+    // SMALL SET: Show in chat
+    return {
+      message: formatSmallResultSet(casesArray, totalCount),
+    };
   }
 
-  if (data.summary) {
-    return `
-📊 Operational Summary
+  return { message: "No results found." };
+}
 
-Total: ${data.summary.total}
+/**
+ * Formats a small result set for chat display
+ */
+function formatSmallResultSet(casesArray, totalCount) {
+  let output = `📋 **Total Cases: ${totalCount}**\n\n`;
 
-By Status:
-${JSON.stringify(data.summary.byStatus, null, 2)}
+  casesArray.slice(0, 20).forEach((caseItem, i) => {
+    output += `${i + 1}. **${caseItem.CaseNumber}** | ${caseItem.Substatus__c} | ${caseItem.Owner?.Name || "Unassigned"}\n`;
+  });
 
-By Origin:
-${JSON.stringify(data.summary.byOrigin, null, 2)}
+  return output;
+}
 
-By Segment:
-${JSON.stringify(data.summary.bySegment, null, 2)}
-`;
-  }
+/**
+ * Formats a summary into a readable structure
+ */
+function formatSummary(summaryObj) {
+  if (!summaryObj) return "N/A";
 
-  return "Operación completada.";
+  return Object.entries(summaryObj)
+    .map(([key, value]) => `  • ${key}: ${value}`)
+    .join("\n");
 }

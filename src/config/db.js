@@ -13,6 +13,4 @@ const sequelize = new Sequelize(
   },
 );
 
-console.log("DB_HOST:", process.env.DB_HOST);
-
 module.exports = sequelize;

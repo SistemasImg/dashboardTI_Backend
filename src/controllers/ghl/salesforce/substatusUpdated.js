@@ -6,7 +6,6 @@ const {
 exports.handleCaseUpdate = async (req, res) => {
   try {
     logger.info("Salesforce webhook received.");
-    console.log("Received case update:", req.body);
 
     await processCaseUpdate(req.body);
 

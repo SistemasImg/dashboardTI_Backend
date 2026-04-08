@@ -76,8 +76,6 @@ exports.getCaseByNumber = async (caseNumber) => {
       LIMIT 1
     `;
 
-    console.log("SOQL Query:", soql);
-
     const result = await runSoqlQueryFull(sf, soql);
 
     if (!result.records || !result.records.length) {

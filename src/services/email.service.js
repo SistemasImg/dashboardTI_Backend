@@ -38,8 +38,6 @@ const sendServiceAlertEmail = async ({ salesforce, sqlserver }) => {
         <small>IMG360 Monitoring System</small>
       `,
     });
-
-    console.log("Alert email sent successfully.");
   } catch (error) {
     console.error("Error sending alert email:", error.message);
   }
