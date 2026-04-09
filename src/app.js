@@ -50,6 +50,7 @@ app.use("/chatbot", require("./modules/chatbot/chatbot.routes"));
 app.use("/callcenter", require("./routes/callCenter.routes"));
 app.use("/vicidial", require("./routes/vicidial.routes"));
 app.use("/sqlserver", require("./routes/sqlserver/insertApi.routes"));
+app.use("/sqlserver", require("./routes/sqlserver/queries.routes"));
 app.use("/meta", require("./routes/meta.routes"));
 
 // ------------------------------
