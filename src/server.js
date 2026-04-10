@@ -10,8 +10,7 @@ const PORT = process.env.PORT || 4000;
   try {
     await sequelize.authenticate();
     console.log("✅ DB connected successfully");
-
-    // require("./jobs");
+    require("./jobs");
     app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
   } catch (err) {
     console.error("❌ Application failed to start:", err);

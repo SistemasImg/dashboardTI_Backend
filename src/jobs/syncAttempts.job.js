@@ -1,5 +1,5 @@
 const logger = require("../utils/logger");
-const { getAttemptsByDate } = require("../services/sqlserver/attempts.service");
+const { getAttemptsByDate } = require("../services/sqlserver/");
 const { AttemptsDaily } = require("../models");
 
 function normalizePhone(phone) {
