@@ -29,19 +29,28 @@ async function getAttemptsTotal() {
   return results;
 }
 
-async function getAgentsAttempts() {
+/**
+ * Get agents attempts for a specific date
+ * @param {String} date - Date in format YYYY-MM-DD (optional, defaults to today)
+ * @returns {Array} Array of agents attempts records
+ */
+async function getAgentsAttempts(date = null) {
   try {
-    logger.info("📡 Connecting to SQL Server for agents attempts...");
+    logger.info(
+      `📡 Connecting to SQL Server for agents attempts${date ? " for date: " + date : "..."}`,
+    );
 
     const pool = await sqlServerPool.getPool();
 
     logger.info("📊 Executing agents attempts query...");
 
-    const result = await pool.request().query(buildAgentsAttemptsQuery());
+    const { recordsets } = await pool
+      .request()
+      .query(buildAgentsAttemptsQuery(date));
 
     logger.info("✅ Agents attempts query executed successfully");
 
-    return result;
+    return recordsets[0];
   } catch (error) {
     logger.error("❌ SQL Server agents attempts query failed", {
       message: error.message,
