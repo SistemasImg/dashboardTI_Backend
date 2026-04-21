@@ -7,6 +7,8 @@ const { DateTime } = require("luxon");
 const DOWNLOADS_DIR = path.join(__dirname, "../../uploads/excel-exports");
 const REPORT_FILE_NAME = "case_report.xlsx";
 const REPORT_FILE_URL = `/api/chatbot/download-excel/${REPORT_FILE_NAME}`;
+const ATTEMPTS_REPORT_FILE_NAME = "attempts_report.xlsx";
+const ATTEMPTS_REPORT_FILE_URL = `/api/chatbot/download-excel/${ATTEMPTS_REPORT_FILE_NAME}`;
 
 // Create download folder if it does not exist
 if (!fs.existsSync(DOWNLOADS_DIR)) {
@@ -30,6 +32,19 @@ function formatDate(dateString) {
     logger.warn(`Error formatting date: ${dateString} - ${error.message}`);
     return "N/A";
   }
+}
+
+function getCellTextLength(cellValue) {
+  if (cellValue === null || cellValue === undefined) return 0;
+  if (typeof cellValue === "string" || typeof cellValue === "number") {
+    return String(cellValue).length;
+  }
+
+  if (cellValue?.text) {
+    return String(cellValue.text).length;
+  }
+
+  return 0;
 }
 
 /**
@@ -94,7 +109,7 @@ exports.generateCasesExcel = async (cases) => {
     worksheet.columns.forEach((column) => {
       let maxLength = 0;
       column.eachCell({ includeEmpty: true }, (cell) => {
-        const cellLength = cell.value ? cell.value.toString().length : 0;
+        const cellLength = getCellTextLength(cell.value);
         if (cellLength > maxLength) {
           maxLength = cellLength;
         }
@@ -116,6 +131,81 @@ exports.generateCasesExcel = async (cases) => {
     };
   } catch (error) {
     logger.error(`Error generating Excel: ${error.message}`);
+    throw error;
+  }
+};
+
+/**
+ * Generate a single Excel report file for attempts.
+ * @param {Array} attempts - Array of attempts objects
+ * @returns {Object} { filePath, fileName, fileUrl }
+ */
+exports.generateAttemptsExcel = async (attempts) => {
+  try {
+    const workbook = new ExcelJS.Workbook();
+    const worksheet = workbook.addWorksheet("Attempts");
+
+    const headers = [
+      "Case Number",
+      "Phone",
+      "Call Date",
+      "Attempts",
+      "Status",
+      "Substatus",
+      "Owner",
+    ];
+
+    worksheet.columns = headers.map((h) => ({
+      header: h,
+      key: h.toLowerCase().replaceAll(" ", "_"),
+      width: 20,
+    }));
+
+    worksheet.getRow(1).font = {
+      bold: true,
+      color: { argb: "FFFFFFFF" },
+    };
+    worksheet.getRow(1).fill = {
+      type: "pattern",
+      pattern: "solid",
+      fgColor: { argb: "FF4472C4" },
+    };
+
+    attempts.forEach((item) => {
+      worksheet.addRow({
+        case_number: item.CaseNumber || "N/A",
+        phone: item.phone || "N/A",
+        call_date: item.call_date || item.date || "N/A",
+        attempts: item.attempts || 0,
+        status: item.Status || "N/A",
+        substatus: item.Substatus__c || "N/A",
+        owner: item.Owner?.Name || "N/A",
+      });
+    });
+
+    worksheet.columns.forEach((column) => {
+      let maxLength = 0;
+      column.eachCell({ includeEmpty: true }, (cell) => {
+        const cellLength = getCellTextLength(cell.value);
+        if (cellLength > maxLength) {
+          maxLength = cellLength;
+        }
+      });
+      column.width = Math.min(maxLength + 2, 50);
+    });
+
+    const filePath = path.join(DOWNLOADS_DIR, ATTEMPTS_REPORT_FILE_NAME);
+    await workbook.xlsx.writeFile(filePath);
+
+    logger.info(`Excel attempts file generated: ${ATTEMPTS_REPORT_FILE_NAME}`);
+
+    return {
+      filePath,
+      fileName: ATTEMPTS_REPORT_FILE_NAME,
+      fileUrl: ATTEMPTS_REPORT_FILE_URL,
+    };
+  } catch (error) {
+    logger.error(`Error generating attempts Excel: ${error.message}`);
     throw error;
   }
 };

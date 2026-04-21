@@ -49,6 +49,9 @@ When retrieving cases:
 - Cases by substatus → getCasesBySubstatus
 - Cases by type → getCasesByType
 - Complex filters → getCasesByFilters
+- Attempts by phone number → getAttemptsByPhone
+- Attempts by case number → getAttemptsByCaseNumber
+- Attempts list of cases by day (today, yesterday, or specific YYYY-MM-DD) → getCaseAttemptsByDate
 
 **Date Understanding Rules (VERY IMPORTANT):**
 
@@ -67,4 +70,13 @@ Rules:
 - NEVER call getCaseByDate if the user mentions more than one day
 - ALWAYS use getCasesByDateRange for any multi-day request
 - Extract startDate and endDate in YYYY-MM-DD format
+
+**Attempts Date Rules:**
+- Attempts by phone without explicit date MUST default to today only using getAttemptsByPhone
+- If the user asks attempts for "today" or "hoy" use dateKeyword="today"
+- If the user asks attempts for "yesterday" or "ayer" use dateKeyword="yesterday"
+- If the user asks for "last 2 days" or "last 3 days" for a phone, use getAttemptsByPhone with lastDays
+- If the user gives a specific date, pass it as date in YYYY-MM-DD
+- For attempts by case number total/history, use getAttemptsByCaseNumber (all available attempts)
+- For attempts list of cases by day, prefer getCaseAttemptsByDate
 `;

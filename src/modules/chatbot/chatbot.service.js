@@ -10,6 +10,7 @@ const sessionMemory = {};
 
 // Constant for bulk case threshold
 const BULK_THRESHOLD = 3; // If more than 3 cases, generate Excel
+const ATTEMPTS_BULK_THRESHOLD = 15;
 
 /**
  * Format a date string to a readable format: DD/MM/YYYY HH:mm
@@ -68,6 +69,16 @@ function detectDateRange(message) {
   return null;
 }
 
+function isAttemptsQuery(message) {
+  const text = message.toLowerCase();
+  return (
+    text.includes("attempt") ||
+    text.includes("intento") ||
+    text.includes("llamada") ||
+    text.includes("calls")
+  );
+}
+
 exports.processMessage = async (userMessage, sessionId = "default") => {
   try {
     logger.info(`Incoming chatbot message: ${userMessage}`);
@@ -87,7 +98,7 @@ exports.processMessage = async (userMessage, sessionId = "default") => {
     const response = await askModel(messages);
     const detectedRange = detectDateRange(userMessage);
 
-    if (detectedRange) {
+    if (detectedRange && !isAttemptsQuery(userMessage)) {
       logger.info("Date range detected locally");
 
       const functionResult = await metrics.sf.getCasesByDateRange(
@@ -204,6 +215,27 @@ exports.processMessage = async (userMessage, sessionId = "default") => {
           );
           break;
 
+        case "getAttemptsByPhone":
+          functionResult = await metrics.sql.getAttemptsByPhone(args.phone, {
+            dateKeyword: args.dateKeyword,
+            date: args.date,
+            lastDays: args.lastDays,
+          });
+          break;
+
+        case "getAttemptsByCaseNumber":
+          functionResult = await metrics.sql.getAttemptsByCaseNumber(
+            args.caseNumber,
+          );
+          break;
+
+        case "getCaseAttemptsByDate":
+          functionResult = await metrics.sql.getCaseAttemptsByDate({
+            dateKeyword: args.dateKeyword,
+            date: args.date,
+          });
+          break;
+
         case "getCasesByTypeFromReport":
           functionResult = await metrics.dashboard.getCasesByTypeFromReport(
             args.type,
@@ -237,6 +269,16 @@ exports.processMessage = async (userMessage, sessionId = "default") => {
       case "INVALID_FUNCTION_ARGUMENTS":
         return { message: "There was a problem processing the request." };
 
+      case "INVALID_PHONE":
+        return {
+          message: "Please provide a valid phone number to check attempts.",
+        };
+
+      case "INVALID_DATE_FORMAT":
+        return {
+          message: "Please provide a valid date in YYYY-MM-DD format.",
+        };
+
       default:
         return { message: "An unexpected error occurred." };
     }
@@ -245,6 +287,18 @@ exports.processMessage = async (userMessage, sessionId = "default") => {
 
 async function formatResult(type, data) {
   if (!data) return { message: "No results found." };
+
+  if (type === "getAttemptsByPhone") {
+    return await formatAttemptsByPhoneResult(data);
+  }
+
+  if (type === "getAttemptsByCaseNumber") {
+    return await formatAttemptsByCaseNumberResult(data);
+  }
+
+  if (type === "getCaseAttemptsByDate") {
+    return await formatCaseAttemptsByDateResult(data);
+  }
 
   // Single case - show full details
   if (type === "getCaseByNumber") {
@@ -297,7 +351,9 @@ ${formatSummary(data.summary.bySegment)}
     // BULK CASES: Generate Excel
     if (casesArray.length > BULK_THRESHOLD) {
       try {
-        const excelFile = await excelService.generateCasesExcel(casesArray);
+        const excelFile = await Promise.resolve(
+          excelService.generateCasesExcel(casesArray),
+        );
 
         return {
           message: `
@@ -361,4 +417,171 @@ function formatSummary(summaryObj) {
   return Object.entries(summaryObj)
     .map(([key, value]) => `  • ${key}: ${value}`)
     .join("\n");
+}
+
+async function formatAttemptsByPhoneResult(data) {
+  if (!data?.records?.length) {
+    return {
+      message: `No attempts found for phone **${data.phone}** in the requested period.`,
+    };
+  }
+
+  if (data.records.length > ATTEMPTS_BULK_THRESHOLD) {
+    try {
+      const excelRows = data.records.map((row) => ({
+        phone: data.phone,
+        call_date: row.call_date,
+        attempts: row.attempts,
+      }));
+
+      const excelFile = await Promise.resolve(
+        excelService.generateAttemptsExcel(excelRows),
+      );
+
+      return {
+        message: `
+📞 **Phone:** ${data.phone}
+• **Total Attempts:** ${data.totalAttempts}
+• **Days with records:** ${data.totalDays}
+
+The result is extensive, so I generated an Excel file with full attempt details.
+
+📥 **File:** ${excelFile.fileName}
+`,
+        excelFile,
+      };
+    } catch (error) {
+      logger.error(`Error generating attempts Excel: ${error.message}`);
+    }
+  }
+
+  const lines = data.records
+    .slice(0, 30)
+    .map((row, idx) => `${idx + 1}. ${row.call_date}: ${row.attempts} attempts`)
+    .join("\n");
+
+  const scopeLabel =
+    data.scope === "all" ? "all available dates" : data.scopeLabel;
+
+  return {
+    message: `
+📞 **Phone:** ${data.phone}
+• **Total Attempts:** ${data.totalAttempts}
+• **Days with records:** ${data.totalDays}
+• **Scope:** ${scopeLabel}
+
+**Attempts by date:**
+${lines}
+`,
+  };
+}
+
+async function formatAttemptsByCaseNumberResult(data) {
+  if (!data) {
+    return { message: "No case found with that case number." };
+  }
+
+  if (!data.phone) {
+    return {
+      message: `
+📌 **Case:** ${data.caseNumber}
+No phone number is associated with this case, so attempts cannot be calculated.
+`,
+    };
+  }
+
+  if (data.records.length > ATTEMPTS_BULK_THRESHOLD) {
+    try {
+      const excelRows = data.records.map((row) => ({
+        CaseNumber: data.caseNumber,
+        phone: data.phone,
+        call_date: row.call_date,
+        attempts: row.attempts,
+      }));
+
+      const excelFile = await Promise.resolve(
+        excelService.generateAttemptsExcel(excelRows),
+      );
+
+      return {
+        message: `
+📌 **Case:** ${data.caseNumber}
+📞 **Phone:** ${data.phone}
+• **Total Attempts:** ${data.totalAttempts}
+• **Days with records:** ${data.totalDays}
+
+The result is extensive, so I generated an Excel file with the full attempts history.
+
+📥 **File:** ${excelFile.fileName}
+`,
+        excelFile,
+      };
+    } catch (error) {
+      logger.error(`Error generating attempts Excel: ${error.message}`);
+    }
+  }
+
+  const lines = (data.records || [])
+    .slice(0, 30)
+    .map((row, idx) => `${idx + 1}. ${row.call_date}: ${row.attempts} attempts`)
+    .join("\n");
+
+  return {
+    message: `
+📌 **Case:** ${data.caseNumber}
+📞 **Phone:** ${data.phone}
+• **Total Attempts:** ${data.totalAttempts}
+• **Days with records:** ${data.totalDays}
+
+${lines ? `**Attempts by date:**\n${lines}` : "No attempts found for this case phone."}
+`,
+  };
+}
+
+async function formatCaseAttemptsByDateResult(data) {
+  if (!data?.records?.length) {
+    return { message: `No cases found for ${data.date}.` };
+  }
+
+  if (data.records.length > ATTEMPTS_BULK_THRESHOLD) {
+    try {
+      const excelFile = await Promise.resolve(
+        excelService.generateAttemptsExcel(data.records),
+      );
+
+      return {
+        message: `
+📅 **Date:** ${data.date}
+• **Total Cases:** ${data.totalCases}
+• **Total Attempts:** ${data.totalAttempts}
+
+The list is extensive, so I generated an Excel file with full attempt details by case.
+
+📥 **File:** ${excelFile.fileName}
+`,
+        excelFile,
+      };
+    } catch (error) {
+      logger.error(`Error generating attempts Excel: ${error.message}`);
+    }
+  }
+
+  const lines = data.records
+    .slice(0, 40)
+    .map(
+      (item, idx) =>
+        `${idx + 1}. **${item.CaseNumber}** | attempts: ${item.attempts} | phone: ${item.phone || "N/A"}`,
+    )
+    .join("\n");
+
+  return {
+    message: `
+📅 **Date:** ${data.date}
+• **Total Cases:** ${data.totalCases}
+• **Total Attempts:** ${data.totalAttempts}
+
+**Case Attempts List:**
+${lines}
+`,
+  };
 }

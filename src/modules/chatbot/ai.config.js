@@ -215,6 +215,61 @@ exports.askModel = async (messages) => {
           },
         },
         {
+          name: "getAttemptsByPhone",
+          description:
+            "Get call attempts for a phone number. Default to today unless a date or range is requested",
+          parameters: {
+            type: "object",
+            properties: {
+              phone: { type: "string" },
+              dateKeyword: {
+                type: "string",
+                enum: ["today", "yesterday"],
+              },
+              date: {
+                type: "string",
+                description: "Specific date in YYYY-MM-DD format",
+              },
+              lastDays: {
+                type: "integer",
+                description:
+                  "Use only when user asks for last N days, e.g. 2 or 3",
+              },
+            },
+            required: ["phone"],
+          },
+        },
+        {
+          name: "getAttemptsByCaseNumber",
+          description:
+            "Get attempts history and total attempts for a case number",
+          parameters: {
+            type: "object",
+            properties: {
+              caseNumber: { type: "string" },
+            },
+            required: ["caseNumber"],
+          },
+        },
+        {
+          name: "getCaseAttemptsByDate",
+          description:
+            "Get attempts list for cases created on a specific date (today, yesterday or exact date)",
+          parameters: {
+            type: "object",
+            properties: {
+              dateKeyword: {
+                type: "string",
+                enum: ["today", "yesterday"],
+              },
+              date: {
+                type: "string",
+                description: "Specific date in YYYY-MM-DD format",
+              },
+            },
+          },
+        },
+        {
           name: "getCasesByTypeFromReport",
           description: "Get cases filtered by type from rideshare report",
           parameters: {

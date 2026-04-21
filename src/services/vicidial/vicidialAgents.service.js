@@ -9,7 +9,7 @@ const {
 } = require("../../utils/vicidialParser");
 
 const durationToSeconds = (duration) => {
-  if (!duration || typeof duration !== "string") return null;
+  if (!CZX_INduration || typeof duration !== "string") return null;
 
   const parts = duration.trim().split(":").map(Number);
 
