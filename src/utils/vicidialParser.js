@@ -42,6 +42,7 @@ const parseAgentStatus = (data) => {
     campaign: row[3],
     sub_status: row[9],
     phone: row[10],
+    pause_code: row[8] || null,
   };
 };
 

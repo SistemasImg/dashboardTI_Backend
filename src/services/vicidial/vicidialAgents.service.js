@@ -1,11 +1,36 @@
 const axios = require("axios");
 const config = require("../../config/vicidial");
 const logger = require("../../utils/logger");
+const { getRealtimeFromVicidial } = require("./vicidialRealtime.service");
 
 const {
   parseLoggedAgents,
   parseAgentStatus,
 } = require("../../utils/vicidialParser");
+
+const durationToSeconds = (duration) => {
+  if (!duration || typeof duration !== "string") return null;
+
+  const parts = duration.trim().split(":").map(Number);
+
+  if (parts.some(Number.isNaN)) return null;
+  if (parts.length === 2) {
+    return parts[0] * 60 + parts[1];
+  }
+  if (parts.length === 3) {
+    return parts[0] * 3600 + parts[1] * 60 + parts[2];
+  }
+
+  return null;
+};
+
+const normalizeName = (value) =>
+  String(value || "")
+    .normalize("NFD")
+    .replaceAll(/[\u0300-\u036f]/g, "")
+    .replaceAll(/\s+/g, " ")
+    .trim()
+    .toUpperCase();
 
 // Base API call
 const callVicidialApi = async (params) => {
@@ -54,10 +79,36 @@ const getAgentDetail = async (agentUser) => {
 // Main realtime function
 const getAgentsRealtime = async () => {
   const agents = await getLoggedAgents();
+  let realtimeBySessionId = new Map();
+  let realtimeByName = new Map();
+
+  try {
+    const realtimeAgents = await getRealtimeFromVicidial();
+
+    // Use first occurrence to avoid overwriting when duplicated sessions appear.
+    for (const row of realtimeAgents) {
+      if (row.session_id && !realtimeBySessionId.has(row.session_id)) {
+        realtimeBySessionId.set(row.session_id, row);
+      }
+
+      const key = normalizeName(row.name);
+      if (key && !realtimeByName.has(key)) {
+        realtimeByName.set(key, row);
+      }
+    }
+  } catch (error) {
+    logger.warn(
+      `Realtime duration unavailable for /vicidial/agents: ${error.message}`,
+    );
+  }
 
   const results = await Promise.all(
     agents.map(async (agent) => {
       const detail = await getAgentDetail(agent.user);
+      const realtime =
+        realtimeByName.get(normalizeName(agent.full_name)) ||
+        realtimeBySessionId.get(agent.session_id);
+      const timeInStatus = realtime?.duration || null;
 
       return {
         user: agent.user,
@@ -67,6 +118,11 @@ const getAgentsRealtime = async () => {
         calls_today: agent.calls_today,
         sub_status: detail?.sub_status || null,
         phone: detail?.phone || null,
+        pause_code: realtime?.pause || detail?.pause_code || null,
+        time_in_status: timeInStatus,
+        time_in_status_seconds: timeInStatus
+          ? durationToSeconds(timeInStatus)
+          : null,
       };
     }),
   );

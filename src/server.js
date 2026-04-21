@@ -10,7 +10,12 @@ const PORT = process.env.PORT || 4000;
   try {
     await sequelize.authenticate();
     console.log("✅ DB connected successfully");
-    require("./jobs");
+    if (process.env.ENABLE_JOBS === "false") {
+      console.log("ℹ️ Background jobs disabled by ENABLE_JOBS=false");
+    } else {
+      require("./jobs");
+      console.log("✅ Background jobs enabled");
+    }
     app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
   } catch (err) {
     console.error("❌ Application failed to start:", err);
