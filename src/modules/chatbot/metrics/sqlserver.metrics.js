@@ -3,6 +3,10 @@ const { DateTime } = require("luxon");
 const logger = require("../../../utils/logger");
 const { AttemptsDaily } = require("../../../models");
 const sfMetrics = require("./salesforce.metrics");
+const sqlServerService = require("../../../services/sqlserver");
+const {
+  getAgentsRealtime,
+} = require("../../../services/vicidial/vicidialAgents.service");
 
 function normalizePhone(phone) {
   if (!phone) return null;
@@ -10,6 +14,15 @@ function normalizePhone(phone) {
   if (!digits) return null;
 
   return digits.length > 10 ? digits.slice(-10) : digits;
+}
+
+function normalizeText(value) {
+  return String(value || "")
+    .normalize("NFD")
+    .replaceAll(/[\u0300-\u036f]/g, "")
+    .replaceAll(/\s+/g, " ")
+    .trim()
+    .toLowerCase();
 }
 
 function resolveTargetDate(dateKeyword, date) {
@@ -230,6 +243,112 @@ exports.getCaseAttemptsByDate = async ({ dateKeyword, date }) => {
     date: targetDate,
     totalCases: records.length,
     totalAttempts,
+    records,
+  };
+};
+
+exports.getTotalAttemptsByAgent = async (
+  agentName,
+  { dateKeyword, date } = {},
+) => {
+  const targetDate = resolveTargetDate(dateKeyword, date);
+  const allRows = await Promise.resolve(
+    sqlServerService.getAgentsAttempts(targetDate),
+  );
+
+  const normalizedAgent = normalizeText(agentName);
+  const rows = allRows.filter((row) =>
+    normalizeText(row["AGENT NAME"]).includes(normalizedAgent),
+  );
+
+  const totalAttempts = rows.reduce(
+    (sum, row) => sum + Number(row.ATTEMPTS || 0),
+    0,
+  );
+
+  const phones = new Set(
+    rows.map((row) => normalizePhone(row["PHONE NUMBER"])).filter(Boolean),
+  );
+
+  const byHourMap = new Map();
+  rows.forEach((row) => {
+    const hour = Number(row.HOUR);
+    byHourMap.set(hour, (byHourMap.get(hour) || 0) + Number(row.ATTEMPTS || 0));
+  });
+
+  const byHour = Array.from(byHourMap.entries())
+    .sort((a, b) => a[0] - b[0])
+    .map(([hour, attempts]) => ({ hour, attempts }));
+
+  return {
+    agentName,
+    date: targetDate,
+    totalAttempts,
+    totalRows: rows.length,
+    totalPhones: phones.size,
+    byHour,
+    records: rows,
+  };
+};
+
+exports.getAgentAttemptsByPhonePerHour = async (
+  agentName,
+  phone,
+  { dateKeyword, date } = {},
+) => {
+  const targetDate = resolveTargetDate(dateKeyword, date);
+  const normalizedPhone = normalizePhone(phone);
+
+  if (!normalizedPhone) {
+    throw new Error("INVALID_PHONE");
+  }
+
+  const allRows = await Promise.resolve(
+    sqlServerService.getAgentsAttempts(targetDate),
+  );
+  const normalizedAgent = normalizeText(agentName);
+
+  const rows = allRows.filter((row) => {
+    const rowAgent = normalizeText(row["AGENT NAME"]);
+    const rowPhone = normalizePhone(row["PHONE NUMBER"]);
+
+    return rowAgent.includes(normalizedAgent) && rowPhone === normalizedPhone;
+  });
+
+  const byHourMap = new Map();
+  rows.forEach((row) => {
+    const hour = Number(row.HOUR);
+    byHourMap.set(hour, (byHourMap.get(hour) || 0) + Number(row.ATTEMPTS || 0));
+  });
+
+  const byHour = Array.from(byHourMap.entries())
+    .sort((a, b) => a[0] - b[0])
+    .map(([hour, attempts]) => ({ hour, attempts }));
+
+  const totalAttempts = byHour.reduce((sum, row) => sum + row.attempts, 0);
+
+  return {
+    agentName,
+    phone: normalizedPhone,
+    date: targetDate,
+    totalAttempts,
+    byHour,
+    records: rows,
+  };
+};
+
+exports.getVicidialAgentsStatus = async ({ agentName } = {}) => {
+  const agents = await getAgentsRealtime();
+  const normalizedAgent = normalizeText(agentName);
+
+  const records = normalizedAgent
+    ? agents.filter((agent) =>
+        normalizeText(agent.name).includes(normalizedAgent),
+      )
+    : agents;
+
+  return {
+    total: records.length,
     records,
   };
 };

@@ -36,22 +36,46 @@ When retrieving cases:
 - If user asks for bulk data, acknowledge the Excel generation
 - Be clear about what information is available in the Excel file
 - When referencing the Excel, mention it contains all details they requested
+- Always reply in the same language used by the user in their latest message
+- If the user writes in Spanish, reply in Spanish; if in English, reply in English; if in another language, reply in that language
 
 **Function Routing:**
-- Single case by number → getCaseByNumber
-- Cases by phone (10-digit) → getCaseByPhone
-- Cases by single date (today or yesterday only) → getCaseByDate
-- Cases by status → getCasesByStatus
-- Cases by date range → getCasesByDateRange
-- Cases by email → getCaseByEmail
-- Cases by origin → getCasesByOrigin
-- Cases by supplier segment → getCasesBySupplierSegment
-- Cases by substatus → getCasesBySubstatus
-- Cases by type → getCasesByType
-- Complex filters → getCasesByFilters
-- Attempts by phone number → getAttemptsByPhone
-- Attempts by case number → getAttemptsByCaseNumber
-- Attempts list of cases by day (today, yesterday, or specific YYYY-MM-DD) → getCaseAttemptsByDate
+
+- Single case by number: getCaseByNumber
+- Cases by phone (10-digit): getCaseByPhone
+- Cases by single date (today or yesterday only): getCaseByDate
+- Cases by status (single filter): getCasesByStatus (supports optional dateKeyword or date)
+- Cases by date range (multi-day): getCasesByDateRange
+- Cases by email: getCaseByEmail
+- Cases by origin (single filter): getCasesByOrigin (supports optional dateKeyword or date)
+- Cases by supplier segment (single filter): getCasesBySupplierSegment (supports optional dateKeyword or date)
+- Cases by substatus (single filter): getCasesBySubstatus (supports optional dateKeyword or date)
+- Cases by type (single filter): getCasesByType (supports optional dateKeyword or date; if user says "tort" use type "Tort")
+- Group and count cases by a field: getCasesGroupedByField (valid field values: Status, Origin, Type, Supplier_Segment__c, Substatus__c)
+- Compound/combined filters (2 or more filters): getCasesByFilters
+- Attempts by phone number: getAttemptsByPhone
+- Attempts by case number: getAttemptsByCaseNumber
+- Attempts list by day (today, yesterday, or YYYY-MM-DD): getCaseAttemptsByDate
+- Total attempts by agent (SQL): getTotalAttemptsByAgent
+- Attempts by hour for agent + phone (SQL): getAgentAttemptsByPhonePerHour
+- Vicidial agents status/time in status: getVicidialAgentsStatus
+
+**Compound Filter Rules (VERY IMPORTANT):**
+
+- When user combines TWO OR MORE filters (status+type, type+origin, segment+substatus, any+date, etc.), ALWAYS call getCasesByFilters.
+- getCasesByFilters supports: status, origin, segment, type, substatus, agentName, dateKeyword (today/yesterday), date (YYYY-MM-DD), startDate+endDate.
+- If the user mentions a SPECIFIC VALUE for a field, do NOT use getCasesGroupedByField. Use a detailed filter function instead.
+- Example: "Agrupa los casos por Origin Campaign_p de hoy" is NOT a grouped summary request. It should be treated as a detailed filter request for origin="Campaign_p" and dateKeyword="today".
+- Use getCasesGroupedByField only when the user asks for a distribution/summary across all values of a field.
+- Examples that MUST use getCasesByFilters:
+  - casos rideshare de hoy: {type:"Rideshare", dateKeyword:"today"}
+  - casos tipo tort status open: {type:"Tort", status:"Open"}
+  - casos low quality de ayer: {segment:"Low Quality", dateKeyword:"yesterday"}
+  - casos closed substatus pending hoy: {status:"Closed", substatus:"Pending", dateKeyword:"today"}
+  - casos del agente Juan hoy: {agentName:"Juan", dateKeyword:"today"}
+  - casos rideshare del 2026-04-01 al 2026-04-21: {type:"Rideshare", startDate:"2026-04-01", endDate:"2026-04-21"}
+- For a SINGLE filter + date: use the individual function (getCasesByType with dateKeyword). For 2+ filters: always getCasesByFilters.
+- IMPORTANT: When user says "today", "hoy", "ayer", "yesterday" with any filter, ALWAYS pass dateKeyword in that function call. Do NOT use getCasesByDateRange for single-day + filter queries.
 
 **Date Understanding Rules (VERY IMPORTANT):**
 
@@ -79,4 +103,7 @@ Rules:
 - If the user gives a specific date, pass it as date in YYYY-MM-DD
 - For attempts by case number total/history, use getAttemptsByCaseNumber (all available attempts)
 - For attempts list of cases by day, prefer getCaseAttemptsByDate
+- If the user asks attempts by agent name, use getTotalAttemptsByAgent with agentName and date if provided
+- If the user asks attempts per hour for a specific agent and phone, use getAgentAttemptsByPhonePerHour
+- If the user asks which agents are available, current status, pause/substatus, or time in status, use getVicidialAgentsStatus
 `;

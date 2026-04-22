@@ -55,11 +55,20 @@ exports.askModel = async (messages) => {
         },
         {
           name: "getCasesByStatus",
-          description: "Get cases filtered by status",
+          description:
+            "Get cases filtered by status, optionally scoped to a date",
           parameters: {
             type: "object",
             properties: {
               status: { type: "string" },
+              dateKeyword: {
+                type: "string",
+                enum: ["today", "yesterday"],
+              },
+              date: {
+                type: "string",
+                description: "Specific date in YYYY-MM-DD format",
+              },
             },
             required: ["status"],
           },
@@ -89,44 +98,80 @@ exports.askModel = async (messages) => {
         },
         {
           name: "getCasesByOrigin",
-          description: "Get cases filtered by Origin",
+          description:
+            "Get cases filtered by Origin, optionally scoped to a date",
           parameters: {
             type: "object",
             properties: {
               origin: { type: "string" },
+              dateKeyword: {
+                type: "string",
+                enum: ["today", "yesterday"],
+              },
+              date: {
+                type: "string",
+                description: "Specific date in YYYY-MM-DD format",
+              },
             },
             required: ["origin"],
           },
         },
         {
           name: "getCasesBySupplierSegment",
-          description: "Get cases filtered by Supplier Segment",
+          description:
+            "Get cases filtered by Supplier Segment, optionally scoped to a date",
           parameters: {
             type: "object",
             properties: {
               segment: { type: "string" },
+              dateKeyword: {
+                type: "string",
+                enum: ["today", "yesterday"],
+              },
+              date: {
+                type: "string",
+                description: "Specific date in YYYY-MM-DD format",
+              },
             },
             required: ["segment"],
           },
         },
         {
           name: "getCasesBySubstatus",
-          description: "Get cases filtered by Substatus",
+          description:
+            "Get cases filtered by Substatus, optionally scoped to a date",
           parameters: {
             type: "object",
             properties: {
               substatus: { type: "string" },
+              dateKeyword: {
+                type: "string",
+                enum: ["today", "yesterday"],
+              },
+              date: {
+                type: "string",
+                description: "Specific date in YYYY-MM-DD format",
+              },
             },
             required: ["substatus"],
           },
         },
         {
           name: "getCasesByType",
-          description: "Get cases filtered by Type",
+          description:
+            "Get cases filtered by Type, optionally scoped to a date. If user says 'tort', use type='Tort'",
           parameters: {
             type: "object",
             properties: {
               type: { type: "string" },
+              dateKeyword: {
+                type: "string",
+                enum: ["today", "yesterday"],
+              },
+              date: {
+                type: "string",
+                description: "Specific date in YYYY-MM-DD format",
+              },
             },
             required: ["type"],
           },
@@ -134,11 +179,20 @@ exports.askModel = async (messages) => {
         {
           name: "getCasesGroupedByField",
           description:
-            "Group cases by a specific field like Status, Origin, Type or Supplier_Segment__c",
+            "Group and count cases by a single field for a summary across all values. Use ONLY when the user wants a distribution/resumen general, not when they specify a concrete value like Origin=Campaign_p or Type=Rideshare. Valid fields: Status, Origin, Type, Supplier_Segment__c (segment), Substatus__c (substatus). Optionally filter by date.",
           parameters: {
             type: "object",
             properties: {
-              field: { type: "string" },
+              field: {
+                type: "string",
+                enum: [
+                  "Status",
+                  "Origin",
+                  "Type",
+                  "Supplier_Segment__c",
+                  "Substatus__c",
+                ],
+              },
               dateKeyword: {
                 type: "string",
                 enum: ["today", "yesterday"],
@@ -150,18 +204,40 @@ exports.askModel = async (messages) => {
         {
           name: "getCasesByFilters",
           description:
-            "Get cases using combined filters such as status, origin, segment, type, substatus and date",
+            "Get detailed case records using one or more concrete filters. Use this for compound queries like status+type, type+origin, segment+substatus, any filter+date, filter+agent, and also when the user specifies a concrete field value such as Origin=Campaign_p, Type=Rideshare, Status=Open. Supports: status, origin, segment (Supplier_Segment__c), type, substatus, agentName, dateKeyword, date (YYYY-MM-DD), startDate+endDate.",
           parameters: {
             type: "object",
             properties: {
               status: { type: "string" },
               origin: { type: "string" },
-              segment: { type: "string" },
-              type: { type: "string" },
+              segment: {
+                type: "string",
+                description: "Supplier Segment: Low Quality, Medium, High",
+              },
+              type: {
+                type: "string",
+                description: "Case type. If user says 'tort' use 'Tort'",
+              },
               substatus: { type: "string" },
+              agentName: {
+                type: "string",
+                description: "Owner/agent name to filter by",
+              },
               dateKeyword: {
                 type: "string",
                 enum: ["today", "yesterday"],
+              },
+              date: {
+                type: "string",
+                description: "Specific date in YYYY-MM-DD format",
+              },
+              startDate: {
+                type: "string",
+                description: "Start date for a range (YYYY-MM-DD)",
+              },
+              endDate: {
+                type: "string",
+                description: "End date for a range (YYYY-MM-DD)",
               },
             },
           },
@@ -205,13 +281,54 @@ exports.askModel = async (messages) => {
         },
         {
           name: "getTotalAttemptsByAgent",
-          description: "Get total attempts of a specific agent",
+          description:
+            "Get total attempts of a specific agent from SQL Server, optionally scoped to a date",
+          parameters: {
+            type: "object",
+            properties: {
+              agentName: { type: "string" },
+              dateKeyword: {
+                type: "string",
+                enum: ["today", "yesterday"],
+              },
+              date: {
+                type: "string",
+                description: "Specific date in YYYY-MM-DD format",
+              },
+            },
+            required: ["agentName"],
+          },
+        },
+        {
+          name: "getAgentAttemptsByPhonePerHour",
+          description:
+            "Get attempts per hour for a specific agent and phone number from SQL Server, optionally for a specific date",
+          parameters: {
+            type: "object",
+            properties: {
+              agentName: { type: "string" },
+              phone: { type: "string" },
+              dateKeyword: {
+                type: "string",
+                enum: ["today", "yesterday"],
+              },
+              date: {
+                type: "string",
+                description: "Specific date in YYYY-MM-DD format",
+              },
+            },
+            required: ["agentName", "phone"],
+          },
+        },
+        {
+          name: "getVicidialAgentsStatus",
+          description:
+            "Get Vicidial realtime agents status, including time in current status. Optional filter by agent name.",
           parameters: {
             type: "object",
             properties: {
               agentName: { type: "string" },
             },
-            required: ["agentName"],
           },
         },
         {

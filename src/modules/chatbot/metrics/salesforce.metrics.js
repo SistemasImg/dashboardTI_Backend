@@ -1,6 +1,27 @@
 const logger = require("../../../utils/logger");
 const { normalizeDateRange } = require("../../../utils/dateNormalizer");
 
+function buildDateFilter(dateKeyword, date) {
+  if (dateKeyword) return `AND CreatedDate = ${dateKeyword.toUpperCase()}`;
+  if (date) return `AND CreatedDate = ${date}`;
+  return "";
+}
+
+function normalizeOriginValue(origin) {
+  if (!origin) return origin;
+
+  const normalizedInput = origin.trim().toLowerCase();
+  const originAliases = {
+    campaign_p: "Campaign_p",
+    campaing_p: "Campaign_p",
+    campaign_k: "Campaign_k",
+    campaing_k: "Campaign_k",
+    transfer: "Transfer",
+  };
+
+  return originAliases[normalizedInput] || origin;
+}
+
 const {
   authenticateSalesforce,
 } = require("../../../services/salesforce/auth.service");
@@ -92,11 +113,12 @@ exports.getCaseByNumber = async (caseNumber) => {
   }
 };
 
-exports.getCasesByStatus = async (status) => {
+exports.getCasesByStatus = async (status, dateKeyword = null, date = null) => {
   try {
     logger.info(`Fetching cases with status: ${status}`);
 
     const sf = await authenticateSalesforce();
+    const dateFilter = buildDateFilter(dateKeyword, date);
 
     const soql = `
    SELECT   
@@ -115,7 +137,8 @@ exports.getCasesByStatus = async (status) => {
         LastModifiedDate
         FROM Case
       WHERE Status = '${status}'
-      LIMIT 30
+      ${dateFilter}
+      ORDER BY CreatedDate DESC
     `;
 
     const result = await runSoqlQueryFull(sf, soql);
@@ -230,9 +253,11 @@ exports.getCaseByEmail = async (email) => {
   }
 };
 
-exports.getCasesByOrigin = async (origin) => {
+exports.getCasesByOrigin = async (origin, dateKeyword = null, date = null) => {
   try {
     const sf = await authenticateSalesforce();
+    const dateFilter = buildDateFilter(dateKeyword, date);
+    const originValue = normalizeOriginValue(origin);
 
     const soql = `
       SELECT
@@ -246,9 +271,9 @@ exports.getCasesByOrigin = async (origin) => {
         Owner.Name,
         CreatedDate
       FROM Case
-      WHERE Origin = '${origin}'
+      WHERE Origin = '${originValue}'
+      ${dateFilter}
       ORDER BY CreatedDate DESC
-      LIMIT 30
     `;
 
     const result = await runSoqlQueryFull(sf, soql);
@@ -262,9 +287,14 @@ exports.getCasesByOrigin = async (origin) => {
   }
 };
 
-exports.getCasesBySupplierSegment = async (segment) => {
+exports.getCasesBySupplierSegment = async (
+  segment,
+  dateKeyword = null,
+  date = null,
+) => {
   try {
     const sf = await authenticateSalesforce();
+    const dateFilter = buildDateFilter(dateKeyword, date);
 
     const soql = `
       SELECT
@@ -279,8 +309,8 @@ exports.getCasesBySupplierSegment = async (segment) => {
         CreatedDate
       FROM Case
       WHERE Supplier_Segment__c = '${segment}'
+      ${dateFilter}
       ORDER BY CreatedDate DESC
-      LIMIT 30
     `;
 
     const result = await runSoqlQueryFull(sf, soql);
@@ -294,9 +324,14 @@ exports.getCasesBySupplierSegment = async (segment) => {
   }
 };
 
-exports.getCasesBySubstatus = async (substatus) => {
+exports.getCasesBySubstatus = async (
+  substatus,
+  dateKeyword = null,
+  date = null,
+) => {
   try {
     const sf = await authenticateSalesforce();
+    const dateFilter = buildDateFilter(dateKeyword, date);
 
     const soql = `
       SELECT
@@ -311,8 +346,8 @@ exports.getCasesBySubstatus = async (substatus) => {
         CreatedDate
       FROM Case
       WHERE Substatus__c = '${substatus}'
+      ${dateFilter}
       ORDER BY CreatedDate DESC
-      LIMIT 30
     `;
 
     const result = await runSoqlQueryFull(sf, soql);
@@ -326,9 +361,10 @@ exports.getCasesBySubstatus = async (substatus) => {
   }
 };
 
-exports.getCasesByType = async (type) => {
+exports.getCasesByType = async (type, dateKeyword = null, date = null) => {
   try {
     const sf = await authenticateSalesforce();
+    const dateFilter = buildDateFilter(dateKeyword, date);
 
     const soql = `
       SELECT
@@ -343,8 +379,8 @@ exports.getCasesByType = async (type) => {
         CreatedDate
       FROM Case
       WHERE Type = '${type}'
+      ${dateFilter}
       ORDER BY CreatedDate DESC
-      LIMIT 30
     `;
 
     const result = await runSoqlQueryFull(sf, soql);
@@ -358,36 +394,72 @@ exports.getCasesByType = async (type) => {
   }
 };
 
+const FIELD_MAP = {
+  status: "Status",
+  origin: "Origin",
+  type: "Type",
+  "supplier segment": "Supplier_Segment__c",
+  supplier_segment__c: "Supplier_Segment__c",
+  segment: "Supplier_Segment__c",
+  substatus: "Substatus__c",
+  substatus__c: "Substatus__c",
+};
+
+const GROUPED_FIELD_LABELS = {
+  Status: "Status",
+  Origin: "Origin",
+  Type: "Type",
+  Supplier_Segment__c: "Supplier Segment",
+  Substatus__c: "Substatus",
+};
+
 exports.getCasesGroupedByField = async (field, dateKeyword = null) => {
   try {
     const sf = await authenticateSalesforce();
 
+    const normalizedField = FIELD_MAP[field.toLowerCase()] || field;
+    const ALLOWED_FIELDS = [
+      "Status",
+      "Origin",
+      "Type",
+      "Supplier_Segment__c",
+      "Substatus__c",
+    ];
+    if (!ALLOWED_FIELDS.includes(normalizedField)) {
+      throw new Error("SF_INVALID_GROUP_FIELD");
+    }
+
     let dateFilter = "";
     if (dateKeyword) {
-      dateFilter = `AND CreatedDate = ${dateKeyword}`;
+      dateFilter = `AND CreatedDate = ${dateKeyword.toUpperCase()}`;
     }
 
     const soql = `
-      SELECT
-        Id,
-        CaseNumber,
-        Status,
-        Substatus__c,
-        Type,
-        Origin,
-        Supplier_Segment__c,
-        Owner.Name,
-        ${field}
+      SELECT ${normalizedField}, COUNT(Id) cnt
       FROM Case
-      WHERE ${field} != null
+      WHERE ${normalizedField} != null
       ${dateFilter}
-      ORDER BY ${field}, CreatedDate DESC
-      LIMIT 200
+      GROUP BY ${normalizedField}
+      ORDER BY COUNT(Id) DESC
     `;
 
     const result = await runSoqlQueryFull(sf, soql);
 
-    return result.records;
+    const groups = {};
+    let total = 0;
+    result.records.forEach((r) => {
+      const val = r[normalizedField] || "N/A";
+      groups[val] = r.cnt;
+      total += r.cnt;
+    });
+
+    return {
+      field: normalizedField,
+      fieldLabel: GROUPED_FIELD_LABELS[normalizedField] || normalizedField,
+      groups,
+      total,
+      dateScope: dateKeyword || "all",
+    };
   } catch (error) {
     throw new Error("SF_GROUP_QUERY_FAILED");
   }
@@ -398,21 +470,37 @@ exports.getCasesByFilters = async (filters) => {
     const sf = await authenticateSalesforce();
 
     const conditions = [];
+    const originValue = normalizeOriginValue(filters.origin);
 
     if (filters.status) conditions.push(`Status = '${filters.status}'`);
-
-    if (filters.origin) conditions.push(`Origin = '${filters.origin}'`);
-
+    if (originValue) conditions.push(`Origin = '${originValue}'`);
     if (filters.segment)
       conditions.push(`Supplier_Segment__c = '${filters.segment}'`);
-
-    if (filters.type) conditions.push(`Type = '${filters.type}'`);
-
+    if (filters.type) {
+      const typeVal =
+        filters.type.toLowerCase() === "tort" ? "Tort" : filters.type;
+      conditions.push(`Type = '${typeVal}'`);
+    }
     if (filters.substatus)
       conditions.push(`Substatus__c = '${filters.substatus}'`);
+    if (filters.agentName)
+      conditions.push(`Owner.Name LIKE '%${filters.agentName}%'`);
 
-    if (filters.dateKeyword)
-      conditions.push(`CreatedDate = ${filters.dateKeyword}`);
+    if (filters.dateKeyword) {
+      conditions.push(`CreatedDate = ${filters.dateKeyword.toUpperCase()}`);
+    } else if (filters.date) {
+      const { startUTC, endUTC } = normalizeDateRange(
+        filters.date,
+        filters.date,
+      );
+      conditions.push(`CreatedDate >= ${startUTC} AND CreatedDate < ${endUTC}`);
+    } else if (filters.startDate && filters.endDate) {
+      const { startUTC, endUTC } = normalizeDateRange(
+        filters.startDate,
+        filters.endDate,
+      );
+      conditions.push(`CreatedDate >= ${startUTC} AND CreatedDate < ${endUTC}`);
+    }
 
     const whereClause = conditions.length
       ? `WHERE ${conditions.join(" AND ")}`
@@ -427,12 +515,14 @@ exports.getCasesByFilters = async (filters) => {
         Type,
         Origin,
         Supplier_Segment__c,
+        Email__c,
+        Phone_Numbercontact__c,
         Owner.Name,
+        FullName__c,
         CreatedDate
       FROM Case
       ${whereClause}
       ORDER BY CreatedDate DESC
-      LIMIT 30
     `;
 
     const result = await runSoqlQueryFull(sf, soql);
