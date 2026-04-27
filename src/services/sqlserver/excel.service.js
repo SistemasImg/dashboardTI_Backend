@@ -58,7 +58,7 @@ function getPrintableCellValue(cellValue) {
  */
 function sanitizeSheetName(name) {
   return name
-    .replace(/[\\/?*[\]:]/g, "")
+    .replaceAll(/[\\/?*[\]:]/g, "")
     .trim()
     .slice(0, 31);
 }
@@ -107,10 +107,10 @@ function buildCallCenterSummaryMatrix(records) {
 }
 
 /**
- * Build a detail matrix by Agent and Phone Number for a given call center.
+ * Build a detail matrix by Agent, Phone Number, Case Number, Supplier and Type for a given call center.
  * @param {Array} records - Raw records from database
  * @param {String} callCenterFilter - Call center to filter by
- * @returns {Array} One row per agent+phone combination
+ * @returns {Array} One row per agent+phone+case+supplier+type combination
  */
 function buildAgentsAttemptsMatrix(records, callCenterFilter = null) {
   const grouped = new Map();
@@ -134,13 +134,19 @@ function buildAgentsAttemptsMatrix(records, callCenterFilter = null) {
 
     const agentName = record["AGENT NAME"] || "No agent";
     const phoneNumber = record["PHONE NUMBER"] || "No number";
+    const caseNumber = record.CASE_NUMBER || "No case";
+    const supplier = record.SUPPLIER || "No supplier";
+    const type = record.TYPE || "No type";
     const attempts = Number(record.ATTEMPTS) || 0;
-    const key = `${agentName}__${phoneNumber}`;
+    const key = `${agentName}__${phoneNumber}__${caseNumber}__${supplier}__${type}`;
 
     if (!grouped.has(key)) {
       grouped.set(key, {
         agentName,
         phoneNumber,
+        caseNumber,
+        supplier,
+        type,
         hourlyAttempts: createEmptyHourlyAttempts(),
       });
     }
@@ -160,10 +166,22 @@ function buildAgentsAttemptsMatrix(records, callCenterFilter = null) {
       if (a.agentName !== b.agentName) {
         return a.agentName.localeCompare(b.agentName);
       }
-      return a.phoneNumber.localeCompare(b.phoneNumber, undefined, {
-        numeric: true,
-        sensitivity: "base",
-      });
+      if (a.phoneNumber !== b.phoneNumber) {
+        return a.phoneNumber.localeCompare(b.phoneNumber, undefined, {
+          numeric: true,
+          sensitivity: "base",
+        });
+      }
+      if (a.caseNumber !== b.caseNumber) {
+        return a.caseNumber.localeCompare(b.caseNumber, undefined, {
+          numeric: true,
+          sensitivity: "base",
+        });
+      }
+      if (a.supplier !== b.supplier) {
+        return a.supplier.localeCompare(b.supplier);
+      }
+      return a.type.localeCompare(b.type);
     });
 }
 
@@ -309,6 +327,9 @@ const SUMMARY_COLUMNS = [
 const DETAIL_COLUMNS = [
   { header: "Agent", key: "agent_name", width: 22 },
   { header: "Phone Number", key: "phone_number", width: 15 },
+  { header: "Case Number", key: "case_number", width: 14 },
+  { header: "Supplier", key: "supplier", width: 22 },
+  { header: "Type", key: "type", width: 16 },
   { header: "Total", key: "total", width: 8 },
   ...HOUR_COLUMNS,
 ];
@@ -351,7 +372,7 @@ exports.generateAgentsAttemptsExcel = async (records, date) => {
     );
 
     // ── Sheets per call center ────────────────────────────────────────────────
-    const callCenters = summaryData.map((row) => row.callCenter);
+    const callCenters = [...new Set(summaryData.map((row) => row.callCenter))];
 
     for (const callCenter of callCenters) {
       const detailData = buildAgentsAttemptsMatrix(records, callCenter);
@@ -371,9 +392,12 @@ exports.generateAgentsAttemptsExcel = async (records, date) => {
         (row) => ({
           agent_name: row.agentName ?? "",
           phone_number: row.phoneNumber ?? "",
+          case_number: row.caseNumber ?? "",
+          supplier: row.supplier ?? "",
+          type: row.type ?? "",
           total: row.totalAttempts,
         }),
-        3,
+        6,
         true,
       );
     }

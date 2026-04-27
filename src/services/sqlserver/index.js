@@ -3,6 +3,10 @@ const { buildAttemptsByDateQuery } = require("./queries/attempts.query");
 const { buildAttemptsTotalQuery } = require("./queries/totalAttemps.query");
 const { buildAgentsAttemptsQuery } = require("./queries/attempsxAgent");
 const sqlServerPool = require("./pool.service");
+const {
+  getSupplierTypeByPhones,
+  normalizePhone,
+} = require("../salesforce/phoneLookup.service");
 
 async function getAttemptsByDate() {
   try {
@@ -48,9 +52,39 @@ async function getAgentsAttempts(date = null) {
       .request()
       .query(buildAgentsAttemptsQuery(date));
 
+    const rows = recordsets[0] || [];
+
+    if (!rows.length) {
+      logger.info("No SQL Server rows found for agents attempts");
+      return [];
+    }
+
+    const phones = rows.map((row) => row["PHONE NUMBER"]).filter(Boolean);
+
+    let sfByPhone = new Map();
+    try {
+      sfByPhone = await getSupplierTypeByPhones(phones);
+    } catch (sfError) {
+      logger.warn(
+        `Salesforce enrichment failed for agents attempts: ${sfError.message}`,
+      );
+    }
+
+    const enrichedRows = rows.map((row) => {
+      const normalizedPhone = normalizePhone(row["PHONE NUMBER"]);
+      const sfInfo = normalizedPhone ? sfByPhone.get(normalizedPhone) : null;
+
+      return {
+        ...row,
+        CASE_NUMBER: sfInfo?.caseNumber || null,
+        SUPPLIER: sfInfo?.supplier || null,
+        TYPE: sfInfo?.type || null,
+      };
+    });
+
     logger.info("✅ Agents attempts query executed successfully");
 
-    return recordsets[0];
+    return enrichedRows;
   } catch (error) {
     logger.error("❌ SQL Server agents attempts query failed", {
       message: error.message,
