@@ -4,52 +4,319 @@ const fs = require("node:fs");
 const logger = require("../../utils/logger");
 
 const DOWNLOADS_DIR = path.join(__dirname, "../../uploads/excel-exports");
+const REPORT_START_HOUR = 8;
+const REPORT_END_HOUR = 20;
+const REPORT_HOURS = Array.from(
+  { length: REPORT_END_HOUR - REPORT_START_HOUR + 1 },
+  (_, index) => REPORT_START_HOUR + index,
+);
 
 // Create download folder if it does not exist
 if (!fs.existsSync(DOWNLOADS_DIR)) {
   fs.mkdirSync(DOWNLOADS_DIR, { recursive: true });
 }
 
-/**
- * Group agents attempts data by Call Center, Agent, Hour, and Phone Number
- * Each unique combination gets its own row (no aggregation by phone)
- * @param {Array} records - Raw records from database
- * @returns {Array} Grouped and organized data
- */
-function groupAgentsAttempts(records) {
-  const grouped = {};
+function createEmptyHourlyAttempts() {
+  return REPORT_HOURS.reduce((hours, hour) => {
+    hours[hour] = 0;
+    return hours;
+  }, {});
+}
 
-  records.forEach((record) => {
-    // Include PHONE NUMBER in the key to separate records by phone
-    const key = `${record["CALL CENTER"]}_${record["AGENT NAME"]}_${record.HOUR}_${record["PHONE NUMBER"]}`;
+function getPrintableCellValue(cellValue) {
+  if (cellValue == null) {
+    return "";
+  }
 
-    if (!grouped[key]) {
-      grouped[key] = {
-        callCenter: record["CALL CENTER"],
-        agentName: record["AGENT NAME"],
-        hour: record.HOUR,
-        phoneNumber: record["PHONE NUMBER"],
-        attempts: 0,
-      };
+  if (typeof cellValue === "string" || typeof cellValue === "number") {
+    return String(cellValue);
+  }
+
+  if (typeof cellValue === "object") {
+    if ("richText" in cellValue && Array.isArray(cellValue.richText)) {
+      return cellValue.richText.map((part) => part.text).join("");
     }
 
-    grouped[key].attempts += record.ATTEMPTS || 0;
-  });
+    if ("text" in cellValue && typeof cellValue.text === "string") {
+      return cellValue.text;
+    }
 
-  // Convert to array and sort by Call Center, then Agent, then Hour
-  return Object.values(grouped).sort((a, b) => {
-    if (a.callCenter !== b.callCenter) {
-      return a.callCenter.localeCompare(b.callCenter);
+    if ("result" in cellValue && cellValue.result != null) {
+      return String(cellValue.result);
     }
-    if (a.agentName !== b.agentName) {
-      return a.agentName.localeCompare(b.agentName);
-    }
-    return a.hour - b.hour;
-  });
+
+    return JSON.stringify(cellValue);
+  }
+
+  return String(cellValue);
 }
 
 /**
- * Generate Excel report for agents attempts
+ * Sanitize a string to be a valid Excel sheet name (max 31 chars, no special chars).
+ * @param {String} name
+ * @returns {String}
+ */
+function sanitizeSheetName(name) {
+  return name
+    .replace(/[\\/?*[\]:]/g, "")
+    .trim()
+    .slice(0, 31);
+}
+
+/**
+ * Build a summary matrix grouped only by Call Center with one column per hour.
+ * @param {Array} records - Raw records from database
+ * @returns {Array} One row per call center
+ */
+function buildCallCenterSummaryMatrix(records) {
+  const grouped = new Map();
+
+  records.forEach((record) => {
+    const hour = Number(record.HOUR);
+
+    if (
+      !Number.isInteger(hour) ||
+      hour < REPORT_START_HOUR ||
+      hour > REPORT_END_HOUR
+    ) {
+      return;
+    }
+
+    const callCenter = record["CALL CENTER"] || "No call center";
+    const attempts = Number(record.ATTEMPTS) || 0;
+
+    if (!grouped.has(callCenter)) {
+      grouped.set(callCenter, {
+        callCenter,
+        hourlyAttempts: createEmptyHourlyAttempts(),
+      });
+    }
+
+    grouped.get(callCenter).hourlyAttempts[hour] += attempts;
+  });
+
+  return Array.from(grouped.values())
+    .map((row) => ({
+      ...row,
+      totalAttempts: REPORT_HOURS.reduce(
+        (sum, hour) => sum + row.hourlyAttempts[hour],
+        0,
+      ),
+    }))
+    .sort((a, b) => a.callCenter.localeCompare(b.callCenter));
+}
+
+/**
+ * Build a detail matrix by Agent and Phone Number for a given call center.
+ * @param {Array} records - Raw records from database
+ * @param {String} callCenterFilter - Call center to filter by
+ * @returns {Array} One row per agent+phone combination
+ */
+function buildAgentsAttemptsMatrix(records, callCenterFilter = null) {
+  const grouped = new Map();
+
+  records.forEach((record) => {
+    const hour = Number(record.HOUR);
+
+    if (
+      !Number.isInteger(hour) ||
+      hour < REPORT_START_HOUR ||
+      hour > REPORT_END_HOUR
+    ) {
+      return;
+    }
+
+    const callCenter = record["CALL CENTER"] || "No call center";
+
+    if (callCenterFilter !== null && callCenter !== callCenterFilter) {
+      return;
+    }
+
+    const agentName = record["AGENT NAME"] || "No agent";
+    const phoneNumber = record["PHONE NUMBER"] || "No number";
+    const attempts = Number(record.ATTEMPTS) || 0;
+    const key = `${agentName}__${phoneNumber}`;
+
+    if (!grouped.has(key)) {
+      grouped.set(key, {
+        agentName,
+        phoneNumber,
+        hourlyAttempts: createEmptyHourlyAttempts(),
+      });
+    }
+
+    grouped.get(key).hourlyAttempts[hour] += attempts;
+  });
+
+  return Array.from(grouped.values())
+    .map((row) => ({
+      ...row,
+      totalAttempts: REPORT_HOURS.reduce(
+        (sum, hour) => sum + row.hourlyAttempts[hour],
+        0,
+      ),
+    }))
+    .sort((a, b) => {
+      if (a.agentName !== b.agentName) {
+        return a.agentName.localeCompare(b.agentName);
+      }
+      return a.phoneNumber.localeCompare(b.phoneNumber, undefined, {
+        numeric: true,
+        sensitivity: "base",
+      });
+    });
+}
+
+/**
+ * Add a styled header row to a worksheet.
+ * @param {ExcelJS.Worksheet} worksheet
+ * @param {Array} columnHeaders - Array of header strings
+ * @param {String} fillColor - ARGB color for background
+ * @returns {ExcelJS.Row}
+ */
+function addHeaderRow(worksheet, columnHeaders, fillColor = "FF4472C4") {
+  const headerRow = worksheet.addRow(columnHeaders);
+  headerRow.font = { bold: true, color: { argb: "FFFFFFFF" } };
+  headerRow.alignment = { horizontal: "center", vertical: "middle" };
+  headerRow.fill = {
+    type: "pattern",
+    pattern: "solid",
+    fgColor: { argb: fillColor },
+  };
+  return headerRow;
+}
+
+/**
+ * Add a title + subtitle block to a worksheet (rows 1-3).
+ * @param {ExcelJS.Worksheet} worksheet
+ * @param {String} title
+ * @param {Number} totalCols - number of columns (for merge)
+ * @param {Number} totalAttempts
+ */
+function addTitleBlock(worksheet, title, totalCols, totalAttempts) {
+  const titleRow = worksheet.addRow([title]);
+  worksheet.mergeCells(titleRow.number, 1, titleRow.number, totalCols);
+  titleRow.font = { bold: true, size: 13, color: { argb: "FF1F1F1F" } };
+  titleRow.alignment = { horizontal: "center", vertical: "middle" };
+  titleRow.fill = {
+    type: "pattern",
+    pattern: "solid",
+    fgColor: { argb: "FFD9EAF7" },
+  };
+
+  const summaryRow = worksheet.addRow([`Total attempts: ${totalAttempts}`]);
+  worksheet.mergeCells(summaryRow.number, 1, summaryRow.number, totalCols);
+  summaryRow.font = { italic: true, color: { argb: "FF4F4F4F" } };
+  summaryRow.alignment = { horizontal: "center" };
+
+  worksheet.addRow([]);
+}
+
+/**
+ * Populate a worksheet with the hourly-attempts matrix.
+ * @param {ExcelJS.Worksheet} worksheet
+ * @param {String} title - Sheet title text
+ * @param {Array} columnDefs - Array of { header, key, width }
+ * @param {Array} matrixRows - Each row has: hourlyAttempts, totalAttempts, and the identifier fields matching columnDefs keys
+ * @param {Function} buildRowValues - (row) => object with column key → value
+ * @param {Number} frozenCols - How many columns to freeze (xSplit)
+ * @param {Boolean} enableFilter - Whether to add autoFilter on the header row
+ */
+function populateMatrixSheet(
+  worksheet,
+  title,
+  columnDefs,
+  matrixRows,
+  buildRowValues,
+  frozenCols,
+  enableFilter = false,
+) {
+  const totalAttempts = matrixRows.reduce(
+    (sum, row) => sum + row.totalAttempts,
+    0,
+  );
+  const totalCols = columnDefs.length;
+
+  worksheet.columns = columnDefs.map(({ key, width }) => ({ key, width }));
+
+  addTitleBlock(worksheet, title, totalCols, totalAttempts);
+
+  const headerRow = addHeaderRow(
+    worksheet,
+    columnDefs.map((col) => col.header),
+  );
+
+  const totalsByHour = createEmptyHourlyAttempts();
+
+  matrixRows.forEach((row, index) => {
+    const rowValues = buildRowValues(row);
+    REPORT_HOURS.forEach((hour) => {
+      rowValues[`hour_${hour}`] = row.hourlyAttempts[hour] || 0;
+      totalsByHour[hour] += row.hourlyAttempts[hour] || 0;
+    });
+
+    const worksheetRow = worksheet.addRow(rowValues);
+    if (index % 2 === 0) {
+      worksheetRow.fill = {
+        type: "pattern",
+        pattern: "solid",
+        fgColor: { argb: "FFF7F9FC" },
+      };
+    }
+  });
+
+  // Totals row
+  const totalRowValues = buildRowValues({
+    hourlyAttempts: totalsByHour,
+    totalAttempts,
+  });
+  REPORT_HOURS.forEach((hour) => {
+    totalRowValues[`hour_${hour}`] = totalsByHour[hour];
+  });
+  const totalRow = worksheet.addRow(totalRowValues);
+  totalRow.font = { bold: true, color: { argb: "FF1F1F1F" } };
+  totalRow.fill = {
+    type: "pattern",
+    pattern: "solid",
+    fgColor: { argb: "FFE2F0D9" },
+  };
+
+  worksheet.views = [{ state: "frozen", ySplit: 4, xSplit: frozenCols }];
+
+  if (enableFilter) {
+    // Filter buttons only on identifier columns (Agent and Phone Number),
+    // excluding Total and hour columns to keep the header clean.
+    worksheet.autoFilter = {
+      from: { row: headerRow.number, column: 1 },
+      to: { row: headerRow.number, column: frozenCols - 1 },
+    };
+  }
+}
+
+// Column definitions reused across sheets
+const HOUR_COLUMNS = REPORT_HOURS.map((hour) => ({
+  header: `${String(hour).padStart(2, "0")}:00`,
+  key: `hour_${hour}`,
+  width: 7,
+}));
+
+const SUMMARY_COLUMNS = [
+  { header: "Call Center", key: "call_center", width: 16 },
+  { header: "Total", key: "total", width: 8 },
+  ...HOUR_COLUMNS,
+];
+
+const DETAIL_COLUMNS = [
+  { header: "Agent", key: "agent_name", width: 22 },
+  { header: "Phone Number", key: "phone_number", width: 15 },
+  { header: "Total", key: "total", width: 8 },
+  ...HOUR_COLUMNS,
+];
+
+/**
+ * Generate Excel report for agents attempts (multi-sheet)
+ * Sheet 1: summary by call center (attempts per hour)
+ * Sheet N+1: detail for each call center (agent + phone + hours)
  * @param {Array} records - Records from the database
  * @param {String} date - Date for the report (YYYY-MM-DD)
  * @returns {Object} { filePath, fileName, fileUrl }
@@ -58,116 +325,58 @@ exports.generateAgentsAttemptsExcel = async (records, date) => {
   try {
     logger.info(`🔄 Generating agents attempts Excel for date: ${date}`);
 
-    const workbook = new ExcelJS.Workbook();
-    const worksheet = workbook.addWorksheet("Agents Attempts");
+    const summaryData = buildCallCenterSummaryMatrix(records);
 
-    // Group and organize data
-    const groupedData = groupAgentsAttempts(records);
-
-    // Define headers
-    const headers = [
-      "Call Center",
-      "Agent Name",
-      "Hour",
-      "Phone Number",
-      "Total Attempts",
-    ];
-
-    worksheet.columns = headers.map((h) => ({
-      header: h,
-      key: h.toLowerCase().replaceAll(" ", "_"),
-      width: 18,
-    }));
-
-    // Style headers
-    worksheet.getRow(1).font = {
-      bold: true,
-      color: { argb: "FFFFFFFF" },
-    };
-    worksheet.getRow(1).fill = {
-      type: "pattern",
-      pattern: "solid",
-      fgColor: { argb: "FF4472C4" },
-    };
-
-    // Add summary row
-    const totalAttempts = groupedData.reduce(
-      (sum, row) => sum + row.attempts,
-      0,
-    );
-    worksheet.addRow({
-      call_center: `Report Date: ${date}`,
-      agent_name: `Total Attempts: ${totalAttempts}`,
-      hour: "",
-      phone_number: "",
-      total_attempts: "",
-    });
-
-    // Add empty row for spacing
-    worksheet.addRow({});
-
-    // Add data rows
-    let currentCallCenter = null;
-    let callCenterAttempts = 0;
-
-    groupedData.forEach((row, index) => {
-      // If call center changed, add subtotal
-      if (currentCallCenter && currentCallCenter !== row.callCenter) {
-        worksheet.addRow({
-          call_center: `${currentCallCenter} Subtotal:`,
-          agent_name: callCenterAttempts,
-          hour: "",
-          phone_number: "",
-          total_attempts: "",
-        });
-        worksheet.addRow({});
-        callCenterAttempts = 0;
-      }
-
-      currentCallCenter = row.callCenter;
-      callCenterAttempts += row.attempts;
-
-      // Add data row
-      const rowNum = worksheet.addRow({
-        call_center: row.callCenter,
-        agent_name: row.agentName,
-        hour: `${String(row.hour).padStart(2, "0")}:00`,
-        phone_number: row.phoneNumber || "N/A",
-        total_attempts: row.attempts,
-      }).number;
-
-      // Alternate row colors for better readability
-      if (index % 2 === 0) {
-        worksheet.getRow(rowNum).fill = {
-          type: "pattern",
-          pattern: "solid",
-          fgColor: { argb: "FFF2F2F2" },
-        };
-      }
-    });
-
-    // Add final subtotal
-    if (currentCallCenter) {
-      worksheet.addRow({
-        call_center: `${currentCallCenter} Subtotal:`,
-        agent_name: callCenterAttempts,
-        hour: "",
-        phone_number: "",
-        total_attempts: "",
-      });
+    if (summaryData.length === 0) {
+      throw new Error(
+        `No data available between ${REPORT_START_HOUR}:00 and ${REPORT_END_HOUR}:00 for ${date}`,
+      );
     }
 
-    // Auto-adjust column widths
-    worksheet.columns.forEach((column) => {
-      let maxLength = 0;
-      column.eachCell({ includeEmpty: true }, (cell) => {
-        const cellLength = cell.value ? cell.value.toString().length : 0;
-        if (cellLength > maxLength) {
-          maxLength = cellLength;
-        }
-      });
-      column.width = Math.min(maxLength + 2, 50);
-    });
+    const workbook = new ExcelJS.Workbook();
+
+    // ── Sheet 1: Summary by call center (no filter) ──────────────────────────
+    const summarySheet = workbook.addWorksheet("Summary");
+    populateMatrixSheet(
+      summarySheet,
+      `Summary by Call Center - ${date}`,
+      SUMMARY_COLUMNS,
+      summaryData,
+      (row) => ({
+        call_center: row.callCenter ?? "TOTAL",
+        total: row.totalAttempts,
+      }),
+      2,
+      false,
+    );
+
+    // ── Sheets per call center ────────────────────────────────────────────────
+    const callCenters = summaryData.map((row) => row.callCenter);
+
+    for (const callCenter of callCenters) {
+      const detailData = buildAgentsAttemptsMatrix(records, callCenter);
+
+      if (detailData.length === 0) {
+        continue;
+      }
+
+      const sheetName = sanitizeSheetName(callCenter);
+      const detailSheet = workbook.addWorksheet(sheetName);
+
+      populateMatrixSheet(
+        detailSheet,
+        `${callCenter} - Attempts by Agent and Hour - ${date}`,
+        DETAIL_COLUMNS,
+        detailData,
+        (row) => ({
+          agent_name: row.agentName ?? "",
+          phone_number: row.phoneNumber ?? "",
+          total: row.totalAttempts,
+        }),
+        3,
+        true,
+      );
+    }
 
     // Generate a single reusable filename so the report is overwritten on every request
     const fileName = `agents_attempts.xlsx`;
