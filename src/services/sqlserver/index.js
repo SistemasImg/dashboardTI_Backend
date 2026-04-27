@@ -79,6 +79,8 @@ async function getAgentsAttempts(date = null) {
         CASE_NUMBER: sfInfo?.caseNumber || null,
         SUPPLIER: sfInfo?.supplier || null,
         TYPE: sfInfo?.type || null,
+        STATUS: sfInfo?.status || null,
+        SUBSTATUS: sfInfo?.substatus || null,
       };
     });
 

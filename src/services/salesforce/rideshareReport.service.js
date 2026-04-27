@@ -1,5 +1,6 @@
 const logger = require("../../utils/logger");
 const jwt = require("jsonwebtoken");
+const { DateTime } = require("luxon");
 const { User } = require("../../models");
 const {
   updateActiveAssignmentAttempts,
@@ -38,6 +39,13 @@ function normalizeSFPhone(phone) {
 
   const digits = phone.replace(/\D/g, "");
   return digits.length === 10 ? digits : null;
+}
+
+function getPeruDateKey(daysAgo = 0) {
+  return DateTime.now()
+    .setZone("America/Lima")
+    .minus({ days: daysAgo })
+    .toFormat("yyyy-LL-dd");
 }
 
 async function getRideshareReport(token) {
@@ -93,13 +101,9 @@ async function getRideshareReport(token) {
     });
 
     // 6️⃣ Attempts Data Mapping
-    const today = new Date().toISOString().split("T")[0];
-    const yesterday = new Date(Date.now() - 86400000)
-      .toISOString()
-      .split("T")[0];
-    const twoDaysAgo = new Date(Date.now() - 2 * 86400000)
-      .toISOString()
-      .split("T")[0];
+    const today = getPeruDateKey(0);
+    const yesterday = getPeruDateKey(1);
+    const twoDaysAgo = getPeruDateKey(2);
     const todayMap = new Map();
     const yesterdayMap = new Map();
     const twoDaysAgoMap = new Map();

@@ -38,16 +38,13 @@ async function syncAttemptsDaily() {
       const phone = normalizePhone(row.ANI);
       if (!phone || !row.CallDate) continue;
 
-      const callDateObj = new Date(row.CallDate);
-
-      if (isNaN(callDateObj.getTime())) {
+      const date = String(row.CallDate).slice(0, 10);
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
         logger.warn("⚠️ Invalid CallDate detected", {
           rawValue: row.CallDate,
         });
         continue;
       }
-
-      const date = callDateObj.toISOString().split("T")[0];
 
       grouped.set(`${phone}_${date}`, {
         phone,

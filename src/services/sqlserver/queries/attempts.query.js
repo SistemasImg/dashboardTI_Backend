@@ -1,7 +1,7 @@
 function buildAttemptsByDateQuery() {
   return `
 SELECT 
-    CAST([TIMESTAMP] AS DATE) AS CallDate,
+    CONVERT(VARCHAR(10), CAST([TIMESTAMP] AS DATE), 23) AS CallDate,
     ANI,
     COUNT(*) AS AttemptsSQL
 FROM INTAKE.Call_Records_five9

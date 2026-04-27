@@ -66,6 +66,8 @@ async function getSupplierTypeByPhones(phoneNumbers = []) {
           caseNumber: record.CaseNumber || null,
           supplier: record.Owner?.Name || null,
           type: record.Type || null,
+          status: record.Status || null,
+          substatus: record.Substatus__c || null,
           createdAt,
         });
       }
@@ -79,6 +81,8 @@ async function getSupplierTypeByPhones(phoneNumbers = []) {
       caseNumber: found?.caseNumber || null,
       supplier: found?.supplier || null,
       type: found?.type || null,
+      status: found?.status || null,
+      substatus: found?.substatus || null,
     });
   });
 

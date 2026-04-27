@@ -23,6 +23,8 @@ SELECT
   CaseNumber,
   Phone_Numbercontact__c,
   Type,
+  Status,
+  Substatus__c,
   Owner.Name,
   CreatedDate
 FROM Case

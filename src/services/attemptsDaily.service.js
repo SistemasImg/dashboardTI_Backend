@@ -1,13 +1,16 @@
 const logger = require("../utils/logger");
 const { AttemptsDaily } = require("../models");
 const { Op, fn, col } = require("sequelize");
+const { DateTime } = require("luxon");
 
 exports.getAttemptsLastNDays = async (days = 3) => {
   logger.info("AttemptsDailyService → getAttemptsLastNDays() started");
 
   try {
-    const startDate = new Date();
-    startDate.setDate(startDate.getDate() - (days - 1));
+    const startDate = DateTime.now()
+      .setZone("America/Lima")
+      .minus({ days: days - 1 })
+      .toFormat("yyyy-LL-dd");
 
     const results = await AttemptsDaily.findAll({
       where: {
