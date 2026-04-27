@@ -4,17 +4,14 @@ const logger = require("../utils/logger");
 const jwt = require("jsonwebtoken");
 const { MessageRecords, User } = require("../models");
 const { Op } = require("sequelize");
+const infobipConfig = require("../config/infobip");
 
 const httpsAgent = new https.Agent({
   rejectUnauthorized: false,
 });
 
-const INFOBIP_API_KEY =
-  process.env.INFOBIP_API_KEY ||
-  "App 95cd9e5ab9b979b42403ef6d8ff68464-c833e533-3301-4d55-84a1-92520cef9647";
-
 const INFOBIP_HEADERS = {
-  Authorization: INFOBIP_API_KEY,
+  Authorization: infobipConfig.apiKey,
   "Content-Type": "application/json",
 };
 
@@ -102,11 +99,11 @@ async function InfobitService(payload, user) {
 
   try {
     const { data } = await axios.post(
-      "https://api.infobip.com/sms/3/messages",
+      `${infobipConfig.baseUrl}/sms/3/messages`,
       {
         messages: [
           {
-            from: "+17576599670",
+            from: infobipConfig.sender,
             destinations: [{ to: `+1${normalizedPhone}` }],
             content: {
               text: `${message}`,
@@ -188,11 +185,11 @@ async function sendBulkInfobitMessages(payload, user) {
 
   try {
     const { data } = await axios.post(
-      "https://api.infobip.com/sms/3/messages",
+      `${infobipConfig.baseUrl}/sms/3/messages`,
       {
         messages: [
           {
-            from: "+17576599670",
+            from: infobipConfig.sender,
             destinations,
             content: {
               text: String(message),
@@ -366,7 +363,7 @@ async function getMessageStatusByMessageId(messageId, user) {
 }
 
 async function syncStatusFromInfobip(messageId) {
-  const { data } = await axios.get("https://api.infobip.com/sms/1/reports", {
+  const { data } = await axios.get(`${infobipConfig.baseUrl}/sms/1/reports`, {
     params: { messageId },
     headers: INFOBIP_HEADERS,
     httpsAgent,
