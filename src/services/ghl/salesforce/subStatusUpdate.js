@@ -1,5 +1,5 @@
 const logger = require("../../../utils/logger");
-const https = require("https");
+const https = require("node:https");
 const axios = require("axios");
 
 const httpsAgent = new https.Agent({
@@ -13,7 +13,12 @@ exports.processCaseUpdate = async (caseData) => {
     const { substatus, phone } = caseData;
 
     if (!phone) {
-      throw new Error("Phone is required to find contact in GHL");
+      logger.warn("Skipping sync: phone is missing in Salesforce payload.");
+      return {
+        status: "skipped",
+        reason: "phone_missing",
+        message: "Phone is required to find contact in GHL",
+      };
     }
 
     const formattedPhone = phone.startsWith("+") ? phone : `+1${phone}`;
@@ -40,14 +45,28 @@ exports.processCaseUpdate = async (caseData) => {
     const contact = contactResponse.data.contacts?.[0];
 
     if (!contact) {
-      throw new Error("Contact not found in GHL");
+      logger.warn(
+        `Skipping sync: contact not found in GHL for phone ${formattedPhone}`,
+      );
+      return {
+        status: "skipped",
+        reason: "contact_not_found",
+        message: "Contact not found in GHL",
+      };
     }
 
     // 2️⃣ get opportunity from contact in GHL
     const opportunity = contact.opportunities?.[0];
 
     if (!opportunity) {
-      throw new Error("Opportunity not found for this contact");
+      logger.warn(
+        `Skipping sync: no opportunity found for contact ${contact.id || "unknown"}`,
+      );
+      return {
+        status: "skipped",
+        reason: "opportunity_not_found",
+        message: "Opportunity not found for this contact",
+      };
     }
 
     // 3️⃣ Get pipeline stages from GHL and find matching stage for substatus
@@ -72,7 +91,14 @@ exports.processCaseUpdate = async (caseData) => {
     );
 
     if (!currentPipeline) {
-      throw new Error("Pipeline not found");
+      logger.warn(
+        `Skipping sync: pipeline ${opportunity.pipelineId} not found in GHL.`,
+      );
+      return {
+        status: "skipped",
+        reason: "pipeline_not_found",
+        message: "Pipeline not found",
+      };
     }
 
     const stages = currentPipeline.stages;
@@ -90,7 +116,14 @@ exports.processCaseUpdate = async (caseData) => {
     });
 
     if (!matchedStage) {
-      throw new Error(`No matching stage found for substatus: ${substatus}`);
+      logger.warn(
+        `Skipping sync: no matching stage found for substatus '${substatus}'.`,
+      );
+      return {
+        status: "skipped",
+        reason: "stage_not_found",
+        message: `No matching stage found for substatus: ${substatus}`,
+      };
     }
 
     const stageId = matchedStage.id;
@@ -112,6 +145,11 @@ exports.processCaseUpdate = async (caseData) => {
 
     logger.success("Opportunity updated in GHL successfully.");
     logger.info("========== END Salesforce → GHL Sync ==========");
+
+    return {
+      status: "updated",
+      message: "Opportunity updated in GHL successfully",
+    };
   } catch (error) {
     logger.error("========== ERROR Salesforce → GHL Sync ==========");
 
