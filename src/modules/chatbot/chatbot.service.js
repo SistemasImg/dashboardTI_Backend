@@ -4,9 +4,11 @@ const { askModel } = require("./ai.config");
 const { systemPrompt } = require("./prompts");
 const excelService = require("./excel.service");
 const { DateTime } = require("luxon");
+const chatSessionService = require("../../services/chatSession.service");
 
-// Simple in-memory session storage
-const sessionMemory = {};
+// Caché en memoria para reducir lecturas a BD durante la misma sesión de proceso.
+// Se usa como capa L1; la fuente de verdad siempre es la BD.
+const sessionCache = {};
 
 // Constant for bulk case threshold
 const BULK_THRESHOLD = 3; // If more than 3 cases, generate Excel
@@ -262,22 +264,145 @@ function isAttemptsQuery(message) {
   );
 }
 
-exports.processMessage = async (userMessage, sessionId = "default") => {
+function isFollowUpQuery(message) {
+  const text = String(message || "")
+    .trim()
+    .toLowerCase();
+  if (!text) return false;
+
+  const followUpCues = [
+    "y ",
+    "y de",
+    "tambien",
+    "también",
+    "ahora",
+    "solo",
+    "mismos",
+    "mismos casos",
+    "de hoy",
+    "de ayer",
+    "igual",
+    "ese",
+    "esa",
+  ];
+
+  const shortMessage = text.length <= 90;
+  return shortMessage && followUpCues.some((cue) => text.includes(cue));
+}
+
+function enrichWithSessionContext(userMessage, sessionData) {
+  if (!sessionData?.lastFilters || !isFollowUpQuery(userMessage)) {
+    return userMessage;
+  }
+
+  const f = sessionData.lastFilters;
+  const context = [];
+
+  if (f.status) context.push(`status=${f.status}`);
+  if (f.origin) context.push(`origin=${f.origin}`);
+  if (f.segment) context.push(`segment=${f.segment}`);
+  if (f.type) context.push(`type=${f.type}`);
+  if (f.substatus) context.push(`substatus=${f.substatus}`);
+  if (f.agentName) context.push(`agentName=${f.agentName}`);
+  if (f.dateKeyword) context.push(`dateKeyword=${f.dateKeyword}`);
+  if (f.date) context.push(`date=${f.date}`);
+  if (f.startDate && f.endDate)
+    context.push(`startDate=${f.startDate}`, `endDate=${f.endDate}`);
+
+  if (!context.length) return userMessage;
+
+  return `${userMessage}\n\n[Conversation context from previous request: ${context.join(", ")}]`;
+}
+
+function pickVariant(variants, seedText) {
+  const seed = String(seedText || "");
+  const hash = seed
+    .split("")
+    .reduce((acc, ch, idx) => acc + (ch.codePointAt(0) || 0) * (idx + 1), 0);
+  return variants[hash % variants.length];
+}
+
+function humanizePayload(payload, type, lang = "en") {
+  if (!payload?.message) return payload;
+
+  const baseMessage = String(payload.message).trim();
+  const spanishIntros = [
+    "Listo, te comparto lo que encontré:",
+    "Perfecto, revisé la información y esto es lo relevante:",
+    "Claro, aquí tienes el resultado:",
+    "Hecho, este es el resumen:",
+  ];
+  const englishIntros = [
+    "Done, here is what I found:",
+    "Sure, here is the result:",
+    "I checked it, here are the key details:",
+    "Great, this is what came back:",
+  ];
+
+  const spanishOutros = payload.excelFile
+    ? [
+        "Si quieres, también puedo ayudarte a filtrar este resultado por estado, origen o fecha.",
+        "Si te sirve, en el siguiente paso te lo separo por estado o por agente.",
+      ]
+    : [
+        "Si quieres, lo refinamos más con otro filtro.",
+        "Si necesitas, te lo desgloso por fecha, estado o agente.",
+      ];
+
+  const englishOutros = payload.excelFile
+    ? [
+        "If you want, I can also break this down by status, origin, or date.",
+        "I can refine this further by agent or date in the next step.",
+      ]
+    : [
+        "If you want, I can refine it with another filter.",
+        "I can break this down further by date, status, or agent.",
+      ];
+
+  const intro =
+    lang === "es"
+      ? pickVariant(spanishIntros, `${type}:${baseMessage.length}`)
+      : pickVariant(englishIntros, `${type}:${baseMessage.length}`);
+
+  const outro =
+    lang === "es"
+      ? pickVariant(spanishOutros, `${baseMessage.length}:${type}`)
+      : pickVariant(englishOutros, `${baseMessage.length}:${type}`);
+
+  return {
+    ...payload,
+    message: `${intro}\n\n${baseMessage}\n\n${outro}`,
+  };
+}
+
+exports.processMessage = async (userMessage, userId = null) => {
   const userLang = detectUserLanguage(userMessage);
 
   try {
-    logger.info(`Incoming chatbot message: ${userMessage}`);
+    logger.info(`Incoming chatbot message [user:${userId}]: ${userMessage}`);
 
-    if (!sessionMemory[sessionId]) {
-      sessionMemory[sessionId] = {
-        lastFilters: null,
-        lastResults: null,
-      };
+    // Load session from DB; cache in memory (L1) to reduce DB reads within the same process
+    const cacheKey = String(userId ?? "anonymous");
+    if (!sessionCache[cacheKey]) {
+      sessionCache[cacheKey] =
+        await chatSessionService.getOrCreateSession(userId);
     }
+    const sessionData = sessionCache[cacheKey];
 
+    // Enrich the message with previous filter context if this looks like a follow-up query
+    const contextualUserMessage = enrichWithSessionContext(userMessage, {
+      lastFilters: sessionData.last_filters,
+      lastResults: sessionData.last_results,
+    });
+
+    // Build message array: system prompt + full user history + new user message
+    const historyForAI = chatSessionService.buildMessagesForAI(
+      sessionData.messages,
+    );
     const messages = [
       { role: "system", content: systemPrompt },
-      { role: "user", content: userMessage },
+      ...historyForAI,
+      { role: "user", content: contextualUserMessage },
     ];
 
     const response = await askModel(messages);
@@ -297,13 +422,35 @@ exports.processMessage = async (userMessage, sessionId = "default") => {
         userLang,
       );
 
-      return formattedResponse;
+      const rangePayload = humanizePayload(
+        formattedResponse,
+        "getCasesByDateRange",
+        userLang,
+      );
+
+      chatSessionService
+        .appendMessages(
+          userId,
+          [
+            { role: "user", content: userMessage },
+            { role: "assistant", content: rangePayload.message || "" },
+          ],
+          null,
+          functionResult,
+        )
+        .catch((err) =>
+          logger.error(
+            `[ChatSession] Failed to persist messages: ${err.message}`,
+          ),
+        );
+
+      return rangePayload;
     }
     const message = response.choices?.[0]?.message;
 
     if (!message) throw new Error("AI_INVALID_RESPONSE");
 
-    // 🔥 FUNCTION CALL DETECTED
+    // Function call returned by the AI model
     if (message.function_call) {
       const functionName = message.function_call.name;
 
@@ -388,7 +535,8 @@ exports.processMessage = async (userMessage, sessionId = "default") => {
 
         case "getCasesByFilters":
           functionResult = await metrics.sf.getCasesByFilters(args);
-          sessionMemory[sessionId].lastFilters = args;
+          sessionData.last_filters = args;
+          sessionCache[cacheKey].last_filters = args;
           break;
 
         case "getCasesGroupedByField":
@@ -474,18 +622,59 @@ exports.processMessage = async (userMessage, sessionId = "default") => {
           throw new Error("UNKNOWN_FUNCTION");
       }
 
-      sessionMemory[sessionId].lastResults = functionResult;
+      sessionCache[cacheKey].last_results = functionResult;
 
       const formattedResponse = await formatResult(
         functionName,
         functionResult,
         userLang,
       );
-      return formattedResponse;
+      const finalPayload = humanizePayload(
+        formattedResponse,
+        functionName,
+        userLang,
+      );
+
+      // ─── Persistir conversación en BD de forma asíncrona (no bloquea respuesta) ──
+      chatSessionService
+        .appendMessages(
+          userId,
+          [
+            { role: "user", content: userMessage },
+            { role: "assistant", content: finalPayload.message || "" },
+          ],
+          sessionCache[cacheKey].last_filters,
+          functionResult,
+        )
+        .catch((err) =>
+          logger.error(
+            `[ChatSession] Failed to persist messages: ${err.message}`,
+          ),
+        );
+
+      return finalPayload;
     }
 
-    // 🟢 Normal conversation
-    return { message: message.content };
+    // Normal conversation (no function_call returned by the model)
+    const assistantContent = message.content || "";
+
+    chatSessionService
+      .appendMessages(
+        userId,
+        [
+          { role: "user", content: userMessage },
+          { role: "assistant", content: assistantContent },
+        ],
+        sessionCache[cacheKey].last_filters,
+        null,
+      )
+      .catch((err) =>
+        logger.error(
+          `[ChatSession] Failed to persist messages: ${err.message}`,
+        ),
+      );
+
+    return { message: assistantContent };
   } catch (error) {
     logger.error(`Chatbot processing error: ${error.message}`);
 

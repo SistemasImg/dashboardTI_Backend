@@ -1,5 +1,6 @@
 const { processMessage } = require("./chatbot.service.js");
 const excelService = require("./excel.service");
+const chatSessionService = require("../../services/chatSession.service");
 const logger = require("../../utils/logger");
 const fs = require("node:fs");
 
@@ -12,9 +13,15 @@ exports.chat = async (req, res) => {
       return res.status(400).json({ error: "Message required" });
     }
 
-    const reply = await processMessage(message);
+    // User ID is extracted from the verified JWT — no client-supplied identifier needed.
+    // Each user has their own isolated history, fully tied to their account.
+    const userId = req.user?.id ?? null;
+    if (!userId) {
+      return res.status(401).json({ error: "Unauthorized" });
+    }
 
-    // The response is now an object with `message` and optionally `excelFile`
+    const reply = await processMessage(message, userId);
+
     res.json({
       reply: reply.message,
       excelFile: reply.excelFile || null,
@@ -64,5 +71,43 @@ exports.downloadExcel = async (req, res) => {
   } catch (error) {
     logger.error(`Download Excel controller error: ${error.message}`);
     res.status(500).json({ error: "Error downloading file" });
+  }
+};
+
+/**
+ * GET /api/chatbot/history
+ * Returns the full message history for the authenticated user.
+ */
+exports.getHistory = async (req, res) => {
+  try {
+    const userId = req.user?.id;
+    if (!userId) {
+      return res.status(401).json({ error: "Unauthorized" });
+    }
+
+    const messages = await chatSessionService.getSessionHistory(userId);
+    res.json({ userId, messages });
+  } catch (error) {
+    logger.error(`Get history error: ${error.message}`);
+    res.status(500).json({ error: "Error al obtener historial" });
+  }
+};
+
+/**
+ * DELETE /api/chatbot/history
+ * Clears the conversation history for the authenticated user.
+ */
+exports.clearHistory = async (req, res) => {
+  try {
+    const userId = req.user?.id;
+    if (!userId) {
+      return res.status(401).json({ error: "Unauthorized" });
+    }
+
+    await chatSessionService.clearSession(userId);
+    res.json({ ok: true, message: "Historial eliminado" });
+  } catch (error) {
+    logger.error(`Clear history error: ${error.message}`);
+    res.status(500).json({ error: "Error al limpiar historial" });
   }
 };

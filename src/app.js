@@ -52,6 +52,7 @@ app.use("/vicidial", require("./routes/vicidial.routes"));
 app.use("/sqlserver", require("./routes/sqlserver/insertApi.routes"));
 app.use("/sqlserver", require("./routes/sqlserver/queries.routes"));
 app.use("/meta", require("./routes/meta.routes"));
+app.use("/public-leads", require("./routes/publicLead.routes"));
 
 // ------------------------------
 // HEALTH CHECK (Render / Monitoring)

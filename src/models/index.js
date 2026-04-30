@@ -11,6 +11,7 @@ const MessageRecords = require("./messageRecords");
 const sendApiRecords = require("./sendApiRecords");
 const MediaFiles = require("./mediaFile");
 const CallCenter = require("./callCenter");
+const ChatSession = require("./chatSession.model");
 
 // ============================
 // ROLES ↔ USERS
