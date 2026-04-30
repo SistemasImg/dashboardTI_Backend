@@ -90,6 +90,46 @@ function buildGravityPayload(data, requestMeta, formConfig) {
   };
 }
 
+function buildActiveProspectPayload(data, requestMeta, formConfig) {
+  const fieldData = [
+    { name: "first_name", values: [data.first_name] },
+    { name: "last_name", values: [data.last_name] },
+    { name: "email", values: [data.email] },
+    { name: "phone", values: [data.phone] },
+    { name: "platform", values: [data.platform] },
+    { name: "state", values: [data.state] },
+    { name: "year_range", values: [data.year_range] },
+    { name: "abuse_type", values: [data.abuse_type] },
+    {
+      name: "can_you_briefly_describe_what_happened_during_your_rideshare_trip",
+      values: [data.description || ""],
+    },
+  ];
+
+  return {
+    first_name: data.first_name,
+    last_name: data.last_name,
+    email: data.email,
+    phone: data.phone,
+    assaulted: data.assaulted,
+    proof: data.proof,
+    gender: data.gender,
+    attorney: data.attorney,
+    abuse_type: data.abuse_type,
+    platform: data.platform,
+    year_range: data.year_range,
+    state: data.state,
+    trustedform_cert_url: data.trustedform_cert_url,
+    source_url: requestMeta.sourceUrl,
+    source: "rideshare-landing",
+    campaign_product: formConfig?.campaign_product || "",
+    campaign_topic: formConfig?.campaign_topic || "",
+    facebook_field_data_apros: JSON.stringify(fieldData),
+    can_you_briefly_describe_what_happened_during_your_rideshare_trip:
+      data.description || "",
+  };
+}
+
 async function submitRideshareLead(req, res) {
   try {
     const origin = req.headers.origin || "";
@@ -180,13 +220,19 @@ async function submitRideshareLead(req, res) {
       `Public lead sent to Gravity | slug=${formSlug} | form_id=${resolvedFormId} | is_valid=${gravityResponse?.is_valid}`,
     );
 
-    if (value.ap_payload) {
-      logger.info(
-        `Public lead forwarding to ActiveProspect | slug=${formSlug}`,
+    const activeProspectPayload =
+      value.ap_payload ||
+      buildActiveProspectPayload(
+        value,
+        {
+          sourceUrl: normalizeString(req.body.source_url) || "",
+        },
+        formConfig,
       );
-      await submitToActiveProspect(value.ap_payload);
-      logger.success(`Public lead sent to ActiveProspect | slug=${formSlug}`);
-    }
+
+    logger.info(`Public lead forwarding to ActiveProspect | slug=${formSlug}`);
+    await submitToActiveProspect(activeProspectPayload);
+    logger.success(`Public lead sent to ActiveProspect | slug=${formSlug}`);
 
     return res.status(200).json({
       success: true,
