@@ -13,6 +13,17 @@ const sessionCache = {};
 // Constant for bulk case threshold
 const BULK_THRESHOLD = 3; // If more than 3 cases, generate Excel
 const ATTEMPTS_BULK_THRESHOLD = 15;
+const VENDORS_BULK_THRESHOLD = 15;
+const VENDOR_CASE_DETAILS_BULK_THRESHOLD = 30;
+
+const RESPONSE_LAYOUT_PROMPT = `
+Format the final answer for quick scanning while keeping a natural tone:
+- Use 1 short intro line.
+- Leave a blank line.
+- Show key metrics on separate lines (bullet points are allowed).
+- Leave a blank line before any recommendation or next step.
+- Avoid one single paragraph for data-heavy answers.
+`;
 
 function detectUserLanguage(message) {
   const text = (message || "").toLowerCase();
@@ -264,6 +275,73 @@ function isAttemptsQuery(message) {
   );
 }
 
+function detectCaseAttemptsByDateIntent(message) {
+  const text = String(message || "").toLowerCase();
+  const mentionsAttempts =
+    text.includes("attempt") ||
+    text.includes("intento") ||
+    text.includes("llamada") ||
+    text.includes("calls");
+
+  const mentionsCaseScope =
+    text.includes("cada caso") ||
+    text.includes("por caso") ||
+    text.includes("casos del dia") ||
+    text.includes("casos de hoy") ||
+    text.includes("cases of today") ||
+    text.includes("each case");
+
+  if (!mentionsAttempts || !mentionsCaseScope) {
+    return null;
+  }
+
+  if (text.includes("hoy") || text.includes("today")) {
+    return { dateKeyword: "today" };
+  }
+
+  if (text.includes("ayer") || text.includes("yesterday")) {
+    return { dateKeyword: "yesterday" };
+  }
+
+  const isoDateMatch = text.match(/\b(20\d{2}-\d{2}-\d{2})\b/);
+  if (isoDateMatch) {
+    return { date: isoDateMatch[1] };
+  }
+
+  return null;
+}
+
+function normalizeBusinessQuery(message) {
+  let text = String(message || "");
+
+  const replacements = [
+    [/\battempst\b/gi, "attempts"],
+    [/\battemp\b/gi, "attempt"],
+    [/\bllamdas\b/gi, "llamadas"],
+    [/\bcampaing\b/gi, "campaign"],
+    [/\bcampain\b/gi, "campaign"],
+    [/\bvenddor\b/gi, "vendor"],
+    [/\bvednor\b/gi, "vendor"],
+    [/\benvidos\b/gi, "enviados"],
+    [/\bnnumero\b/gi, "numero"],
+    [/\bcahtbot\b/gi, "chatbot"],
+    [/\bsub\s*stat\b/gi, "substatus"],
+    [/\bestatus\b/gi, "status"],
+    [/\bquelity\b/gi, "quality"],
+    [/\bhigh\s*quelity\b/gi, "high quality"],
+    [/\bmedio\b/gi, "medium"],
+    [/\bbajo\b/gi, "low quality"],
+    [/\bfirmad[oa]s?\b/gi, "sent"],
+    [/\btier\s*(\d+)\b/gi, "tier$1"],
+  ];
+
+  replacements.forEach(([pattern, value]) => {
+    text = text.replace(pattern, value);
+  });
+
+  return text;
+}
+
 function isFollowUpQuery(message) {
   const text = String(message || "")
     .trim()
@@ -271,6 +349,10 @@ function isFollowUpQuery(message) {
   if (!text) return false;
 
   const followUpCues = [
+    "si",
+    "sí",
+    "ok",
+    "dale",
     "y ",
     "y de",
     "tambien",
@@ -284,19 +366,47 @@ function isFollowUpQuery(message) {
     "igual",
     "ese",
     "esa",
+    "razon",
+    "razón",
+    "por que",
+    "porque",
+    "descalific",
   ];
 
   const shortMessage = text.length <= 90;
   return shortMessage && followUpCues.some((cue) => text.includes(cue));
 }
 
+function extractLastReferencedCaseNumber(storedMessages = []) {
+  if (!Array.isArray(storedMessages) || !storedMessages.length) {
+    return null;
+  }
+
+  const contextualPattern =
+    /(?:case|caso|lead|casenumber|numero de caso)\s*(?:#|number|numero)?\s*[:\-]?\s*(\d{6,12})/i;
+
+  for (let i = storedMessages.length - 1; i >= 0; i -= 1) {
+    const content = String(storedMessages[i]?.content || "");
+    if (!content) continue;
+
+    const contextualMatch = content.match(contextualPattern);
+    if (contextualMatch?.[1]) {
+      return contextualMatch[1];
+    }
+  }
+
+  return null;
+}
+
 function enrichWithSessionContext(userMessage, sessionData) {
-  if (!sessionData?.lastFilters || !isFollowUpQuery(userMessage)) {
+  if (!isFollowUpQuery(userMessage)) {
     return userMessage;
   }
 
-  const f = sessionData.lastFilters;
+  const f = sessionData?.lastFilters || {};
   const context = [];
+  const inferredCaseNumber =
+    f.caseNumber || extractLastReferencedCaseNumber(sessionData?.messages);
 
   if (f.status) context.push(`status=${f.status}`);
   if (f.origin) context.push(`origin=${f.origin}`);
@@ -308,6 +418,7 @@ function enrichWithSessionContext(userMessage, sessionData) {
   if (f.date) context.push(`date=${f.date}`);
   if (f.startDate && f.endDate)
     context.push(`startDate=${f.startDate}`, `endDate=${f.endDate}`);
+  if (inferredCaseNumber) context.push(`caseNumber=${inferredCaseNumber}`);
 
   if (!context.length) return userMessage;
 
@@ -322,64 +433,21 @@ function pickVariant(variants, seedText) {
   return variants[hash % variants.length];
 }
 
-function humanizePayload(payload, type, lang = "en") {
-  if (!payload?.message) return payload;
-
-  const baseMessage = String(payload.message).trim();
-  const spanishIntros = [
-    "Listo, te comparto lo que encontré:",
-    "Perfecto, revisé la información y esto es lo relevante:",
-    "Claro, aquí tienes el resultado:",
-    "Hecho, este es el resumen:",
-  ];
-  const englishIntros = [
-    "Done, here is what I found:",
-    "Sure, here is the result:",
-    "I checked it, here are the key details:",
-    "Great, this is what came back:",
-  ];
-
-  const spanishOutros = payload.excelFile
-    ? [
-        "Si quieres, también puedo ayudarte a filtrar este resultado por estado, origen o fecha.",
-        "Si te sirve, en el siguiente paso te lo separo por estado o por agente.",
-      ]
-    : [
-        "Si quieres, lo refinamos más con otro filtro.",
-        "Si necesitas, te lo desgloso por fecha, estado o agente.",
-      ];
-
-  const englishOutros = payload.excelFile
-    ? [
-        "If you want, I can also break this down by status, origin, or date.",
-        "I can refine this further by agent or date in the next step.",
-      ]
-    : [
-        "If you want, I can refine it with another filter.",
-        "I can break this down further by date, status, or agent.",
-      ];
-
-  const intro =
-    lang === "es"
-      ? pickVariant(spanishIntros, `${type}:${baseMessage.length}`)
-      : pickVariant(englishIntros, `${type}:${baseMessage.length}`);
-
-  const outro =
-    lang === "es"
-      ? pickVariant(spanishOutros, `${baseMessage.length}:${type}`)
-      : pickVariant(englishOutros, `${baseMessage.length}:${type}`);
-
-  return {
-    ...payload,
-    message: `${intro}\n\n${baseMessage}\n\n${outro}`,
-  };
+// humanizePayload is intentionally a pass-through.
+// The AI model is now responsible for natural, varied language via the system prompt.
+// Wrapping responses here with fixed intros/outros caused repetitive phrasing.
+function humanizePayload(payload) {
+  return payload;
 }
 
 exports.processMessage = async (userMessage, userId = null) => {
-  const userLang = detectUserLanguage(userMessage);
+  const normalizedUserMessage = normalizeBusinessQuery(userMessage);
+  const userLang = detectUserLanguage(normalizedUserMessage);
 
   try {
-    logger.info(`Incoming chatbot message [user:${userId}]: ${userMessage}`);
+    logger.info(
+      `Incoming chatbot message [user:${userId}]: ${normalizedUserMessage}`,
+    );
 
     // Load session from DB; cache in memory (L1) to reduce DB reads within the same process
     const cacheKey = String(userId ?? "anonymous");
@@ -390,10 +458,14 @@ exports.processMessage = async (userMessage, userId = null) => {
     const sessionData = sessionCache[cacheKey];
 
     // Enrich the message with previous filter context if this looks like a follow-up query
-    const contextualUserMessage = enrichWithSessionContext(userMessage, {
-      lastFilters: sessionData.last_filters,
-      lastResults: sessionData.last_results,
-    });
+    const contextualNormalizedMessage = enrichWithSessionContext(
+      normalizedUserMessage,
+      {
+        lastFilters: sessionData.last_filters,
+        lastResults: sessionData.last_results,
+        messages: sessionData.messages,
+      },
+    );
 
     // Build message array: system prompt + full user history + new user message
     const historyForAI = chatSessionService.buildMessagesForAI(
@@ -402,13 +474,73 @@ exports.processMessage = async (userMessage, userId = null) => {
     const messages = [
       { role: "system", content: systemPrompt },
       ...historyForAI,
-      { role: "user", content: contextualUserMessage },
+      { role: "user", content: contextualNormalizedMessage },
     ];
 
     const response = await askModel(messages);
-    const detectedRange = detectDateRange(userMessage);
+    const detectedRange = detectDateRange(normalizedUserMessage);
+    const directCaseAttemptsIntent = detectCaseAttemptsByDateIntent(
+      normalizedUserMessage,
+    );
 
-    if (detectedRange && !isAttemptsQuery(userMessage)) {
+    if (directCaseAttemptsIntent) {
+      const functionResult = await metrics.sql.getCaseAttemptsByDate(
+        directCaseAttemptsIntent,
+      );
+
+      const formattedResponse = await formatResult(
+        "getCaseAttemptsByDate",
+        functionResult,
+        userLang,
+      );
+
+      let directMessage = formattedResponse.message;
+      try {
+        const humanMessages = [
+          { role: "system", content: systemPrompt },
+          { role: "system", content: RESPONSE_LAYOUT_PROMPT },
+          ...chatSessionService.buildMessagesForAI(sessionData.messages),
+          { role: "user", content: userMessage },
+          {
+            role: "function",
+            name: "getCaseAttemptsByDate",
+            content: formattedResponse.message,
+          },
+        ];
+        const humanResponse = await askModel(humanMessages);
+        const humanContent = humanResponse.choices?.[0]?.message?.content;
+        if (humanContent) directMessage = humanContent;
+      } catch (humanErr) {
+        logger.warn(
+          `[Humanize] Fallback to structured response: ${humanErr.message}`,
+        );
+      }
+
+      const directPayload = humanizePayload({
+        ...formattedResponse,
+        message: directMessage,
+      });
+
+      chatSessionService
+        .appendMessages(
+          userId,
+          [
+            { role: "user", content: userMessage },
+            { role: "assistant", content: directPayload.message || "" },
+          ],
+          sessionCache[cacheKey].last_filters,
+          functionResult,
+        )
+        .catch((err) =>
+          logger.error(
+            `[ChatSession] Failed to persist messages: ${err.message}`,
+          ),
+        );
+
+      return directPayload;
+    }
+
+    if (detectedRange && !isAttemptsQuery(normalizedUserMessage)) {
       logger.info("Date range detected locally");
 
       const functionResult = await metrics.sf.getCasesByDateRange(
@@ -422,11 +554,32 @@ exports.processMessage = async (userMessage, userId = null) => {
         userLang,
       );
 
-      const rangePayload = humanizePayload(
-        formattedResponse,
-        "getCasesByDateRange",
-        userLang,
-      );
+      let rangeMessage = formattedResponse.message;
+      try {
+        const humanMessages = [
+          { role: "system", content: systemPrompt },
+          { role: "system", content: RESPONSE_LAYOUT_PROMPT },
+          ...chatSessionService.buildMessagesForAI(sessionData.messages),
+          { role: "user", content: userMessage },
+          {
+            role: "function",
+            name: "getCasesByDateRange",
+            content: formattedResponse.message,
+          },
+        ];
+        const humanResponse = await askModel(humanMessages);
+        const humanContent = humanResponse.choices?.[0]?.message?.content;
+        if (humanContent) rangeMessage = humanContent;
+      } catch (humanErr) {
+        logger.warn(
+          `[Humanize] Fallback to structured response: ${humanErr.message}`,
+        );
+      }
+
+      const rangePayload = humanizePayload({
+        ...formattedResponse,
+        message: rangeMessage,
+      });
 
       chatSessionService
         .appendMessages(
@@ -462,6 +615,9 @@ exports.processMessage = async (userMessage, userId = null) => {
       } catch {
         throw new Error("INVALID_FUNCTION_ARGUMENTS");
       }
+      if (!args || typeof args !== "object") {
+        args = {};
+      }
       let functionResult;
 
       switch (functionName) {
@@ -473,6 +629,13 @@ exports.processMessage = async (userMessage, userId = null) => {
 
         case "getCaseByNumber":
           functionResult = await metrics.sf.getCaseByNumber(args.caseNumber);
+          if (args.caseNumber) {
+            sessionData.last_filters = {
+              ...(sessionData.last_filters || {}),
+              caseNumber: args.caseNumber,
+            };
+            sessionCache[cacheKey].last_filters = sessionData.last_filters;
+          }
           break;
 
         case "getCaseByPhone":
@@ -552,6 +715,76 @@ exports.processMessage = async (userMessage, userId = null) => {
           );
           break;
 
+        case "getVendorsWithLeads":
+          functionResult = await metrics.sf.getVendorsWithLeads({
+            dateKeyword: args.dateKeyword,
+            period: args.period,
+            date: args.date,
+            startDate: args.startDate,
+            endDate: args.endDate,
+          });
+          break;
+
+        case "getTopVendors":
+          functionResult = await metrics.sf.getTopVendors({
+            limit: args.limit,
+            sort: args.sort,
+            dateKeyword: args.dateKeyword,
+            period: args.period,
+            date: args.date,
+            startDate: args.startDate,
+            endDate: args.endDate,
+          });
+          break;
+
+        case "getTopVendorsWithCaseDetails":
+          functionResult = await metrics.sf.getTopVendorsWithCaseDetails({
+            limit: args.limit,
+            sort: args.sort,
+            dateKeyword: args.dateKeyword,
+            period: args.period,
+            date: args.date,
+            startDate: args.startDate,
+            endDate: args.endDate,
+          });
+          break;
+
+        case "getCaseDisqualificationReason":
+          args.caseNumber =
+            args.caseNumber ||
+            sessionData.last_filters?.caseNumber ||
+            extractLastReferencedCaseNumber(sessionData.messages);
+
+          if (!args.caseNumber) {
+            functionResult = { found: false, missingCaseNumber: true };
+            break;
+          }
+
+          functionResult = await metrics.sf.getCaseDisqualificationReason(
+            args.caseNumber,
+          );
+          if (args.caseNumber) {
+            sessionData.last_filters = {
+              ...(sessionData.last_filters || {}),
+              caseNumber: args.caseNumber,
+            };
+            sessionCache[cacheKey].last_filters = sessionData.last_filters;
+          }
+          break;
+
+        case "getVendorsBySupplierSegment":
+          functionResult = await metrics.sf.getVendorsBySupplierSegment(
+            args.segment,
+            {
+              dateKeyword: args.dateKeyword,
+              period: args.period,
+              date: args.date,
+              startDate: args.startDate,
+              endDate: args.endDate,
+            },
+          );
+          break;
+
         case "getCasesByAgent":
           functionResult = await metrics.dashboard.getCasesByAgent(
             args.agentName,
@@ -612,6 +845,19 @@ exports.processMessage = async (userMessage, userId = null) => {
           });
           break;
 
+        case "getVendorLeadAttempts":
+          functionResult = await metrics.sql.getVendorLeadAttempts(
+            args.vendorName,
+            {
+              includeAgentDetails: args.includeAgentDetails,
+              dateKeyword: args.dateKeyword,
+              date: args.date,
+              startDate: args.startDate,
+              endDate: args.endDate,
+            },
+          );
+          break;
+
         case "getCasesByTypeFromReport":
           functionResult = await metrics.dashboard.getCasesByTypeFromReport(
             args.type,
@@ -624,18 +870,44 @@ exports.processMessage = async (userMessage, userId = null) => {
 
       sessionCache[cacheKey].last_results = functionResult;
 
+      // Build a structured data summary and send it back to the AI so it can
+      // compose a natural, human reply instead of returning a rigid template.
       const formattedResponse = await formatResult(
         functionName,
         functionResult,
         userLang,
       );
-      const finalPayload = humanizePayload(
-        formattedResponse,
-        functionName,
-        userLang,
-      );
 
-      // ─── Persistir conversación en BD de forma asíncrona (no bloquea respuesta) ──
+      // Ask the model to rewrite the structured result in a human, conversational tone.
+      // If the AI call fails, fall back to the structured text so the user always gets data.
+      let finalMessage = formattedResponse.message;
+      try {
+        const humanMessages = [
+          { role: "system", content: systemPrompt },
+          { role: "system", content: RESPONSE_LAYOUT_PROMPT },
+          ...chatSessionService.buildMessagesForAI(sessionData.messages),
+          { role: "user", content: userMessage },
+          {
+            role: "function",
+            name: functionName,
+            content: formattedResponse.message,
+          },
+        ];
+        const humanResponse = await askModel(humanMessages);
+        const humanContent = humanResponse.choices?.[0]?.message?.content;
+        if (humanContent) finalMessage = humanContent;
+      } catch (humanErr) {
+        logger.warn(
+          `[Humanize] Fallback to structured response: ${humanErr.message}`,
+        );
+      }
+
+      const finalPayload = humanizePayload({
+        ...formattedResponse,
+        message: finalMessage,
+      });
+
+      // Persist conversation asynchronously — does not block the response
       chatSessionService
         .appendMessages(
           userId,
@@ -715,6 +987,15 @@ exports.processMessage = async (userMessage, userId = null) => {
           ),
         };
 
+      case "INVALID_VENDOR_NAME":
+        return {
+          message: i18n(
+            userLang,
+            "Por favor indica un nombre de vendor valido.",
+            "Please provide a valid vendor name.",
+          ),
+        };
+
       default:
         return {
           message: i18n(
@@ -756,6 +1037,30 @@ async function formatResult(type, data, lang = "en") {
 
   if (type === "getVicidialAgentsStatus") {
     return formatVicidialAgentsStatusResult(data, lang);
+  }
+
+  if (type === "getVendorsWithLeads") {
+    return formatVendorsWithLeadsResult(data, lang);
+  }
+
+  if (type === "getTopVendors") {
+    return formatTopVendorsResult(data, lang);
+  }
+
+  if (type === "getTopVendorsWithCaseDetails") {
+    return formatTopVendorsWithCaseDetailsResult(data, lang);
+  }
+
+  if (type === "getVendorsBySupplierSegment") {
+    return formatVendorsBySegmentResult(data, lang);
+  }
+
+  if (type === "getVendorLeadAttempts") {
+    return formatVendorLeadAttemptsResult(data, lang);
+  }
+
+  if (type === "getCaseDisqualificationReason") {
+    return formatCaseDisqualificationResult(data, lang);
   }
 
   // Grouped result
@@ -884,7 +1189,7 @@ function formatSmallResultSet(casesArray, totalCount, lang = "en") {
   let output = `📋 **${i18n(lang, "Total de Casos", "Total Cases")}: ${totalCount}**\n\n`;
 
   casesArray.slice(0, 20).forEach((caseItem, i) => {
-    output += `${i + 1}. **${caseItem.CaseNumber}** | ${caseItem.Substatus__c} | ${caseItem.Owner?.Name || "Unassigned"}\n`;
+    output += `${i + 1}. **${caseItem.CaseNumber}** | ${i18n(lang, "Tipo", "Type")}: ${caseItem.Type || "N/A"} | Tier: ${caseItem.Tier__c || "N/A"} | ${caseItem.Substatus__c || "N/A"} | ${caseItem.Owner?.Name || "Unassigned"}\n`;
   });
 
   return output;
@@ -1198,4 +1503,459 @@ function formatVicidialAgentsStatusResult(data, lang = "en") {
 ${lines}
 `,
   };
+}
+
+async function formatVendorsWithLeadsResult(data, lang = "en") {
+  if (!data?.records?.length) {
+    return {
+      message: i18n(
+        lang,
+        "No se encontraron vendors con leads para ese periodo.",
+        "No vendors with leads were found for that period.",
+      ),
+    };
+  }
+
+  if (data.records.length > VENDORS_BULK_THRESHOLD) {
+    try {
+      const excelRows = data.records.map((item) => ({
+        vendor: item.vendor,
+        segment: item.segment || "N/A",
+        totalLeads: item.totalLeads,
+        scope: data.scope,
+      }));
+
+      const excelFile = await Promise.resolve(
+        excelService.generateVendorsExcel(excelRows),
+      );
+
+      return {
+        message: `
+🏢 **${i18n(lang, "Vendors con leads", "Vendors with leads")}**
+• **${i18n(lang, "Periodo", "Period")}:** ${data.scope}
+• **${i18n(lang, "Total vendors", "Total vendors")}:** ${data.totalVendors}
+• **${i18n(lang, "Total leads", "Total leads")}:** ${data.totalLeads}
+
+${i18n(
+  lang,
+  "El resultado trae muchos vendors, asi que prepare un Excel con el detalle completo para revisarlo mejor.",
+  "The result contains many vendors, so I prepared an Excel file with the full detail for easier review.",
+)}
+
+📥 **${i18n(lang, "Archivo", "File")}:** ${excelFile.fileName}
+`,
+        excelFile,
+      };
+    } catch (error) {
+      logger.error(`Error generating vendors Excel: ${error.message}`);
+    }
+  }
+
+  const lines = data.records
+    .slice(0, 30)
+    .map((item, idx) => `${idx + 1}. **${item.vendor}** -> ${item.totalLeads}`)
+    .join("\n");
+
+  return {
+    message: `
+🏢 **${i18n(lang, "Vendors con leads", "Vendors with leads")}**
+• **${i18n(lang, "Periodo", "Period")}:** ${data.scope}
+• **${i18n(lang, "Total vendors", "Total vendors")}:** ${data.totalVendors}
+• **${i18n(lang, "Total leads", "Total leads")}:** ${data.totalLeads}
+
+${lines}
+`,
+  };
+}
+
+async function formatTopVendorsResult(data, lang = "en") {
+  if (!data?.records?.length) {
+    return {
+      message: i18n(
+        lang,
+        "No se encontraron vendors para generar el top en ese periodo.",
+        "No vendors were found to build the ranking for that period.",
+      ),
+    };
+  }
+
+  if (data.records.length > VENDORS_BULK_THRESHOLD) {
+    try {
+      const excelRows = data.records.map((item) => ({
+        vendor: item.vendor,
+        segment: item.segment || "N/A",
+        totalLeads: item.totalLeads,
+        scope: data.scope,
+      }));
+
+      const excelFile = await Promise.resolve(
+        excelService.generateVendorsExcel(excelRows),
+      );
+
+      return {
+        message: `
+🏆 **${i18n(lang, "Top Vendors", "Top Vendors")}**
+• **${i18n(lang, "Periodo", "Period")}:** ${data.scope}
+• **${i18n(lang, "Top", "Top")}:** ${data.limit}
+
+${i18n(
+  lang,
+  "El ranking es amplio, por eso te deje el reporte completo en Excel.",
+  "The ranking is extensive, so I exported the full report to Excel.",
+)}
+
+📥 **${i18n(lang, "Archivo", "File")}:** ${excelFile.fileName}
+`,
+        excelFile,
+      };
+    } catch (error) {
+      logger.error(`Error generating vendors Excel: ${error.message}`);
+    }
+  }
+
+  const lines = data.records
+    .map((item, idx) => `${idx + 1}. **${item.vendor}** -> ${item.totalLeads}`)
+    .join("\n");
+
+  return {
+    message: `
+🏆 **${i18n(lang, "Top Vendors", "Top Vendors")}**
+• **${i18n(lang, "Periodo", "Period")}:** ${data.scope}
+• **${i18n(lang, "Top", "Top")}:** ${data.limit}
+
+${lines}
+`,
+  };
+}
+
+async function formatVendorsBySegmentResult(data, lang = "en") {
+  if (!data?.records?.length) {
+    return {
+      message: i18n(
+        lang,
+        `No se encontraron vendors en el segmento **${data?.segment || ""}** para ese periodo.`,
+        `No vendors were found in segment **${data?.segment || ""}** for that period.`,
+      ),
+    };
+  }
+
+  if (data.records.length > VENDORS_BULK_THRESHOLD) {
+    try {
+      const excelRows = data.records.map((item) => ({
+        vendor: item.vendor,
+        segment: item.segment || data.segment || "N/A",
+        totalLeads: item.totalLeads,
+        scope: data.scope,
+      }));
+
+      const excelFile = await Promise.resolve(
+        excelService.generateVendorsExcel(excelRows),
+      );
+
+      return {
+        message: `
+📈 **${i18n(lang, "Vendors por Supplier Segment", "Vendors by Supplier Segment")}**
+• **${i18n(lang, "Segmento", "Segment")}:** ${data.segment}
+• **${i18n(lang, "Periodo", "Period")}:** ${data.scope}
+• **${i18n(lang, "Total vendors", "Total vendors")}:** ${data.totalVendors}
+• **${i18n(lang, "Total leads", "Total leads")}:** ${data.totalLeads}
+
+${i18n(
+  lang,
+  "Hay muchos vendors en este segmento, asi que te comparti el detalle completo en Excel.",
+  "There are many vendors in this segment, so I shared the full detail in an Excel file.",
+)}
+
+📥 **${i18n(lang, "Archivo", "File")}:** ${excelFile.fileName}
+`,
+        excelFile,
+      };
+    } catch (error) {
+      logger.error(`Error generating vendors Excel: ${error.message}`);
+    }
+  }
+
+  const lines = data.records
+    .slice(0, 30)
+    .map((item, idx) => `${idx + 1}. **${item.vendor}** -> ${item.totalLeads}`)
+    .join("\n");
+
+  return {
+    message: `
+📈 **${i18n(lang, "Vendors por Supplier Segment", "Vendors by Supplier Segment")}**
+• **${i18n(lang, "Segmento", "Segment")}:** ${data.segment}
+• **${i18n(lang, "Periodo", "Period")}:** ${data.scope}
+• **${i18n(lang, "Total vendors", "Total vendors")}:** ${data.totalVendors}
+• **${i18n(lang, "Total leads", "Total leads")}:** ${data.totalLeads}
+
+${lines}
+`,
+  };
+}
+
+async function formatTopVendorsWithCaseDetailsResult(data, lang = "en") {
+  if (!data?.records?.length) {
+    return {
+      message: i18n(
+        lang,
+        "No se encontraron vendors para ese top con los filtros indicados.",
+        "No vendors were found for that ranking with the selected filters.",
+      ),
+    };
+  }
+
+  const detailRows = data.records.flatMap((vendorItem) =>
+    (vendorItem.cases || []).map((caseItem) => ({
+      vendor: vendorItem.vendor,
+      caseNumber: caseItem.caseNumber,
+      phone: caseItem.phone,
+      segment: caseItem.segment || vendorItem.segment || "N/A",
+      createdDate: caseItem.createdDate,
+      scope: data.scope,
+    })),
+  );
+
+  if (detailRows.length > VENDOR_CASE_DETAILS_BULK_THRESHOLD) {
+    try {
+      const excelFile = await Promise.resolve(
+        excelService.generateVendorCasesExcel(detailRows),
+      );
+
+      return {
+        message: `
+🏆 **${i18n(lang, "Top Vendors con detalle de leads", "Top Vendors with lead details")}**
+• **${i18n(lang, "Periodo", "Period")}:** ${data.scope}
+• **${i18n(lang, "Top", "Top")}:** ${data.limit}
+• **${i18n(lang, "Leads listados", "Listed leads")}:** ${detailRows.length}
+
+${i18n(
+  lang,
+  "Como salieron muchos leads, te deje el detalle completo (vendor, case number y phone) en un Excel.",
+  "Since many leads were found, I exported the full detail (vendor, case number, and phone) to Excel.",
+)}
+
+📥 **${i18n(lang, "Archivo", "File")}:** ${excelFile.fileName}
+`,
+        excelFile,
+      };
+    } catch (error) {
+      logger.error(
+        `Error generating vendor case detail Excel: ${error.message}`,
+      );
+    }
+  }
+
+  const lines = data.records
+    .map((vendorItem, idx) => {
+      const caseLines = (vendorItem.cases || [])
+        .slice(0, 10)
+        .map(
+          (caseItem) =>
+            `   - ${caseItem.caseNumber || "N/A"} | ${i18n(lang, "telefono", "phone")}: ${caseItem.phone || "N/A"}`,
+        )
+        .join("\n");
+
+      return `${idx + 1}. **${vendorItem.vendor}** (${i18n(lang, "leads", "leads")}: ${vendorItem.totalLeads})\n${caseLines || `   - ${i18n(lang, "Sin casos", "No cases")}`}`;
+    })
+    .join("\n");
+
+  return {
+    message: `
+🏆 **${i18n(lang, "Top Vendors con detalle de leads", "Top Vendors with lead details")}**
+• **${i18n(lang, "Periodo", "Period")}:** ${data.scope}
+• **${i18n(lang, "Top", "Top")}:** ${data.limit}
+
+${lines}
+`,
+  };
+}
+
+async function formatVendorLeadAttemptsResult(data, lang = "en") {
+  if (!data?.records?.length) {
+    return {
+      message: i18n(
+        lang,
+        `No se encontraron leads para el vendor **${data?.vendorName || ""}** con ese filtro de fecha.`,
+        `No leads were found for vendor **${data?.vendorName || ""}** with that date filter.`,
+      ),
+    };
+  }
+
+  if (data.records.length > ATTEMPTS_BULK_THRESHOLD) {
+    try {
+      const excelRows =
+        data.exportRows ||
+        data.records.map((item) => ({
+          vendor: item.vendor,
+          caseNumber: item.caseNumber,
+          phone: item.phone,
+          attempts: item.attempts,
+          segment: item.segment,
+          createdDate: item.createdDate,
+          scope: data.scope,
+          callDate: null,
+          hour: null,
+          agentName: null,
+          callCenter: null,
+          assignmentType: item.matchQuality || "N/A",
+        }));
+
+      const excelFile = await Promise.resolve(
+        excelService.generateVendorAttemptsExcel(excelRows),
+      );
+
+      return {
+        message: `
+📞 **${i18n(lang, "Attempts por lead del vendor", "Attempts by vendor lead")}**
+• **${i18n(lang, "Vendor", "Vendor")}:** ${data.vendorName}
+• **${i18n(lang, "Periodo de leads", "Lead period")}:** ${data.scope}
+• **${i18n(lang, "Periodo de attempts", "Attempts period")}:** ${data.attemptsScope}
+• **${i18n(lang, "Total de leads", "Total leads")}:** ${data.totalCases}
+• **${i18n(lang, "Attempts totales", "Total attempts")}:** ${data.totalAttempts}
+• **${i18n(lang, "Detalle", "Detail mode")}:** ${data.detailMode}
+${
+  data.includeAgentDetails
+    ? `• **${i18n(lang, "Vista por agente", "Agent view")}:** ${data.agentDetailsAvailable ? i18n(lang, "si", "yes") : i18n(lang, "no disponible para historial agregado", "not available for aggregated history")}
+`
+    : ""
+}
+
+${i18n(
+  lang,
+  "El resultado es amplio, por eso te exporte el detalle completo con case number, phone, attempts y hora cuando aplica.",
+  "The result set is large, so I exported the full detail with case number, phone, attempts, and hour when available.",
+)}
+
+${
+  data.ambiguousRows
+    ? i18n(
+        lang,
+        `Ojo: ${data.ambiguousRows} registros quedaron como ambiguos por telefonos repetidos entre casos y no los asigne de forma inventada.`,
+        `Note: ${data.ambiguousRows} rows were ambiguous because the same phone appeared in multiple cases, so I did not force a fake assignment.`,
+      )
+    : ""
+}
+
+📥 **${i18n(lang, "Archivo", "File")}:** ${excelFile.fileName}
+`,
+        excelFile,
+      };
+    } catch (error) {
+      logger.error(`Error generating vendor attempts Excel: ${error.message}`);
+    }
+  }
+
+  const lines = data.records
+    .slice(0, 40)
+    .map((row, idx) => {
+      const hourlyText = (row.byHour || []).length
+        ? (row.byHour || [])
+            .slice(0, 6)
+            .map((item) => {
+              if (!data.includeAgentDetails) {
+                return `${item.label} (${item.attempts})`;
+              }
+
+              return `${item.label} (${item.attempts}) - ${i18n(lang, "agente", "agent")}: ${item.agentName || "N/A"} - ${i18n(lang, "call center", "call center")}: ${item.callCenter || "N/A"}`;
+            })
+            .join(", ")
+        : i18n(
+            lang,
+            row.ambiguousPhone
+              ? "telefono ambiguo entre varios casos"
+              : "sin detalle por hora",
+            row.ambiguousPhone
+              ? "ambiguous phone across multiple cases"
+              : "no hourly detail",
+          );
+
+      return `${idx + 1}. **${row.caseNumber || "N/A"}** | ${i18n(lang, "telefono", "phone")}: ${row.phone || "N/A"} | ${i18n(lang, "attempts", "attempts")}: ${row.attempts} | ${i18n(lang, "horas", "hours")}: ${hourlyText}`;
+    })
+    .join("\n");
+
+  return {
+    message: `
+📞 **${i18n(lang, "Attempts por lead del vendor", "Attempts by vendor lead")}**
+• **${i18n(lang, "Vendor", "Vendor")}:** ${data.vendorName}
+• **${i18n(lang, "Periodo de leads", "Lead period")}:** ${data.scope}
+• **${i18n(lang, "Periodo de attempts", "Attempts period")}:** ${data.attemptsScope}
+• **${i18n(lang, "Total de leads", "Total leads")}:** ${data.totalCases}
+• **${i18n(lang, "Attempts totales", "Total attempts")}:** ${data.totalAttempts}
+• **${i18n(lang, "Detalle", "Detail mode")}:** ${data.detailMode}
+${
+  data.includeAgentDetails
+    ? `• **${i18n(lang, "Vista por agente", "Agent view")}:** ${data.agentDetailsAvailable ? i18n(lang, "si", "yes") : i18n(lang, "no disponible para historial agregado", "not available for aggregated history")}
+`
+    : ""
+}
+
+${
+  data.ambiguousRows
+    ? `• **${i18n(lang, "Filas ambiguas", "Ambiguous rows")}:** ${data.ambiguousRows}\n`
+    : ""
+}
+
+${lines}
+`,
+  };
+}
+
+// Formats the result of getCaseDisqualificationReason
+function formatCaseDisqualificationResult(data, lang = "en") {
+  if (data.missingCaseNumber) {
+    return {
+      message: i18n(
+        lang,
+        "Te ayudo con eso. Solo necesito el número de caso para buscar la razón exacta de descalificación.",
+        "I can help with that. I only need the case number to fetch the exact disqualification reason.",
+      ),
+    };
+  }
+
+  if (!data.found) {
+    return {
+      message: i18n(
+        lang,
+        `No encontré ningún caso con el número ${data.caseNumber}. Verifica que el número sea correcto.`,
+        `I couldn't find any case with number ${data.caseNumber}. Please double-check the case number.`,
+      ),
+    };
+  }
+
+  const lines = [];
+  lines.push(`📋 **${i18n(lang, "Case", "Case")} ${data.caseNumber}**`);
+  lines.push(
+    `• **${i18n(lang, "Status", "Status")}:** ${data.status || "N/A"}`,
+  );
+  lines.push(
+    `• **${i18n(lang, "Substatus", "Substatus")}:** ${data.substatus || "N/A"}`,
+  );
+
+  if (data.reasonForDQ) {
+    lines.push(
+      `• **${i18n(lang, "Razón de descalificación", "Reason for DQ")}:** ${data.reasonForDQ}`,
+    );
+  }
+
+  if (data.reasonDoesntMeetCriteria) {
+    lines.push(
+      `• **${i18n(lang, "No cumple criterios", "Doesn't meet criteria")}:** ${data.reasonDoesntMeetCriteria}`,
+    );
+  }
+
+  if (!data.reasonForDQ && !data.reasonDoesntMeetCriteria) {
+    lines.push(
+      i18n(
+        lang,
+        "Este caso está marcado como Descalificado pero no tiene razón registrada en Salesforce.",
+        "This case is marked as Disqualified but has no reason recorded in Salesforce.",
+      ),
+    );
+  }
+
+  if (data.owner) {
+    lines.push(`• **${i18n(lang, "Owner", "Owner")}:** ${data.owner}`);
+  }
+
+  return { message: lines.join("\n") };
 }

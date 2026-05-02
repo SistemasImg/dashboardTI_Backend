@@ -204,7 +204,7 @@ exports.askModel = async (messages) => {
         {
           name: "getCasesByFilters",
           description:
-            "Get detailed case records using one or more concrete filters. Use this for compound queries like status+type, type+origin, segment+substatus, any filter+date, filter+agent, and also when the user specifies a concrete field value such as Origin=Campaign_p, Type=Rideshare, Status=Open. Supports: status, origin, segment (Supplier_Segment__c), type, substatus, agentName, dateKeyword, date (YYYY-MM-DD), startDate+endDate.",
+            "Get detailed case records using one or more concrete filters. Use this for compound queries like status+type, type+tier, type+origin, segment+substatus, any filter+date, filter+agent, and also when the user specifies a concrete field value such as Origin=Campaign_p, Type=Rideshare, Status=Open. Supports: status, origin, segment (Supplier_Segment__c), type, tier (Tier__c), substatus, agentName, dateKeyword, period=last_month, date (YYYY-MM-DD), startDate+endDate. If no date scope is provided, defaults to today.",
           parameters: {
             type: "object",
             properties: {
@@ -218,6 +218,11 @@ exports.askModel = async (messages) => {
                 type: "string",
                 description: "Case type. If user says 'tort' use 'Tort'",
               },
+              tier: {
+                type: "string",
+                description:
+                  "Tier version from Salesforce Tier__c, e.g. 9, 10, Tier9, Tier 10",
+              },
               substatus: { type: "string" },
               agentName: {
                 type: "string",
@@ -226,6 +231,11 @@ exports.askModel = async (messages) => {
               dateKeyword: {
                 type: "string",
                 enum: ["today", "yesterday"],
+              },
+              period: {
+                type: "string",
+                enum: ["last_month"],
+                description: "Relative period filter for last 30 days",
               },
               date: {
                 type: "string",
@@ -255,6 +265,188 @@ exports.askModel = async (messages) => {
               },
             },
             required: ["dateKeyword"],
+          },
+        },
+        {
+          name: "getVendorsWithLeads",
+          description:
+            "Get all vendors (Owner) that sent leads, optionally filtered by date scope (today, yesterday, last month, specific date, or date range)",
+          parameters: {
+            type: "object",
+            properties: {
+              dateKeyword: {
+                type: "string",
+                enum: ["today", "yesterday"],
+              },
+              period: {
+                type: "string",
+                enum: ["last_month"],
+              },
+              date: {
+                type: "string",
+                description: "Specific date in YYYY-MM-DD format",
+              },
+              startDate: {
+                type: "string",
+                description: "Start date for a range (YYYY-MM-DD)",
+              },
+              endDate: {
+                type: "string",
+                description: "End date for a range (YYYY-MM-DD)",
+              },
+            },
+          },
+        },
+        {
+          name: "getTopVendors",
+          description:
+            "Get top vendors (Owner) ranked by number of leads, optionally filtered by date scope. Supports highest or lowest ranking.",
+          parameters: {
+            type: "object",
+            properties: {
+              limit: {
+                type: "integer",
+                description: "Top N vendors, default 10",
+              },
+              sort: {
+                type: "string",
+                enum: ["highest", "lowest"],
+                description:
+                  "Use highest for most leads, lowest for least leads",
+              },
+              dateKeyword: {
+                type: "string",
+                enum: ["today", "yesterday"],
+              },
+              period: {
+                type: "string",
+                enum: ["last_month"],
+              },
+              date: {
+                type: "string",
+                description: "Specific date in YYYY-MM-DD format",
+              },
+              startDate: {
+                type: "string",
+                description: "Start date for a range (YYYY-MM-DD)",
+              },
+              endDate: {
+                type: "string",
+                description: "End date for a range (YYYY-MM-DD)",
+              },
+            },
+          },
+        },
+        {
+          name: "getTopVendorsWithCaseDetails",
+          description:
+            "Get top vendors (Owner) with detailed lead list including CaseNumber and phone, optionally filtered by date scope",
+          parameters: {
+            type: "object",
+            properties: {
+              limit: {
+                type: "integer",
+                description: "Top N vendors, default 5",
+              },
+              sort: {
+                type: "string",
+                enum: ["highest", "lowest"],
+                description:
+                  "Use highest for most leads, lowest for least leads",
+              },
+              dateKeyword: {
+                type: "string",
+                enum: ["today", "yesterday"],
+              },
+              period: {
+                type: "string",
+                enum: ["last_month"],
+              },
+              date: {
+                type: "string",
+                description: "Specific date in YYYY-MM-DD format",
+              },
+              startDate: {
+                type: "string",
+                description: "Start date for a range (YYYY-MM-DD)",
+              },
+              endDate: {
+                type: "string",
+                description: "End date for a range (YYYY-MM-DD)",
+              },
+            },
+          },
+        },
+        {
+          name: "getVendorsBySupplierSegment",
+          description:
+            "Get vendors (Owner) that belong to a specific supplier segment (High Quality, Medium, Low Quality), optionally filtered by date scope",
+          parameters: {
+            type: "object",
+            properties: {
+              segment: {
+                type: "string",
+                description:
+                  "Supplier segment filter: High Quality, Medium, Low Quality",
+              },
+              dateKeyword: {
+                type: "string",
+                enum: ["today", "yesterday"],
+              },
+              period: {
+                type: "string",
+                enum: ["last_month"],
+              },
+              date: {
+                type: "string",
+                description: "Specific date in YYYY-MM-DD format",
+              },
+              startDate: {
+                type: "string",
+                description: "Start date for a range (YYYY-MM-DD)",
+              },
+              endDate: {
+                type: "string",
+                description: "End date for a range (YYYY-MM-DD)",
+              },
+            },
+            required: ["segment"],
+          },
+        },
+        {
+          name: "getVendorLeadAttempts",
+          description:
+            "Get attempts by lead for a specific vendor (Owner). Returns case number, phone, attempts per lead, and hourly detail when the user asks for today, yesterday, or a specific date. Supports date filters.",
+          parameters: {
+            type: "object",
+            properties: {
+              vendorName: {
+                type: "string",
+                description: "Vendor owner name",
+              },
+              includeAgentDetails: {
+                type: "boolean",
+                description:
+                  "Set to true only if the user explicitly asks to see the agent name and call center for each attempt record",
+              },
+              dateKeyword: {
+                type: "string",
+                enum: ["today", "yesterday"],
+              },
+              date: {
+                type: "string",
+                description: "Specific date in YYYY-MM-DD format",
+              },
+              startDate: {
+                type: "string",
+                description: "Start date for a range (YYYY-MM-DD)",
+              },
+              endDate: {
+                type: "string",
+                description: "End date for a range (YYYY-MM-DD)",
+              },
+            },
+            required: ["vendorName"],
           },
         },
         {
@@ -334,7 +526,7 @@ exports.askModel = async (messages) => {
         {
           name: "getAttemptsByPhone",
           description:
-            "Get call attempts for a phone number. Default to today unless a date or range is requested",
+            "Get call attempts for a phone number. Default behavior is full history unless a date or range is requested",
           parameters: {
             type: "object",
             properties: {
@@ -395,6 +587,21 @@ exports.askModel = async (messages) => {
               type: { type: "string" },
             },
             required: ["type"],
+          },
+        },
+        {
+          name: "getCaseDisqualificationReason",
+          description:
+            "Get the disqualification reason for a case. Use when the user asks why a case was disqualified or rejected. Returns Reason_for_DQ__c and Reason_for_Doesn_t_meet_criteria__c. No date restriction.",
+          parameters: {
+            type: "object",
+            properties: {
+              caseNumber: {
+                type: "string",
+                description: "The CaseNumber to look up",
+              },
+            },
+            required: ["caseNumber"],
           },
         },
       ],
