@@ -551,11 +551,24 @@ exports.askModel = async (messages) => {
         {
           name: "getAttemptsByCaseNumber",
           description:
-            "Get attempts history and total attempts for a case number",
+            "Get call attempts for a case number. Supports date filters (today, yesterday, exact date, or last N days). Default is full history when no date filter is provided",
           parameters: {
             type: "object",
             properties: {
               caseNumber: { type: "string" },
+              dateKeyword: {
+                type: "string",
+                enum: ["today", "yesterday"],
+              },
+              date: {
+                type: "string",
+                description: "Specific date in YYYY-MM-DD format",
+              },
+              lastDays: {
+                type: "integer",
+                description:
+                  "Use only when user asks for last N days, e.g. 2 or 3",
+              },
             },
             required: ["caseNumber"],
           },
@@ -602,6 +615,114 @@ exports.askModel = async (messages) => {
               },
             },
             required: ["caseNumber"],
+          },
+        },
+        {
+          name: "prepareT9RidesharePayload",
+          description:
+            "Prepare the JSON payload for T9 Rideshare (Phillips Law Group) using a Salesforce case number, tort, tier, and optional attachments.",
+          parameters: {
+            type: "object",
+            properties: {
+              caseNumber: { type: "string" },
+              tort: {
+                type: "string",
+                description: "Tort/campaign name, e.g. Rideshare",
+              },
+              tier: {
+                type: "string",
+                description: "Tier value (T9, Tier 9, or 9)",
+              },
+              attachments: {
+                type: "array",
+                description:
+                  "Optional attachment list. Use only when user provides files.",
+                items: {
+                  type: "object",
+                  properties: {
+                    fileName: { type: "string" },
+                    mimeType: { type: "string" },
+                    fileBase64: { type: "string" },
+                    note: { type: "string" },
+                  },
+                  required: ["fileName", "fileBase64"],
+                },
+              },
+            },
+            required: ["caseNumber", "tort", "tier"],
+          },
+        },
+        {
+          name: "sendT9RidesharePayload",
+          description:
+            "Send T9 Rideshare payload to the configured client API endpoint. Requires case number, tort, tier, and uploaded files for this tier.",
+          parameters: {
+            type: "object",
+            properties: {
+              caseNumber: { type: "string" },
+              tort: {
+                type: "string",
+                description: "Tort/campaign name, e.g. Rideshare",
+              },
+              tier: {
+                type: "string",
+                description: "Tier value (T9, Tier 9, or 9)",
+              },
+              attachments: {
+                type: "array",
+                items: {
+                  type: "object",
+                  properties: {
+                    fileName: { type: "string" },
+                    mimeType: { type: "string" },
+                    fileBase64: { type: "string" },
+                    note: { type: "string" },
+                  },
+                  required: ["fileName", "fileBase64"],
+                },
+              },
+            },
+            required: ["caseNumber", "tort", "tier"],
+          },
+        },
+        {
+          name: "prepareBardPortT2Payload",
+          description:
+            "Prepare the JSON payload for Wilens Law - Bard Port T2 using a Salesforce case number, tort, and tier. This tier does not require files.",
+          parameters: {
+            type: "object",
+            properties: {
+              caseNumber: { type: "string" },
+              tort: {
+                type: "string",
+                description: "Tort/campaign name, e.g. Bard Port",
+              },
+              tier: {
+                type: "string",
+                description: "Tier value (T2, Tier 2, or 2)",
+              },
+            },
+            required: ["caseNumber", "tort", "tier"],
+          },
+        },
+        {
+          name: "sendBardPortT2Payload",
+          description:
+            "Send Bard Port T2 payload to Wilens Law LeadProsper API endpoint. Use for requests like send API/PI for Bard/Bart Port T2 with a case number. No files required for this tier.",
+          parameters: {
+            type: "object",
+            properties: {
+              caseNumber: { type: "string" },
+              tort: {
+                type: "string",
+                description: "Tort/campaign name, e.g. Bard Port",
+              },
+              tier: {
+                type: "string",
+                description: "Tier value (T2, Tier 2, or 2)",
+              },
+            },
+            required: ["caseNumber", "tort", "tier"],
           },
         },
       ],

@@ -3,6 +3,7 @@ const logger = require("../../utils/logger");
 const { askModel } = require("./ai.config");
 const { systemPrompt } = require("./prompts");
 const excelService = require("./excel.service");
+const apiIntegrations = require("./api-integrations");
 const { DateTime } = require("luxon");
 const chatSessionService = require("../../services/chatSession.service");
 
@@ -275,6 +276,35 @@ function isAttemptsQuery(message) {
   );
 }
 
+/**
+ * Detects if the user is requesting a T9 Rideshare API send.
+ * Returns { caseNumber } if intent is detected, null otherwise.
+ * Used to bypass AI model hallucination when model skips the function call.
+ */
+function detectT9SendIntent(message) {
+  const text = String(message || "").toLowerCase();
+
+  const mentionsSend =
+    text.includes("envi") ||
+    text.includes("manda") ||
+    text.includes("send") ||
+    text.includes("submit");
+
+  const mentionsT9 =
+    text.includes("t9") ||
+    text.includes("tier 9") ||
+    text.includes("tier9") ||
+    text.includes("rideshare");
+
+  if (!mentionsSend || !mentionsT9) return null;
+
+  // Extract 8-digit case number (with or without leading zeros)
+  const caseMatch = text.match(/\b(0*\d{5,8})\b/);
+  if (!caseMatch) return null;
+
+  return { caseNumber: caseMatch[1] };
+}
+
 function detectCaseAttemptsByDateIntent(message) {
   const text = String(message || "").toLowerCase();
   const mentionsAttempts =
@@ -332,6 +362,7 @@ function normalizeBusinessQuery(message) {
     [/\bmedio\b/gi, "medium"],
     [/\bbajo\b/gi, "low quality"],
     [/\bfirmad[oa]s?\b/gi, "sent"],
+    [/\bt9\b/gi, "tier9"],
     [/\btier\s*(\d+)\b/gi, "tier$1"],
   ];
 
@@ -383,13 +414,13 @@ function extractLastReferencedCaseNumber(storedMessages = []) {
   }
 
   const contextualPattern =
-    /(?:case|caso|lead|casenumber|numero de caso)\s*(?:#|number|numero)?\s*[:\-]?\s*(\d{6,12})/i;
+    /(?:case|caso|lead|casenumber|numero de caso)\s*(?:#|number|numero)?\s*[:-]?\s*(\d{6,12})/i;
 
   for (let i = storedMessages.length - 1; i >= 0; i -= 1) {
     const content = String(storedMessages[i]?.content || "");
     if (!content) continue;
 
-    const contextualMatch = content.match(contextualPattern);
+    const contextualMatch = contextualPattern.exec(content);
     if (contextualMatch?.[1]) {
       return contextualMatch[1];
     }
@@ -440,14 +471,26 @@ function humanizePayload(payload) {
   return payload;
 }
 
-exports.processMessage = async (userMessage, userId = null) => {
+exports.processMessage = async (
+  userMessage,
+  userId = null,
+  uploadedAttachments = [],
+) => {
   const normalizedUserMessage = normalizeBusinessQuery(userMessage);
   const userLang = detectUserLanguage(normalizedUserMessage);
+  const requestAttachments = Array.isArray(uploadedAttachments)
+    ? uploadedAttachments
+    : [];
 
   try {
     logger.info(
       `Incoming chatbot message [user:${userId}]: ${normalizedUserMessage}`,
     );
+    if (requestAttachments.length > 0) {
+      logger.info(
+        `Chatbot request includes ${requestAttachments.length} attachment(s) for current turn`,
+      );
+    }
 
     // Load session from DB; cache in memory (L1) to reduce DB reads within the same process
     const cacheKey = String(userId ?? "anonymous");
@@ -471,8 +514,33 @@ exports.processMessage = async (userMessage, userId = null) => {
     const historyForAI = chatSessionService.buildMessagesForAI(
       sessionData.messages,
     );
+    const uploadContextMessages =
+      requestAttachments.length > 0
+        ? [
+            {
+              role: "system",
+              content: `Current request already includes ${requestAttachments.length} uploaded file(s): ${requestAttachments
+                .map((file) => file.fileName)
+                .join(
+                  ", ",
+                )}. If user asks to send T9 API, treat attachments as provided in this request.`,
+            },
+          ]
+        : [
+            {
+              role: "system",
+              content:
+                "IMPORTANT: No files were attached to this request. " +
+                "If the user asks to send a T9 Rideshare payload (any variant: enviar API, envíame el API, send API, PI, etc.), " +
+                "you MUST call the sendT9RidesharePayload function with the provided case number — do NOT generate a text response, " +
+                "do NOT simulate success, do NOT invent HTTP codes, do NOT invent Lead IDs. " +
+                "The function itself will detect missing files and return the appropriate error. " +
+                "Never fabricate a successful delivery response under any circumstances.",
+            },
+          ];
     const messages = [
       { role: "system", content: systemPrompt },
+      ...uploadContextMessages,
       ...historyForAI,
       { role: "user", content: contextualNormalizedMessage },
     ];
@@ -620,252 +688,399 @@ exports.processMessage = async (userMessage, userId = null) => {
       }
       let functionResult;
 
-      switch (functionName) {
-        case "getCaseByDate":
-          functionResult = await metrics.sf.getCaseByDate(
-            args.dateFilter === "today" ? "TODAY" : "YESTERDAY",
-          );
-          break;
+      const saveApiRoutingFilters = () => {
+        if (!args.caseNumber) return;
+        sessionData.last_filters = {
+          ...(sessionData.last_filters || {}),
+          caseNumber: args.caseNumber,
+          tier: args.tier,
+          type: args.tort,
+        };
+        sessionCache[cacheKey].last_filters = sessionData.last_filters;
+      };
 
-        case "getCaseByNumber":
-          functionResult = await metrics.sf.getCaseByNumber(args.caseNumber);
-          if (args.caseNumber) {
-            sessionData.last_filters = {
-              ...(sessionData.last_filters || {}),
-              caseNumber: args.caseNumber,
-            };
-            sessionCache[cacheKey].last_filters = sessionData.last_filters;
-          }
-          break;
-
-        case "getCaseByPhone":
-          functionResult = await metrics.sf.getCaseByPhone(args.phone);
-          break;
-
-        case "getCasesByStatus":
-          functionResult = await metrics.sf.getCasesByStatus(
-            args.status,
-            args.dateKeyword,
-            args.date,
-          );
-          break;
-
-        case "getCasesByDateRange":
-          functionResult = await metrics.sf.getCasesByDateRange(
-            args.startDate,
-            args.endDate,
-          );
-          break;
-
-        case "getCaseByEmail":
-          functionResult = await metrics.sf.getCaseByEmail(args.email);
-          break;
-
-        case "getCasesByOrigin":
-          functionResult = await metrics.sf.getCasesByOrigin(
-            args.origin,
-            args.dateKeyword,
-            args.date,
-          );
-          break;
-
-        case "getCasesBySupplierSegment":
-          functionResult = await metrics.sf.getCasesBySupplierSegment(
-            args.segment,
-            args.dateKeyword,
-            args.date,
-          );
-          break;
-
-        case "getCasesBySubstatus":
-          functionResult = await metrics.sf.getCasesBySubstatus(
-            args.substatus,
-            args.dateKeyword,
-            args.date,
-          );
-          break;
-
-        case "getCasesByType": {
-          const typeValue =
-            args.type?.toLowerCase() === "tort" ? "Tort" : args.type;
-          functionResult = await metrics.sf.getCasesByType(
-            typeValue,
-            args.dateKeyword,
-            args.date,
-          );
-          break;
-        }
-
-        case "getCasesByFilters":
-          functionResult = await metrics.sf.getCasesByFilters(args);
-          sessionData.last_filters = args;
-          sessionCache[cacheKey].last_filters = args;
-          break;
-
-        case "getCasesGroupedByField":
-          functionResult = await metrics.sf.getCasesGroupedByField(
-            args.field,
-            args.dateKeyword,
-          );
-          break;
-
-        case "getOperationalSummary":
-          functionResult = await metrics.sf.getOperationalSummary(
-            args.dateKeyword,
-          );
-          break;
-
-        case "getVendorsWithLeads":
-          functionResult = await metrics.sf.getVendorsWithLeads({
-            dateKeyword: args.dateKeyword,
-            period: args.period,
-            date: args.date,
-            startDate: args.startDate,
-            endDate: args.endDate,
+      if (functionName === "prepareBardPortT2Payload") {
+        functionResult =
+          await apiIntegrations.bardPortT2.prepareBardPortT2Payload({
+            caseNumber: args.caseNumber,
+            tort: args.tort,
+            tier: args.tier,
           });
-          break;
+        saveApiRoutingFilters();
+      } else if (functionName === "sendBardPortT2Payload") {
+        functionResult = await apiIntegrations.bardPortT2.sendBardPortT2Payload(
+          {
+            caseNumber: args.caseNumber,
+            tort: args.tort,
+            tier: args.tier,
+          },
+        );
+        saveApiRoutingFilters();
+      } else {
+        switch (functionName) {
+          case "getCaseByDate":
+            functionResult = await metrics.sf.getCaseByDate(
+              args.dateFilter === "today" ? "TODAY" : "YESTERDAY",
+            );
+            break;
 
-        case "getTopVendors":
-          functionResult = await metrics.sf.getTopVendors({
-            limit: args.limit,
-            sort: args.sort,
-            dateKeyword: args.dateKeyword,
-            period: args.period,
-            date: args.date,
-            startDate: args.startDate,
-            endDate: args.endDate,
-          });
-          break;
+          case "getCaseByNumber":
+            functionResult = await metrics.sf.getCaseByNumber(args.caseNumber);
+            if (args.caseNumber) {
+              sessionData.last_filters = {
+                ...(sessionData.last_filters || {}),
+                caseNumber: args.caseNumber,
+              };
+              sessionCache[cacheKey].last_filters = sessionData.last_filters;
+            }
+            break;
 
-        case "getTopVendorsWithCaseDetails":
-          functionResult = await metrics.sf.getTopVendorsWithCaseDetails({
-            limit: args.limit,
-            sort: args.sort,
-            dateKeyword: args.dateKeyword,
-            period: args.period,
-            date: args.date,
-            startDate: args.startDate,
-            endDate: args.endDate,
-          });
-          break;
+          case "getCaseByPhone":
+            functionResult = await metrics.sf.getCaseByPhone(args.phone);
+            break;
 
-        case "getCaseDisqualificationReason":
-          args.caseNumber =
-            args.caseNumber ||
-            sessionData.last_filters?.caseNumber ||
-            extractLastReferencedCaseNumber(sessionData.messages);
+          case "getCasesByStatus":
+            functionResult = await metrics.sf.getCasesByStatus(
+              args.status,
+              args.dateKeyword,
+              args.date,
+            );
+            break;
 
-          if (!args.caseNumber) {
-            functionResult = { found: false, missingCaseNumber: true };
+          case "getCasesByDateRange":
+            functionResult = await metrics.sf.getCasesByDateRange(
+              args.startDate,
+              args.endDate,
+            );
+            break;
+
+          case "getCaseByEmail":
+            functionResult = await metrics.sf.getCaseByEmail(args.email);
+            break;
+
+          case "getCasesByOrigin":
+            functionResult = await metrics.sf.getCasesByOrigin(
+              args.origin,
+              args.dateKeyword,
+              args.date,
+            );
+            break;
+
+          case "getCasesBySupplierSegment":
+            functionResult = await metrics.sf.getCasesBySupplierSegment(
+              args.segment,
+              args.dateKeyword,
+              args.date,
+            );
+            break;
+
+          case "getCasesBySubstatus":
+            functionResult = await metrics.sf.getCasesBySubstatus(
+              args.substatus,
+              args.dateKeyword,
+              args.date,
+            );
+            break;
+
+          case "getCasesByType": {
+            const typeValue =
+              args.type?.toLowerCase() === "tort" ? "Tort" : args.type;
+            functionResult = await metrics.sf.getCasesByType(
+              typeValue,
+              args.dateKeyword,
+              args.date,
+            );
             break;
           }
 
-          functionResult = await metrics.sf.getCaseDisqualificationReason(
-            args.caseNumber,
-          );
-          if (args.caseNumber) {
-            sessionData.last_filters = {
-              ...(sessionData.last_filters || {}),
-              caseNumber: args.caseNumber,
-            };
-            sessionCache[cacheKey].last_filters = sessionData.last_filters;
-          }
-          break;
+          case "getCasesByFilters":
+            functionResult = await metrics.sf.getCasesByFilters(args);
+            sessionData.last_filters = args;
+            sessionCache[cacheKey].last_filters = args;
+            break;
 
-        case "getVendorsBySupplierSegment":
-          functionResult = await metrics.sf.getVendorsBySupplierSegment(
-            args.segment,
-            {
+          case "getCasesGroupedByField":
+            functionResult = await metrics.sf.getCasesGroupedByField(
+              args.field,
+              args.dateKeyword,
+            );
+            break;
+
+          case "getOperationalSummary":
+            functionResult = await metrics.sf.getOperationalSummary(
+              args.dateKeyword,
+            );
+            break;
+
+          case "getVendorsWithLeads":
+            functionResult = await metrics.sf.getVendorsWithLeads({
               dateKeyword: args.dateKeyword,
               period: args.period,
               date: args.date,
               startDate: args.startDate,
               endDate: args.endDate,
-            },
-          );
-          break;
+            });
+            break;
 
-        case "getCasesByAgent":
-          functionResult = await metrics.dashboard.getCasesByAgent(
-            args.agentName,
-          );
-          break;
-
-        case "getCasesByCallCenter":
-          functionResult = await metrics.dashboard.getCasesByCallCenter(
-            args.callCenter,
-          );
-          break;
-
-        case "getTotalAttemptsByAgent":
-          functionResult = await metrics.sql.getTotalAttemptsByAgent(
-            args.agentName,
-            {
+          case "getTopVendors":
+            functionResult = await metrics.sf.getTopVendors({
+              limit: args.limit,
+              sort: args.sort,
               dateKeyword: args.dateKeyword,
-              date: args.date,
-            },
-          );
-          break;
-
-        case "getAgentAttemptsByPhonePerHour":
-          functionResult = await metrics.sql.getAgentAttemptsByPhonePerHour(
-            args.agentName,
-            args.phone,
-            {
-              dateKeyword: args.dateKeyword,
-              date: args.date,
-            },
-          );
-          break;
-
-        case "getVicidialAgentsStatus":
-          functionResult = await metrics.sql.getVicidialAgentsStatus({
-            agentName: args.agentName,
-          });
-          break;
-
-        case "getAttemptsByPhone":
-          functionResult = await metrics.sql.getAttemptsByPhone(args.phone, {
-            dateKeyword: args.dateKeyword,
-            date: args.date,
-            lastDays: args.lastDays,
-          });
-          break;
-
-        case "getAttemptsByCaseNumber":
-          functionResult = await metrics.sql.getAttemptsByCaseNumber(
-            args.caseNumber,
-          );
-          break;
-
-        case "getCaseAttemptsByDate":
-          functionResult = await metrics.sql.getCaseAttemptsByDate({
-            dateKeyword: args.dateKeyword,
-            date: args.date,
-          });
-          break;
-
-        case "getVendorLeadAttempts":
-          functionResult = await metrics.sql.getVendorLeadAttempts(
-            args.vendorName,
-            {
-              includeAgentDetails: args.includeAgentDetails,
-              dateKeyword: args.dateKeyword,
+              period: args.period,
               date: args.date,
               startDate: args.startDate,
               endDate: args.endDate,
-            },
-          );
-          break;
+            });
+            break;
 
-        case "getCasesByTypeFromReport":
-          functionResult = await metrics.dashboard.getCasesByTypeFromReport(
-            args.type,
-          );
-          break;
+          case "getTopVendorsWithCaseDetails":
+            functionResult = await metrics.sf.getTopVendorsWithCaseDetails({
+              limit: args.limit,
+              sort: args.sort,
+              dateKeyword: args.dateKeyword,
+              period: args.period,
+              date: args.date,
+              startDate: args.startDate,
+              endDate: args.endDate,
+            });
+            break;
 
-        default:
-          throw new Error("UNKNOWN_FUNCTION");
+          case "getCaseDisqualificationReason":
+            args.caseNumber =
+              args.caseNumber ||
+              sessionData.last_filters?.caseNumber ||
+              extractLastReferencedCaseNumber(sessionData.messages);
+
+            if (!args.caseNumber) {
+              functionResult = { found: false, missingCaseNumber: true };
+              break;
+            }
+
+            functionResult = await metrics.sf.getCaseDisqualificationReason(
+              args.caseNumber,
+            );
+            if (args.caseNumber) {
+              sessionData.last_filters = {
+                ...(sessionData.last_filters || {}),
+                caseNumber: args.caseNumber,
+              };
+              sessionCache[cacheKey].last_filters = sessionData.last_filters;
+            }
+            break;
+
+          case "prepareT9RidesharePayload":
+            functionResult =
+              await apiIntegrations.t9Rideshare.prepareT9RidesharePayload({
+                caseNumber: args.caseNumber,
+                tort: args.tort,
+                tier: args.tier,
+                attachments:
+                  requestAttachments.length > 0
+                    ? requestAttachments
+                    : args.attachments,
+              });
+            if (args.caseNumber) {
+              sessionData.last_filters = {
+                ...(sessionData.last_filters || {}),
+                caseNumber: args.caseNumber,
+                tier: args.tier,
+                type: args.tort,
+              };
+              sessionCache[cacheKey].last_filters = sessionData.last_filters;
+            }
+            break;
+
+          case "sendT9RidesharePayload":
+            functionResult =
+              await apiIntegrations.t9Rideshare.sendT9RidesharePayload({
+                caseNumber: args.caseNumber,
+                tort: args.tort,
+                tier: args.tier,
+                attachments:
+                  requestAttachments.length > 0
+                    ? requestAttachments
+                    : args.attachments,
+              });
+            if (args.caseNumber) {
+              sessionData.last_filters = {
+                ...(sessionData.last_filters || {}),
+                caseNumber: args.caseNumber,
+                tier: args.tier,
+                type: args.tort,
+              };
+              sessionCache[cacheKey].last_filters = sessionData.last_filters;
+            }
+            break;
+
+          case "prepareBardPortT2Payload": {
+            const bardTort = args.tort || "Bard Port";
+            const bardTier = args.tier || "T2";
+
+            functionResult =
+              await apiIntegrations.bardPortT2.prepareBardPortT2Payload({
+                caseNumber: args.caseNumber,
+                tort: bardTort,
+                tier: bardTier,
+              });
+
+            if (args.caseNumber) {
+              sessionData.last_filters = {
+                ...(sessionData.last_filters || {}),
+                caseNumber: args.caseNumber,
+                tier: bardTier,
+                type: bardTort,
+              };
+              sessionCache[cacheKey].last_filters = sessionData.last_filters;
+            }
+            break;
+          }
+
+          case "sendBardPortT2Payload": {
+            const bardTort = args.tort || "Bard Port";
+            const bardTier = args.tier || "T2";
+
+            functionResult =
+              await apiIntegrations.bardPortT2.sendBardPortT2Payload({
+                caseNumber: args.caseNumber,
+                tort: bardTort,
+                tier: bardTier,
+              });
+
+            if (args.caseNumber) {
+              sessionData.last_filters = {
+                ...(sessionData.last_filters || {}),
+                caseNumber: args.caseNumber,
+                tier: bardTier,
+                type: bardTort,
+              };
+              sessionCache[cacheKey].last_filters = sessionData.last_filters;
+            }
+            break;
+          }
+
+          case "getVendorsBySupplierSegment":
+            functionResult = await metrics.sf.getVendorsBySupplierSegment(
+              args.segment,
+              {
+                dateKeyword: args.dateKeyword,
+                period: args.period,
+                date: args.date,
+                startDate: args.startDate,
+                endDate: args.endDate,
+              },
+            );
+            break;
+
+          case "getCasesByAgent":
+            functionResult = await metrics.dashboard.getCasesByAgent(
+              args.agentName,
+            );
+            break;
+
+          case "getCasesByCallCenter":
+            functionResult = await metrics.dashboard.getCasesByCallCenter(
+              args.callCenter,
+            );
+            break;
+
+          case "getTotalAttemptsByAgent":
+            functionResult = await metrics.sql.getTotalAttemptsByAgent(
+              args.agentName,
+              {
+                dateKeyword: args.dateKeyword,
+                date: args.date,
+              },
+            );
+            break;
+
+          case "getAgentAttemptsByPhonePerHour":
+            functionResult = await metrics.sql.getAgentAttemptsByPhonePerHour(
+              args.agentName,
+              args.phone,
+              {
+                dateKeyword: args.dateKeyword,
+                date: args.date,
+              },
+            );
+            break;
+
+          case "getVicidialAgentsStatus":
+            functionResult = await metrics.sql.getVicidialAgentsStatus({
+              agentName: args.agentName,
+            });
+            break;
+
+          case "getAttemptsByPhone":
+            functionResult = await metrics.sql.getAttemptsByPhone(args.phone, {
+              dateKeyword: args.dateKeyword,
+              date: args.date,
+              lastDays: args.lastDays,
+            });
+            break;
+
+          case "getAttemptsByCaseNumber": {
+            var caseAttemptsFilters = {
+              dateKeyword: args.dateKeyword,
+              date: args.date,
+              lastDays: args.lastDays,
+            };
+
+            if (
+              !caseAttemptsFilters.dateKeyword &&
+              !caseAttemptsFilters.date &&
+              !caseAttemptsFilters.lastDays
+            ) {
+              if (/\b(hoy|today)\b/i.exec(normalizedUserMessage)) {
+                caseAttemptsFilters.dateKeyword = "today";
+              } else if (/\b(ayer|yesterday)\b/i.exec(normalizedUserMessage)) {
+                caseAttemptsFilters.dateKeyword = "yesterday";
+              } else {
+                const isoDate = /\b(20\d{2}-\d{2}-\d{2})\b/.exec(
+                  normalizedUserMessage,
+                );
+                if (isoDate) {
+                  caseAttemptsFilters.date = isoDate[1];
+                }
+              }
+            }
+
+            functionResult = await metrics.sql.getAttemptsByCaseNumber(
+              args.caseNumber,
+              caseAttemptsFilters,
+            );
+            break;
+          }
+
+          case "getCaseAttemptsByDate":
+            functionResult = await metrics.sql.getCaseAttemptsByDate({
+              dateKeyword: args.dateKeyword,
+              date: args.date,
+            });
+            break;
+
+          case "getVendorLeadAttempts":
+            functionResult = await metrics.sql.getVendorLeadAttempts(
+              args.vendorName,
+              {
+                includeAgentDetails: args.includeAgentDetails,
+                dateKeyword: args.dateKeyword,
+                date: args.date,
+                startDate: args.startDate,
+                endDate: args.endDate,
+              },
+            );
+            break;
+
+          case "getCasesByTypeFromReport":
+            functionResult = await metrics.dashboard.getCasesByTypeFromReport(
+              args.type,
+            );
+            break;
+
+          default:
+            throw new Error("UNKNOWN_FUNCTION");
+        }
       }
 
       sessionCache[cacheKey].last_results = functionResult;
@@ -902,6 +1117,63 @@ exports.processMessage = async (userMessage, userId = null) => {
         );
       }
 
+      // Keep attempt queries deterministic to prevent contradictory paraphrases
+      // like claiming no attempts "today" while listing attempts for today's date.
+      if (
+        functionName === "getAttemptsByCaseNumber" ||
+        functionName === "getAttemptsByPhone"
+      ) {
+        finalMessage = formattedResponse.message;
+      }
+
+      if (
+        functionName === "sendT9RidesharePayload" &&
+        functionResult?.sent === false &&
+        functionResult?.attachmentsRequired === true
+      ) {
+        finalMessage = i18n(
+          userLang,
+          `No se hizo el envío T9 del case ${functionResult.caseNumber} porque para este tier los archivos son obligatorios. Adjunta los documentos directamente en el mismo mensaje y vuelve a pedir el envío.`,
+          `T9 delivery was not started for case ${functionResult.caseNumber} because files are mandatory for this tier. Attach the required documents directly in the same message and request the submission again.`,
+        );
+      }
+
+      if (functionName === "sendT9RidesharePayload" && functionResult?.sent) {
+        const sentMessage = i18n(
+          userLang,
+          `Listo, envié correctamente el API del caso ${functionResult.caseNumber}.`,
+          `Done, I sent the API successfully for case ${functionResult.caseNumber}.`,
+        );
+
+        const clientResponseText = functionResult.clientResponse || "N/A";
+        let salesforceSavedText = "N/A";
+        if (typeof functionResult.salesforceUpdated === "boolean") {
+          salesforceSavedText = functionResult.salesforceUpdated
+            ? i18n(userLang, "si", "yes")
+            : i18n(userLang, "no", "no");
+        }
+
+        finalMessage = `${sentMessage}\n\n${i18n(userLang, "Respuesta del cliente", "Client response")}: ${clientResponseText}\n${i18n(userLang, "Guardado en Salesforce", "Saved in Salesforce")}: ${salesforceSavedText}`;
+      }
+
+      if (functionName === "sendBardPortT2Payload" && functionResult?.sent) {
+        const sentMessage = i18n(
+          userLang,
+          `Listo, envié correctamente el API del caso ${functionResult.caseNumber}.`,
+          `Done, I sent the API successfully for case ${functionResult.caseNumber}.`,
+        );
+
+        const clientResponseText = functionResult.clientResponse || "N/A";
+        let salesforceSavedText = "N/A";
+        if (typeof functionResult.salesforceUpdated === "boolean") {
+          salesforceSavedText = functionResult.salesforceUpdated
+            ? i18n(userLang, "si", "yes")
+            : i18n(userLang, "no", "no");
+        }
+
+        finalMessage = `${sentMessage}\n\n${i18n(userLang, "HTTP", "HTTP")}: ${functionResult.statusCode || "N/A"}\n${i18n(userLang, "Respuesta del cliente", "Client response")}: ${clientResponseText}\n${i18n(userLang, "Guardado en Salesforce", "Saved in Salesforce")}: ${salesforceSavedText}`;
+      }
+
       const finalPayload = humanizePayload({
         ...formattedResponse,
         message: finalMessage,
@@ -928,6 +1200,69 @@ exports.processMessage = async (userMessage, userId = null) => {
     }
 
     // Normal conversation (no function_call returned by the model)
+    // Safety net: if the model skipped calling sendT9RidesharePayload and generated
+    // a plain-text response instead, detect the intent locally and execute the function.
+    const t9Intent = detectT9SendIntent(normalizedUserMessage);
+    if (t9Intent && requestAttachments.length > 0) {
+      logger.warn(
+        `[T9 Safety Net] Model skipped function call. Forcing sendT9RidesharePayload for case ${t9Intent.caseNumber}`,
+      );
+      const t9FunctionResult =
+        await apiIntegrations.t9Rideshare.sendT9RidesharePayload({
+          caseNumber: t9Intent.caseNumber,
+          tort: "Rideshare",
+          tier: "T9",
+          attachments: requestAttachments,
+        });
+
+      let t9FinalMessage;
+      if (t9FunctionResult.sent) {
+        const sfText =
+          typeof t9FunctionResult.salesforceUpdated === "boolean"
+            ? t9FunctionResult.salesforceUpdated
+              ? i18n(userLang, "si", "yes")
+              : i18n(userLang, "no", "no")
+            : "N/A";
+        t9FinalMessage = `${i18n(userLang, `Listo, envié correctamente el API del caso ${t9FunctionResult.caseNumber}.`, `Done, I sent the API successfully for case ${t9FunctionResult.caseNumber}.`)}\n\n${i18n(userLang, "Respuesta del cliente", "Client response")}: ${t9FunctionResult.clientResponse || "N/A"}\n${i18n(userLang, "Guardado en Salesforce", "Saved in Salesforce")}: ${sfText}`;
+      } else if (t9FunctionResult.attachmentsRequired) {
+        t9FinalMessage = i18n(
+          userLang,
+          `No se hizo el envío T9 del case ${t9FunctionResult.caseNumber} porque los archivos son obligatorios. Adjunta los documentos directamente en el mismo mensaje.`,
+          `T9 delivery was not started for case ${t9FunctionResult.caseNumber} because files are mandatory for this tier. Attach the documents directly in the same message.`,
+        );
+      } else if (!t9FunctionResult.found) {
+        t9FinalMessage = i18n(
+          userLang,
+          `No encontré el case ${t9Intent.caseNumber} en Salesforce. Verifica el número e intenta de nuevo.`,
+          `I couldn't find case ${t9Intent.caseNumber} in Salesforce. Please verify the case number and try again.`,
+        );
+      } else {
+        t9FinalMessage = i18n(
+          userLang,
+          `No se completó el envío T9 para el case ${t9FunctionResult.caseNumber}. ${t9FunctionResult.message || t9FunctionResult.error || "Revisa la configuración del endpoint"}.`,
+          `T9 delivery for case ${t9FunctionResult.caseNumber} was not completed. ${t9FunctionResult.message || t9FunctionResult.error || "Check endpoint configuration"}.`,
+        );
+      }
+
+      chatSessionService
+        .appendMessages(
+          userId,
+          [
+            { role: "user", content: userMessage },
+            { role: "assistant", content: t9FinalMessage },
+          ],
+          sessionCache[cacheKey].last_filters,
+          t9FunctionResult,
+        )
+        .catch((err) =>
+          logger.error(
+            `[ChatSession] Failed to persist messages: ${err.message}`,
+          ),
+        );
+
+      return { message: t9FinalMessage };
+    }
+
     const assistantContent = message.content || "";
 
     chatSessionService
@@ -1061,6 +1396,22 @@ async function formatResult(type, data, lang = "en") {
 
   if (type === "getCaseDisqualificationReason") {
     return formatCaseDisqualificationResult(data, lang);
+  }
+
+  if (type === "prepareT9RidesharePayload") {
+    return formatPrepareT9RidesharePayloadResult(data, lang);
+  }
+
+  if (type === "sendT9RidesharePayload") {
+    return formatSendT9RidesharePayloadResult(data, lang);
+  }
+
+  if (type === "prepareBardPortT2Payload") {
+    return formatPrepareBardPortT2PayloadResult(data, lang);
+  }
+
+  if (type === "sendBardPortT2Payload") {
+    return formatSendBardPortT2PayloadResult(data, lang);
   }
 
   // Grouped result
@@ -1958,4 +2309,196 @@ function formatCaseDisqualificationResult(data, lang = "en") {
   }
 
   return { message: lines.join("\n") };
+}
+
+function formatPrepareT9RidesharePayloadResult(data, lang = "en") {
+  if (!data.found) {
+    return {
+      message: i18n(
+        lang,
+        `No encontré el case ${data.caseNumber} para armar el payload T9.`,
+        `I couldn't find case ${data.caseNumber} to build the T9 payload.`,
+      ),
+    };
+  }
+
+  if (!data.ready) {
+    const fields = (data.missingFields || []).join(", ");
+    return {
+      message: i18n(
+        lang,
+        `⚠️ No se puede armar el payload T9 para el case ${data.caseNumber}. Los siguientes campos están vacíos o no tienen datos en Salesforce: **${fields}**. Verifica que el registro esté completo antes de continuar.`,
+        `⚠️ Cannot build T9 payload for case ${data.caseNumber}. The following fields are empty or missing in Salesforce: **${fields}**. Please verify the record is complete before proceeding.`,
+      ),
+    };
+  }
+
+  return {
+    message: `
+🧩 **${i18n(lang, "Payload T9 preparado", "T9 payload prepared")}**
+• **Case:** ${data.caseNumber}
+• **Tort:** ${data.tort}
+• **Tier:** ${data.tier}
+
+${i18n(
+  lang,
+  "La estructura JSON quedó lista para envío al endpoint del cliente.",
+  "The JSON structure is ready to be sent to the client endpoint.",
+)}
+`,
+  };
+}
+
+function formatSendT9RidesharePayloadResult(data, lang = "en") {
+  if (!data.found) {
+    return {
+      message: i18n(
+        lang,
+        `No encontré el case ${data.caseNumber}. No pude enviar el payload T9.`,
+        `I couldn't find case ${data.caseNumber}. I could not send the T9 payload.`,
+      ),
+    };
+  }
+
+  if (data.attachmentsRequired) {
+    return {
+      message: i18n(
+        lang,
+        `No se hizo el envío T9 del case ${data.caseNumber} porque para este tier los archivos son obligatorios. Vuelve a enviar tu mensaje del chatbot adjuntando los documentos en la misma solicitud usando el campo files, y luego pide el envío otra vez.`,
+        `T9 delivery was not started for case ${data.caseNumber} because files are mandatory for this tier. Send your chatbot message again with the required documents attached in the same request using the files field, then ask to submit it again.`,
+      ),
+    };
+  }
+
+  if (!data.ready) {
+    const fields = (data.missingFields || []).join(", ");
+    return {
+      message: i18n(
+        lang,
+        `⚠️ No se puede enviar el payload T9 para el case ${data.caseNumber}. Los siguientes campos están vacíos o no tienen datos en Salesforce: **${fields}**. Verifica que el registro esté completo antes de continuar.`,
+        `⚠️ Cannot send T9 payload for case ${data.caseNumber}. The following fields are empty or missing in Salesforce: **${fields}**. Please verify the record is complete before proceeding.`,
+      ),
+    };
+  }
+
+  if (!data.sent) {
+    if (data.dryRun) {
+      return {
+        message: i18n(
+          lang,
+          `🧪 Simulación T9 completada para el case ${data.caseNumber}. No se envió al cliente porque el modo dry-run está activo. Revisé y registré en logs el body final con campos y archivos (${data.attachmentsCount}).`,
+          `🧪 T9 simulation completed for case ${data.caseNumber}. It was not sent to the client because dry-run mode is active. The final body with fields and files (${data.attachmentsCount}) was logged.`,
+        ),
+      };
+    }
+
+    return {
+      message: i18n(
+        lang,
+        `No se completó el envío T9 para el case ${data.caseNumber}. ${data.message || data.error || "Revisa la configuración del endpoint"}.`,
+        `T9 delivery for case ${data.caseNumber} was not completed. ${data.message || data.error || "Check endpoint configuration"}.`,
+      ),
+    };
+  }
+
+  const sfText =
+    typeof data.salesforceUpdated === "boolean"
+      ? data.salesforceUpdated
+        ? i18n(lang, "si", "yes")
+        : i18n(lang, "no", "no")
+      : "N/A";
+
+  return {
+    message: `${i18n(lang, `Listo, envié correctamente el API del caso ${data.caseNumber}.`, `Done, I sent the API successfully for case ${data.caseNumber}.`)}\n\n${i18n(lang, "Respuesta del cliente", "Client response")}: ${data.clientResponse || "N/A"}\n${i18n(lang, "Guardado en Salesforce", "Saved in Salesforce")}: ${sfText}`,
+  };
+}
+
+function formatPrepareBardPortT2PayloadResult(data, lang = "en") {
+  if (!data.found) {
+    return {
+      message: i18n(
+        lang,
+        `No encontré el case ${data.caseNumber} para armar el payload de Bard Port T2.`,
+        `I couldn't find case ${data.caseNumber} to build the Bard Port T2 payload.`,
+      ),
+    };
+  }
+
+  if (!data.ready) {
+    const fields = (data.missingFields || []).join(", ");
+    return {
+      message: i18n(
+        lang,
+        `⚠️ No se puede armar el payload de Bard Port T2 para el case ${data.caseNumber}. Los siguientes campos están vacíos o no tienen datos en Salesforce: **${fields}**. Verifica que el registro esté completo antes de continuar.`,
+        `⚠️ Cannot build Bard Port T2 payload for case ${data.caseNumber}. The following fields are empty or missing in Salesforce: **${fields}**. Please verify the record is complete before proceeding.`,
+      ),
+    };
+  }
+
+  return {
+    message: `
+🧩 **${i18n(lang, "Payload Bard Port T2 preparado", "Bard Port T2 payload prepared")}**
+• **Case:** ${data.caseNumber}
+• **Tort:** ${data.tort}
+• **Tier:** ${data.tier}
+
+${i18n(
+  lang,
+  "La estructura JSON quedó lista para envío al endpoint del cliente.",
+  "The JSON structure is ready to be sent to the client endpoint.",
+)}
+`,
+  };
+}
+
+function formatSendBardPortT2PayloadResult(data, lang = "en") {
+  if (!data.found) {
+    return {
+      message: i18n(
+        lang,
+        `No encontré el case ${data.caseNumber}. No pude enviar el payload de Bard Port T2.`,
+        `I couldn't find case ${data.caseNumber}. I could not send the Bard Port T2 payload.`,
+      ),
+    };
+  }
+
+  if (!data.ready) {
+    const fields = (data.missingFields || []).join(", ");
+    return {
+      message: i18n(
+        lang,
+        `⚠️ No se puede enviar el payload de Bard Port T2 para el case ${data.caseNumber}. Los siguientes campos están vacíos o no tienen datos en Salesforce: **${fields}**. Verifica que el registro esté completo antes de continuar.`,
+        `⚠️ Cannot send Bard Port T2 payload for case ${data.caseNumber}. The following fields are empty or missing in Salesforce: **${fields}**. Please verify the record is complete before proceeding.`,
+      ),
+    };
+  }
+
+  if (!data.sent) {
+    const httpText = data.statusCode || "N/A";
+    let salesforceSavedText = "N/A";
+    if (typeof data.salesforceUpdated === "boolean") {
+      salesforceSavedText = data.salesforceUpdated
+        ? i18n(lang, "si", "yes")
+        : i18n(lang, "no", "no");
+    }
+
+    return {
+      message: `${i18n(
+        lang,
+        `No se completó el envío de Bard Port T2 para el case ${data.caseNumber}. ${data.message || data.error || "Revisa la configuración del endpoint"}.`,
+        `Bard Port T2 delivery for case ${data.caseNumber} was not completed. ${data.message || data.error || "Check endpoint configuration"}.`,
+      )}\n\n${i18n(lang, "HTTP", "HTTP")}: ${httpText}\n${i18n(lang, "Respuesta del cliente", "Client response")}: ${data.clientResponse || "N/A"}\n${i18n(lang, "Guardado en Salesforce", "Saved in Salesforce")}: ${salesforceSavedText}`,
+    };
+  }
+
+  const sfText =
+    typeof data.salesforceUpdated === "boolean"
+      ? data.salesforceUpdated
+        ? i18n(lang, "si", "yes")
+        : i18n(lang, "no", "no")
+      : "N/A";
+
+  return {
+    message: `${i18n(lang, `Listo, envié correctamente el API del caso ${data.caseNumber}.`, `Done, I sent the API successfully for case ${data.caseNumber}.`)}\n\n${i18n(lang, "Respuesta del cliente", "Client response")}: ${data.clientResponse || "N/A"}\n${i18n(lang, "Guardado en Salesforce", "Saved in Salesforce")}: ${sfText}`,
+  };
 }

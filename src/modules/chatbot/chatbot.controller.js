@@ -4,6 +4,19 @@ const chatSessionService = require("../../services/chatSession.service");
 const logger = require("../../utils/logger");
 const fs = require("node:fs");
 
+function mapUploadedFilesToAttachments(files = []) {
+  if (!Array.isArray(files)) return [];
+
+  return files
+    .filter((file) => file?.originalname && file?.buffer)
+    .map((file) => ({
+      fileName: String(file.originalname).trim(),
+      mimeType: String(file.mimetype || "application/octet-stream"),
+      buffer: file.buffer,
+      size: file.size || file.buffer.length,
+    }));
+}
+
 exports.chat = async (req, res) => {
   try {
     const { message } = req.body;
@@ -20,7 +33,16 @@ exports.chat = async (req, res) => {
       return res.status(401).json({ error: "Unauthorized" });
     }
 
-    const reply = await processMessage(message, userId);
+    const attachments = mapUploadedFilesToAttachments(req.files);
+    if (attachments.length > 0) {
+      logger.info(
+        `Chatbot received ${attachments.length} attachment(s) from user ${userId}: ${attachments
+          .map((file) => file.fileName)
+          .join(", ")}`,
+      );
+    }
+
+    const reply = await processMessage(message, userId, attachments);
 
     res.json({
       reply: reply.message,

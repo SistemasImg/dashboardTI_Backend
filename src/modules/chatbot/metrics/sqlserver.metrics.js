@@ -249,7 +249,7 @@ exports.getAttemptsByPhone = async (phone, filters = {}) => {
   };
 };
 
-exports.getAttemptsByCaseNumber = async (caseNumber) => {
+exports.getAttemptsByCaseNumber = async (caseNumber, filters = {}) => {
   const caseData = await sfMetrics.getCaseByNumber(caseNumber);
 
   if (!caseData) {
@@ -269,7 +269,9 @@ exports.getAttemptsByCaseNumber = async (caseNumber) => {
   }
 
   const attemptsData = await exports.getAttemptsByPhone(normalizedPhone, {
-    includeAll: true,
+    dateKeyword: filters.dateKeyword,
+    date: filters.date,
+    lastDays: filters.lastDays,
   });
 
   return {
@@ -277,6 +279,8 @@ exports.getAttemptsByCaseNumber = async (caseNumber) => {
     phone: attemptsData.phone,
     totalAttempts: attemptsData.totalAttempts,
     totalDays: attemptsData.totalDays,
+    scope: attemptsData.scope,
+    scopeLabel: attemptsData.scopeLabel,
     records: attemptsData.records,
   };
 };
