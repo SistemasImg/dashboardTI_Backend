@@ -214,14 +214,18 @@ function i18n(lang, esText, enText) {
  * @param {String} dateString - ISO date string from Salesforce
  * @returns {String} Formatted date or "N/A" if invalid
  */
-function formatDate(dateString) {
+function formatDate(dateString, includeTime = false) {
   if (!dateString) return "N/A";
 
   try {
-    const date = DateTime.fromISO(dateString);
+    const date = DateTime.fromISO(dateString, { zone: "utc" }).setZone(
+      "America/Lima",
+    );
     if (!date.isValid) return "N/A";
 
-    return date.toFormat("dd/MM/yyyy HH:mm");
+    return includeTime
+      ? date.toFormat("dd/MM/yyyy HH:mm")
+      : date.toFormat("dd/MM/yyyy");
   } catch (error) {
     logger.warn(`Error formatting date: ${dateString} - ${error.message}`);
     return "N/A";
@@ -281,6 +285,16 @@ function isAttemptsQuery(message) {
  * Returns { caseNumber } if intent is detected, null otherwise.
  * Used to bypass AI model hallucination when model skips the function call.
  */
+/**
+ * Pads a case number to 8 digits with leading zeros.
+ * Handles cases where the user omits leading zeros (e.g. "124230" → "00124230").
+ */
+function normalizeCaseNumber(caseNumber) {
+  if (!caseNumber) return caseNumber;
+  const digits = String(caseNumber).trim().replace(/\D/g, "");
+  return digits.padStart(8, "0");
+}
+
 function detectT9SendIntent(message) {
   const text = String(message || "").toLowerCase();
 
@@ -725,6 +739,7 @@ exports.processMessage = async (
             break;
 
           case "getCaseByNumber":
+            args.caseNumber = normalizeCaseNumber(args.caseNumber);
             functionResult = await metrics.sf.getCaseByNumber(args.caseNumber);
             if (args.caseNumber) {
               sessionData.last_filters = {
@@ -857,6 +872,7 @@ exports.processMessage = async (
               break;
             }
 
+            args.caseNumber = normalizeCaseNumber(args.caseNumber);
             functionResult = await metrics.sf.getCaseDisqualificationReason(
               args.caseNumber,
             );
@@ -1020,7 +1036,18 @@ exports.processMessage = async (
             break;
 
           case "getAttemptsByCaseNumber": {
-            var caseAttemptsFilters = {
+            args.caseNumber =
+              args.caseNumber ||
+              sessionData.last_filters?.caseNumber ||
+              extractLastReferencedCaseNumber(sessionData.messages);
+
+            if (!args.caseNumber) {
+              functionResult = { missingCaseNumber: true };
+              break;
+            }
+
+            args.caseNumber = normalizeCaseNumber(args.caseNumber);
+            let caseAttemptsFilters = {
               dateKeyword: args.dateKeyword,
               date: args.date,
               lastDays: args.lastDays,
@@ -1049,6 +1076,12 @@ exports.processMessage = async (
               args.caseNumber,
               caseAttemptsFilters,
             );
+
+            sessionData.last_filters = {
+              ...(sessionData.last_filters || {}),
+              caseNumber: args.caseNumber,
+            };
+            sessionCache[cacheKey].last_filters = sessionData.last_filters;
             break;
           }
 
@@ -1057,6 +1090,29 @@ exports.processMessage = async (
               dateKeyword: args.dateKeyword,
               date: args.date,
             });
+            break;
+
+          case "getAssignedAgentByCaseNumber":
+            args.caseNumber =
+              args.caseNumber ||
+              sessionData.last_filters?.caseNumber ||
+              extractLastReferencedCaseNumber(sessionData.messages);
+
+            if (!args.caseNumber) {
+              functionResult = { found: false, missingCaseNumber: true };
+              break;
+            }
+
+            args.caseNumber = normalizeCaseNumber(args.caseNumber);
+            functionResult = await metrics.mysql.getAssignedAgentByCaseNumber(
+              args.caseNumber,
+            );
+
+            sessionData.last_filters = {
+              ...(sessionData.last_filters || {}),
+              caseNumber: args.caseNumber,
+            };
+            sessionCache[cacheKey].last_filters = sessionData.last_filters;
             break;
 
           case "getVendorLeadAttempts":
@@ -1436,6 +1492,22 @@ ${lines}
     };
   }
 
+  // Assigned agent in dashboard (MySQL)
+  if (type === "getAssignedAgentByCaseNumber") {
+    if (!data.found) {
+      return {
+        message: `🔍 **${i18n(lang, "Asignación del caso", "Case Assignment")}: ${data.caseNumber}**\n\n${i18n(lang, "Este caso no tiene ningún agente asignado actualmente en el dashboard.", "This case has no agent currently assigned in the dashboard.")}`,
+      };
+    }
+    return {
+      message: `👤 **${i18n(lang, "Agente asignado al caso", "Assigned agent for case")}: ${data.caseNumber}**
+• **${i18n(lang, "Agente", "Agent")}:** ${data.agentName || "N/A"}
+• **${i18n(lang, "Email", "Email")}:** ${data.agentEmail || "N/A"}
+• **${i18n(lang, "Asignado desde", "Assigned since")}:** ${formatDate(data.assignedAt, true)}
+`,
+    };
+  }
+
   // Single case - show full details
   if (type === "getCaseByNumber") {
     return {
@@ -1447,7 +1519,7 @@ ${lines}
 • **${i18n(lang, "Origen", "Origin")}:** ${data.Origin}
 • **${i18n(lang, "Segmento", "Supplier Segment")}:** ${data.Supplier_Segment__c}
 • **${i18n(lang, "Propietario", "Owner")}:** ${data.Owner?.Name}
-• **${i18n(lang, "Creado", "Created")}:** ${formatDate(data.CreatedDate)}
+• **${i18n(lang, "Fecha de entrada", "Entry date")}:** ${formatDate(data.CreatedDate, true)}${data.ClosedDate ? `\n• **${i18n(lang, "Fecha de cierre", "Closed date")}:** ${formatDate(data.ClosedDate, true)}` : ""}
 `,
     };
   }
@@ -2281,6 +2353,18 @@ function formatCaseDisqualificationResult(data, lang = "en") {
   lines.push(
     `• **${i18n(lang, "Substatus", "Substatus")}:** ${data.substatus || "N/A"}`,
   );
+
+  if (data.bpo) {
+    lines.push(
+      `• **${i18n(lang, "Call Center", "Call Center")}:** ${data.bpo}`,
+    );
+  }
+
+  if (data.bpoIntaker) {
+    lines.push(
+      `• **${i18n(lang, "Intaker que descalificó", "Disqualifying intaker")}:** ${data.bpoIntaker}`,
+    );
+  }
 
   if (data.reasonForDQ) {
     lines.push(

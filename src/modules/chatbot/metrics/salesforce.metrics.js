@@ -260,6 +260,7 @@ exports.getCaseByNumber = async (caseNumber) => {
         Owner.Name,
         FullName__c,
         CreatedDate,
+        ClosedDate,
         LastModifiedDate
         FROM Case
       WHERE CaseNumber = '${caseNumber}'
@@ -1115,6 +1116,7 @@ exports.getCaseDisqualificationReason = async (caseNumber) => {
     const soql = `
       SELECT Id, CaseNumber, Status, Substatus__c,
              Reason_for_DQ__c, Reason_for_Doesn_t_meet_criteria__c,
+             BPO__c, BPO_Intaker__c,
              Owner.Name, CreatedDate
       FROM Case
       WHERE CaseNumber = '${caseNumber}'
@@ -1134,6 +1136,8 @@ exports.getCaseDisqualificationReason = async (caseNumber) => {
       status: rec.Status,
       substatus: rec.Substatus__c,
       owner: rec.Owner?.Name || null,
+      bpo: rec.BPO__c || null,
+      bpoIntaker: rec.BPO_Intaker__c || null,
       createdDate: rec.CreatedDate,
       reasonForDQ: rec.Reason_for_DQ__c || null,
       reasonDoesntMeetCriteria: rec.Reason_for_Doesn_t_meet_criteria__c || null,

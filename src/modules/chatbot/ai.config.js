@@ -605,13 +605,29 @@ exports.askModel = async (messages) => {
         {
           name: "getCaseDisqualificationReason",
           description:
-            "Get the disqualification reason for a case. Use when the user asks why a case was disqualified or rejected. Returns Reason_for_DQ__c and Reason_for_Doesn_t_meet_criteria__c. No date restriction.",
+            "Get the disqualification reason for a case. Use when the user asks why a case was disqualified or rejected. Returns Reason_for_DQ__c, Reason_for_Doesn_t_meet_criteria__c, BPO__c (call center), and BPO_Intaker__c (intaker). No date restriction.",
           parameters: {
             type: "object",
             properties: {
               caseNumber: {
                 type: "string",
                 description: "The CaseNumber to look up",
+              },
+            },
+            required: ["caseNumber"],
+          },
+        },
+        {
+          name: "getAssignedAgentByCaseNumber",
+          description:
+            "Get the agent currently assigned to a case in the dashboard (MySQL). Use when the user asks which agent has a case assigned, who is handling a case, or who has a case in the dashboard. Requires a case number.",
+          parameters: {
+            type: "object",
+            properties: {
+              caseNumber: {
+                type: "string",
+                description:
+                  "The case number to look up the assigned agent for",
               },
             },
             required: ["caseNumber"],
