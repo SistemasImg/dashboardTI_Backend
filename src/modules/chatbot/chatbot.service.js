@@ -10,6 +10,7 @@ const chatSessionService = require("../../services/chatSession.service");
 // Caché en memoria para reducir lecturas a BD durante la misma sesión de proceso.
 // Se usa como capa L1; la fuente de verdad siempre es la BD.
 const sessionCache = {};
+const runtimePendingApprovals = {};
 
 // Constant for bulk case threshold
 const BULK_THRESHOLD = 3; // If more than 3 cases, generate Excel
@@ -344,6 +345,108 @@ function detectJdcT3SendIntent(message) {
   return { caseNumber: caseMatch[1] };
 }
 
+function getPendingBardT2Approval(sessionData) {
+  return sessionData?.last_filters?.pendingBardPortT2 || null;
+}
+
+function setPendingBardT2Approval(sessionData, cacheKey, pendingData) {
+  sessionData.last_filters = {
+    ...(sessionData.last_filters || {}),
+    pendingBardPortT2: pendingData,
+  };
+  sessionCache[cacheKey].last_filters = sessionData.last_filters;
+}
+
+function clearPendingBardT2Approval(sessionData, cacheKey) {
+  if (!sessionData?.last_filters?.pendingBardPortT2) return;
+
+  const { pendingBardPortT2, ...rest } = sessionData.last_filters;
+  sessionData.last_filters = rest;
+  sessionCache[cacheKey].last_filters = sessionData.last_filters;
+}
+
+function detectBardT2ApprovalIntent(message) {
+  const text = String(message || "").toLowerCase();
+  return (
+    /\b(confirmar|confirmo|ok|dale|procede|enviar|envia|send|approve|approved|esta bien|está bien)\b/i.test(
+      text,
+    ) &&
+    !/\b(cambiar|modificar|editar|corregir|corrige|update|field|campo)\b/i.test(
+      text,
+    )
+  );
+}
+
+function detectBardT2CancelIntent(message) {
+  return /\b(cancelar|cancel|anular|detener|descartar|no enviar)\b/i.test(
+    String(message || "").toLowerCase(),
+  );
+}
+
+function parseBardT2EditIntent(message) {
+  const text = String(message || "").trim();
+
+  const equalsMatch =
+    /(?:editar|corregir|corrige|cambiar|modificar|actualizar)?\s*(?:t2\s*)?(?:campo\s*)?([a-zA-Z_]+)\s*(?:=|:)\s*(.+)$/i.exec(
+      text,
+    );
+  if (equalsMatch) {
+    return {
+      field: equalsMatch[1].trim(),
+      value: equalsMatch[2].trim().replace(/^['"]|['"]$/g, ""),
+    };
+  }
+
+  const naturalMatch =
+    /(?:editar|corregir|corrige|cambiar|modificar|actualizar)\s+(?:el\s+)?(?:campo\s+)?([a-zA-Z_]+)\s+(?:a|por)\s+(.+)$/i.exec(
+      text,
+    );
+  if (naturalMatch) {
+    return {
+      field: naturalMatch[1].trim(),
+      value: naturalMatch[2].trim().replace(/^['"]|['"]$/g, ""),
+    };
+  }
+
+  return null;
+}
+
+function formatBardT2ApprovalPreviewMessage(prepared, lang = "en") {
+  const prettyPayload = JSON.stringify(prepared.payload || {}, null, 2);
+  return `${i18n(
+    lang,
+    `Esta es la estructura que se enviará al cliente para el case ${prepared.caseNumber}:`,
+    `This is the structure that will be sent to the client for case ${prepared.caseNumber}:`,
+  )}\n\n\`\`\`json\n${prettyPayload}\n\`\`\``;
+}
+
+function setRuntimePendingApproval(cacheKey, data) {
+  runtimePendingApprovals[cacheKey] = data;
+}
+
+function getRuntimePendingApproval(cacheKey) {
+  return runtimePendingApprovals[cacheKey] || null;
+}
+
+function clearRuntimePendingApproval(cacheKey) {
+  delete runtimePendingApprovals[cacheKey];
+}
+
+function formatApiApprovalPreviewMessage(data, lang = "en") {
+  const prettyPayload = JSON.stringify(data.payload || {}, null, 2);
+  const attachments = Array.isArray(data.attachments) ? data.attachments : [];
+  const attachmentLine =
+    attachments.length > 0
+      ? `\n\n${i18n(lang, "Adjuntos", "Attachments")}: ${attachments.length}`
+      : "";
+
+  return `${i18n(
+    lang,
+    `Esta es la estructura que se enviará al cliente para el case ${data.caseNumber}:`,
+    `This is the structure that will be sent to the client for case ${data.caseNumber}:`,
+  )}\n\n\`\`\`json\n${prettyPayload}\n\`\`\`${attachmentLine}`;
+}
+
 function detectCaseAttemptsByDateIntent(message) {
   const text = String(message || "").toLowerCase();
   const mentionsAttempts =
@@ -538,6 +641,405 @@ exports.processMessage = async (
         await chatSessionService.getOrCreateSession(userId);
     }
     const sessionData = sessionCache[cacheKey];
+
+    const pendingBardT2 = getPendingBardT2Approval(sessionData);
+    if (pendingBardT2) {
+      if (detectBardT2CancelIntent(normalizedUserMessage)) {
+        clearPendingBardT2Approval(sessionData, cacheKey);
+        const cancelMessage = i18n(
+          userLang,
+          `Se canceló el envío pendiente de Bard Port T2 para el case ${pendingBardT2.caseNumber}.`,
+          `Pending Bard Port T2 delivery for case ${pendingBardT2.caseNumber} was canceled.`,
+        );
+
+        chatSessionService
+          .appendMessages(
+            userId,
+            [
+              { role: "user", content: userMessage },
+              { role: "assistant", content: cancelMessage },
+            ],
+            sessionCache[cacheKey].last_filters,
+            {
+              status: "bard_t2_canceled",
+              caseNumber: pendingBardT2.caseNumber,
+            },
+          )
+          .catch((err) =>
+            logger.error(
+              `[ChatSession] Failed to persist messages: ${err.message}`,
+            ),
+          );
+
+        return { message: cancelMessage };
+      }
+
+      const editIntent = parseBardT2EditIntent(normalizedUserMessage);
+      if (editIntent) {
+        const revised =
+          await apiIntegrations.bardPortT2.reviseBardPortT2PayloadField({
+            caseNumber: pendingBardT2.caseNumber,
+            field: editIntent.field,
+            value: editIntent.value,
+            tort: pendingBardT2.tort,
+            tier: pendingBardT2.tier,
+          });
+
+        let revisedMessage;
+        if (!revised.found) {
+          revisedMessage = i18n(
+            userLang,
+            `No encontré el case ${pendingBardT2.caseNumber} para actualizar el campo solicitado.`,
+            `I couldn't find case ${pendingBardT2.caseNumber} to update the requested field.`,
+          );
+          clearPendingBardT2Approval(sessionData, cacheKey);
+        } else if (!revised.updated) {
+          const allowed = (revised.allowedFields || []).join(", ");
+          revisedMessage = i18n(
+            userLang,
+            `El campo indicado no se puede editar para T2. Campos permitidos: ${allowed}.`,
+            `That field cannot be edited for T2. Allowed fields: ${allowed}.`,
+          );
+        } else if (!revised.ready) {
+          const fields = (revised.missingFields || []).join(", ");
+          revisedMessage = i18n(
+            userLang,
+            `El campo ${revised.field} se actualizó en Salesforce, pero el payload aún está incompleto. Faltan: ${fields}.`,
+            `Field ${revised.field} was updated in Salesforce, but the payload is still incomplete. Missing: ${fields}.`,
+          );
+        } else {
+          setPendingBardT2Approval(sessionData, cacheKey, {
+            caseNumber: revised.caseNumber,
+            tort: revised.tort,
+            tier: revised.tier,
+            payload: revised.payload,
+          });
+
+          revisedMessage = `${i18n(
+            userLang,
+            `Campo ${revised.field} actualizado en Salesforce. Este es el nuevo JSON para validar antes del envío:`,
+            `Field ${revised.field} was updated in Salesforce. This is the updated JSON to validate before sending:`,
+          )}\n\n\`\`\`json\n${JSON.stringify(revised.payload || {}, null, 2)}\n\`\`\``;
+        }
+
+        chatSessionService
+          .appendMessages(
+            userId,
+            [
+              { role: "user", content: userMessage },
+              { role: "assistant", content: revisedMessage },
+            ],
+            sessionCache[cacheKey].last_filters,
+            revised,
+          )
+          .catch((err) =>
+            logger.error(
+              `[ChatSession] Failed to persist messages: ${err.message}`,
+            ),
+          );
+
+        return { message: revisedMessage };
+      }
+
+      if (detectBardT2ApprovalIntent(normalizedUserMessage)) {
+        const sendResult =
+          await apiIntegrations.bardPortT2.sendBardPortT2Payload({
+            caseNumber: pendingBardT2.caseNumber,
+            tort: pendingBardT2.tort,
+            tier: pendingBardT2.tier,
+          });
+
+        clearPendingBardT2Approval(sessionData, cacheKey);
+
+        const sentMessage = formatSendBardPortT2PayloadResult(
+          sendResult,
+          userLang,
+        ).message;
+
+        chatSessionService
+          .appendMessages(
+            userId,
+            [
+              { role: "user", content: userMessage },
+              { role: "assistant", content: sentMessage },
+            ],
+            sessionCache[cacheKey].last_filters,
+            sendResult,
+          )
+          .catch((err) =>
+            logger.error(
+              `[ChatSession] Failed to persist messages: ${err.message}`,
+            ),
+          );
+
+        return { message: sentMessage };
+      }
+
+      const pendingReminder = `${i18n(
+        userLang,
+        `Tienes un envío T2 pendiente para el case ${pendingBardT2.caseNumber}.`,
+        `You have a pending T2 delivery for case ${pendingBardT2.caseNumber}.`,
+      )}`;
+
+      chatSessionService
+        .appendMessages(
+          userId,
+          [
+            { role: "user", content: userMessage },
+            { role: "assistant", content: pendingReminder },
+          ],
+          sessionCache[cacheKey].last_filters,
+          { status: "bard_t2_pending", caseNumber: pendingBardT2.caseNumber },
+        )
+        .catch((err) =>
+          logger.error(
+            `[ChatSession] Failed to persist messages: ${err.message}`,
+          ),
+        );
+
+      return { message: pendingReminder };
+    }
+
+    const pendingRuntime = getRuntimePendingApproval(cacheKey);
+    if (pendingRuntime) {
+      if (requestAttachments.length > 0) {
+        pendingRuntime.attachments = requestAttachments;
+        setRuntimePendingApproval(cacheKey, pendingRuntime);
+      }
+
+      if (detectBardT2CancelIntent(normalizedUserMessage)) {
+        clearRuntimePendingApproval(cacheKey);
+        const cancelMessage = i18n(
+          userLang,
+          `Se canceló el envío pendiente de ${pendingRuntime.apiLabel} para el case ${pendingRuntime.caseNumber}.`,
+          `Pending ${pendingRuntime.apiLabel} delivery for case ${pendingRuntime.caseNumber} was canceled.`,
+        );
+
+        chatSessionService
+          .appendMessages(
+            userId,
+            [
+              { role: "user", content: userMessage },
+              { role: "assistant", content: cancelMessage },
+            ],
+            sessionCache[cacheKey].last_filters,
+            {
+              status: `${pendingRuntime.kind}_canceled`,
+              caseNumber: pendingRuntime.caseNumber,
+            },
+          )
+          .catch((err) =>
+            logger.error(
+              `[ChatSession] Failed to persist messages: ${err.message}`,
+            ),
+          );
+
+        return { message: cancelMessage };
+      }
+
+      const editIntent = parseBardT2EditIntent(normalizedUserMessage);
+      if (editIntent) {
+        let revised;
+        if (pendingRuntime.kind === "t9") {
+          revised =
+            await apiIntegrations.t9Rideshare.reviseT9RidesharePayloadField({
+              caseNumber: pendingRuntime.caseNumber,
+              tort: pendingRuntime.tort,
+              tier: pendingRuntime.tier,
+              attachments: pendingRuntime.attachments || [],
+              field: editIntent.field,
+              value: editIntent.value,
+            });
+        } else if (pendingRuntime.kind === "jdc_t3") {
+          revised = await apiIntegrations.jdcT3.reviseJdcT3PayloadField({
+            caseNumber: pendingRuntime.caseNumber,
+            attachments: pendingRuntime.attachments || [],
+            field: editIntent.field,
+            value: editIntent.value,
+          });
+        } else {
+          revised =
+            await apiIntegrations.a4dRideshareT11.reviseA4DRideshareT11PayloadField(
+              {
+                caseNumber: pendingRuntime.caseNumber,
+                field: editIntent.field,
+                value: editIntent.value,
+              },
+            );
+        }
+
+        let revisedMessage;
+        if (!revised.found) {
+          revisedMessage = i18n(
+            userLang,
+            `No encontré el case ${pendingRuntime.caseNumber} para actualizar el campo solicitado.`,
+            `I couldn't find case ${pendingRuntime.caseNumber} to update the requested field.`,
+          );
+          clearRuntimePendingApproval(cacheKey);
+        } else if (!revised.updated) {
+          const allowed = (revised.allowedFields || []).join(", ");
+          revisedMessage = i18n(
+            userLang,
+            `El campo indicado no se puede editar para ${pendingRuntime.apiLabel}. Campos permitidos: ${allowed}.`,
+            `That field cannot be edited for ${pendingRuntime.apiLabel}. Allowed fields: ${allowed}.`,
+          );
+        } else if (!revised.ready) {
+          const fields = (revised.missingFields || []).join(", ");
+          revisedMessage = i18n(
+            userLang,
+            `El campo ${revised.field} se actualizó en Salesforce, pero el payload aún está incompleto. Faltan: ${fields}.`,
+            `Field ${revised.field} was updated in Salesforce, but the payload is still incomplete. Missing: ${fields}.`,
+          );
+        } else {
+          const updatedPending = {
+            ...pendingRuntime,
+            payload: revised.payload,
+          };
+          setRuntimePendingApproval(cacheKey, updatedPending);
+
+          revisedMessage = formatApiApprovalPreviewMessage(
+            {
+              ...updatedPending,
+              caseNumber: revised.caseNumber,
+            },
+            userLang,
+          );
+        }
+
+        chatSessionService
+          .appendMessages(
+            userId,
+            [
+              { role: "user", content: userMessage },
+              { role: "assistant", content: revisedMessage },
+            ],
+            sessionCache[cacheKey].last_filters,
+            revised,
+          )
+          .catch((err) =>
+            logger.error(
+              `[ChatSession] Failed to persist messages: ${err.message}`,
+            ),
+          );
+
+        return { message: revisedMessage };
+      }
+
+      if (detectBardT2ApprovalIntent(normalizedUserMessage)) {
+        let sendResult;
+        if (pendingRuntime.kind === "t9") {
+          sendResult = await apiIntegrations.t9Rideshare.sendT9RidesharePayload(
+            {
+              caseNumber: pendingRuntime.caseNumber,
+              tort: pendingRuntime.tort,
+              tier: pendingRuntime.tier,
+              attachments: pendingRuntime.attachments || [],
+            },
+          );
+        } else if (pendingRuntime.kind === "jdc_t3") {
+          sendResult = await apiIntegrations.jdcT3.sendJdcT3Payload({
+            caseNumber: pendingRuntime.caseNumber,
+            attachments: pendingRuntime.attachments || [],
+          });
+        } else {
+          sendResult =
+            await apiIntegrations.a4dRideshareT11.sendA4DRideshareT11Payload({
+              caseNumber: pendingRuntime.caseNumber,
+            });
+        }
+
+        if (sendResult?.attachmentsRequired) {
+          const waitFilesMessage = i18n(
+            userLang,
+            `Faltan documentos para completar el envío de ${pendingRuntime.apiLabel} del case ${pendingRuntime.caseNumber}.`,
+            `Files are still required to complete ${pendingRuntime.apiLabel} delivery for case ${pendingRuntime.caseNumber}.`,
+          );
+
+          chatSessionService
+            .appendMessages(
+              userId,
+              [
+                { role: "user", content: userMessage },
+                { role: "assistant", content: waitFilesMessage },
+              ],
+              sessionCache[cacheKey].last_filters,
+              sendResult,
+            )
+            .catch((err) =>
+              logger.error(
+                `[ChatSession] Failed to persist messages: ${err.message}`,
+              ),
+            );
+
+          return { message: waitFilesMessage };
+        }
+
+        clearRuntimePendingApproval(cacheKey);
+
+        let sentMessage;
+        if (pendingRuntime.kind === "t9") {
+          sentMessage = formatSendT9RidesharePayloadResult(
+            sendResult,
+            userLang,
+          ).message;
+        } else if (pendingRuntime.kind === "jdc_t3") {
+          sentMessage = formatSendJdcT3PayloadResult(
+            sendResult,
+            userLang,
+          ).message;
+        } else {
+          sentMessage = formatSendA4DRideshareT11PayloadResult(
+            sendResult,
+            userLang,
+          ).message;
+        }
+
+        chatSessionService
+          .appendMessages(
+            userId,
+            [
+              { role: "user", content: userMessage },
+              { role: "assistant", content: sentMessage },
+            ],
+            sessionCache[cacheKey].last_filters,
+            sendResult,
+          )
+          .catch((err) =>
+            logger.error(
+              `[ChatSession] Failed to persist messages: ${err.message}`,
+            ),
+          );
+
+        return { message: sentMessage };
+      }
+
+      const pendingReminder = i18n(
+        userLang,
+        `Tienes un envío ${pendingRuntime.apiLabel} pendiente para el case ${pendingRuntime.caseNumber}.`,
+        `You have a pending ${pendingRuntime.apiLabel} delivery for case ${pendingRuntime.caseNumber}.`,
+      );
+
+      chatSessionService
+        .appendMessages(
+          userId,
+          [
+            { role: "user", content: userMessage },
+            { role: "assistant", content: pendingReminder },
+          ],
+          sessionCache[cacheKey].last_filters,
+          {
+            status: `${pendingRuntime.kind}_pending`,
+            caseNumber: pendingRuntime.caseNumber,
+          },
+        )
+        .catch((err) =>
+          logger.error(
+            `[ChatSession] Failed to persist messages: ${err.message}`,
+          ),
+        );
+
+      return { message: pendingReminder };
+    }
 
     // Enrich the message with previous filter context if this looks like a follow-up query
     const contextualNormalizedMessage = enrichWithSessionContext(
@@ -747,14 +1249,39 @@ exports.processMessage = async (
           });
         saveApiRoutingFilters();
       } else if (functionName === "sendBardPortT2Payload") {
-        functionResult = await apiIntegrations.bardPortT2.sendBardPortT2Payload(
-          {
+        const bardTort = args.tort || "Bard Port";
+        const bardTier = args.tier || "T2";
+        const prepared =
+          await apiIntegrations.bardPortT2.prepareBardPortT2Payload({
             caseNumber: args.caseNumber,
-            tort: args.tort,
-            tier: args.tier,
-          },
-        );
-        saveApiRoutingFilters();
+            tort: bardTort,
+            tier: bardTier,
+          });
+
+        if (prepared.found && prepared.ready) {
+          setPendingBardT2Approval(sessionData, cacheKey, {
+            caseNumber: prepared.caseNumber,
+            tort: bardTort,
+            tier: bardTier,
+            payload: prepared.payload,
+          });
+
+          functionResult = {
+            sent: false,
+            approvalRequired: true,
+            found: true,
+            ready: true,
+            caseNumber: prepared.caseNumber,
+            tort: bardTort,
+            tier: bardTier,
+            payload: prepared.payload,
+          };
+        } else {
+          functionResult = {
+            sent: false,
+            ...prepared,
+          };
+        }
       } else {
         switch (functionName) {
           case "getCaseByDate":
@@ -933,16 +1460,51 @@ exports.processMessage = async (
             break;
 
           case "sendT9RidesharePayload":
-            functionResult =
-              await apiIntegrations.t9Rideshare.sendT9RidesharePayload({
-                caseNumber: args.caseNumber,
-                tort: args.tort,
-                tier: args.tier,
-                attachments:
-                  requestAttachments.length > 0
-                    ? requestAttachments
-                    : args.attachments,
-              });
+            {
+              const t9Tort = args.tort || "Rideshare";
+              const t9Tier = args.tier || "T9";
+              const t9Attachments =
+                requestAttachments.length > 0
+                  ? requestAttachments
+                  : args.attachments || [];
+
+              const prepared =
+                await apiIntegrations.t9Rideshare.prepareT9RidesharePayload({
+                  caseNumber: args.caseNumber,
+                  tort: t9Tort,
+                  tier: t9Tier,
+                  attachments: t9Attachments,
+                });
+
+              if (prepared.found && prepared.ready) {
+                setRuntimePendingApproval(cacheKey, {
+                  kind: "t9",
+                  apiLabel: "T9",
+                  caseNumber: prepared.caseNumber,
+                  tort: t9Tort,
+                  tier: t9Tier,
+                  payload: prepared.payload,
+                  attachments: t9Attachments,
+                });
+
+                functionResult = {
+                  sent: false,
+                  approvalRequired: true,
+                  found: true,
+                  ready: true,
+                  caseNumber: prepared.caseNumber,
+                  tort: t9Tort,
+                  tier: t9Tier,
+                  payload: prepared.payload,
+                  attachments: t9Attachments,
+                };
+              } else {
+                functionResult = {
+                  sent: false,
+                  ...prepared,
+                };
+              }
+            }
             if (args.caseNumber) {
               sessionData.last_filters = {
                 ...(sessionData.last_filters || {}),
@@ -1015,10 +1577,37 @@ exports.processMessage = async (
             break;
 
           case "sendA4DRideshareT11Payload":
-            functionResult =
-              await apiIntegrations.a4dRideshareT11.sendA4DRideshareT11Payload({
-                caseNumber: args.caseNumber,
-              });
+            {
+              const prepared =
+                await apiIntegrations.a4dRideshareT11.prepareA4DRideshareT11Payload(
+                  { caseNumber: args.caseNumber },
+                );
+
+              if (prepared.found && prepared.ready) {
+                setRuntimePendingApproval(cacheKey, {
+                  kind: "a4d_t11",
+                  apiLabel: "A4D T11",
+                  caseNumber: prepared.caseNumber,
+                  payload: prepared.payload,
+                  attachments: [],
+                });
+
+                functionResult = {
+                  sent: false,
+                  approvalRequired: true,
+                  found: true,
+                  ready: true,
+                  caseNumber: prepared.caseNumber,
+                  payload: prepared.payload,
+                  attachments: [],
+                };
+              } else {
+                functionResult = {
+                  sent: false,
+                  ...prepared,
+                };
+              }
+            }
             if (args.caseNumber) {
               sessionData.last_filters = {
                 ...(sessionData.last_filters || {}),
@@ -1042,13 +1631,41 @@ exports.processMessage = async (
             break;
 
           case "sendJdcT3Payload":
-            functionResult = await apiIntegrations.jdcT3.sendJdcT3Payload({
-              caseNumber: args.caseNumber,
-              attachments:
+            {
+              const jdcAttachments =
                 requestAttachments.length > 0
                   ? requestAttachments
-                  : args.attachments,
-            });
+                  : args.attachments || [];
+
+              const prepared = await apiIntegrations.jdcT3.prepareJdcT3Payload({
+                caseNumber: args.caseNumber,
+              });
+
+              if (prepared.found && prepared.ready) {
+                setRuntimePendingApproval(cacheKey, {
+                  kind: "jdc_t3",
+                  apiLabel: "JDC T3",
+                  caseNumber: prepared.caseNumber,
+                  payload: prepared.payload,
+                  attachments: jdcAttachments,
+                });
+
+                functionResult = {
+                  sent: false,
+                  approvalRequired: true,
+                  found: true,
+                  ready: true,
+                  caseNumber: prepared.caseNumber,
+                  payload: prepared.payload,
+                  attachments: jdcAttachments,
+                };
+              } else {
+                functionResult = {
+                  sent: false,
+                  ...prepared,
+                };
+              }
+            }
             if (args.caseNumber) {
               sessionData.last_filters = {
                 ...(sessionData.last_filters || {}),
@@ -1266,6 +1883,16 @@ exports.processMessage = async (
       }
 
       if (
+        (functionName === "sendBardPortT2Payload" ||
+          functionName === "sendT9RidesharePayload" ||
+          functionName === "sendA4DRideshareT11Payload" ||
+          functionName === "sendJdcT3Payload") &&
+        functionResult?.approvalRequired
+      ) {
+        finalMessage = formattedResponse.message;
+      }
+
+      if (
         functionName === "sendT9RidesharePayload" &&
         functionResult?.sent === false &&
         functionResult?.attachmentsRequired === true
@@ -1390,12 +2017,12 @@ exports.processMessage = async (
     // Safety net: if the model skipped calling sendT9RidesharePayload and generated
     // a plain-text response instead, detect the intent locally and execute the function.
     const t9Intent = detectT9SendIntent(normalizedUserMessage);
-    if (t9Intent && requestAttachments.length > 0) {
+    if (t9Intent) {
       logger.warn(
-        `[T9 Safety Net] Model skipped function call. Forcing sendT9RidesharePayload for case ${t9Intent.caseNumber}`,
+        `[T9 Safety Net] Model skipped function call. Forcing preview workflow for case ${t9Intent.caseNumber}`,
       );
-      const t9FunctionResult =
-        await apiIntegrations.t9Rideshare.sendT9RidesharePayload({
+      const t9Prepared =
+        await apiIntegrations.t9Rideshare.prepareT9RidesharePayload({
           caseNumber: t9Intent.caseNumber,
           tort: "Rideshare",
           tier: "T9",
@@ -1403,32 +2030,23 @@ exports.processMessage = async (
         });
 
       let t9FinalMessage;
-      if (t9FunctionResult.sent) {
-        const sfText =
-          typeof t9FunctionResult.salesforceUpdated === "boolean"
-            ? t9FunctionResult.salesforceUpdated
-              ? i18n(userLang, "si", "yes")
-              : i18n(userLang, "no", "no")
-            : "N/A";
-        t9FinalMessage = `${i18n(userLang, `Listo, envié correctamente el API del caso ${t9FunctionResult.caseNumber}.`, `Done, I sent the API successfully for case ${t9FunctionResult.caseNumber}.`)}\n\n${i18n(userLang, "Respuesta del cliente", "Client response")}: ${t9FunctionResult.clientResponse || "N/A"}\n${i18n(userLang, "Guardado en Salesforce", "Saved in Salesforce")}: ${sfText}`;
-      } else if (t9FunctionResult.attachmentsRequired) {
-        t9FinalMessage = i18n(
+      if (!t9Prepared.found || !t9Prepared.ready) {
+        t9FinalMessage = formatSendT9RidesharePayloadResult(
+          { sent: false, ...t9Prepared },
           userLang,
-          `No se hizo el envío T9 del case ${t9FunctionResult.caseNumber} porque los archivos son obligatorios. Adjunta los documentos directamente en el mismo mensaje.`,
-          `T9 delivery was not started for case ${t9FunctionResult.caseNumber} because files are mandatory for this tier. Attach the documents directly in the same message.`,
-        );
-      } else if (!t9FunctionResult.found) {
-        t9FinalMessage = i18n(
-          userLang,
-          `No encontré el case ${t9Intent.caseNumber} en Salesforce. Verifica el número e intenta de nuevo.`,
-          `I couldn't find case ${t9Intent.caseNumber} in Salesforce. Please verify the case number and try again.`,
-        );
+        ).message;
       } else {
-        t9FinalMessage = i18n(
-          userLang,
-          `No se completó el envío T9 para el case ${t9FunctionResult.caseNumber}. ${t9FunctionResult.message || t9FunctionResult.error || "Revisa la configuración del endpoint"}.`,
-          `T9 delivery for case ${t9FunctionResult.caseNumber} was not completed. ${t9FunctionResult.message || t9FunctionResult.error || "Check endpoint configuration"}.`,
-        );
+        const pending = {
+          kind: "t9",
+          apiLabel: "T9",
+          caseNumber: t9Prepared.caseNumber,
+          tort: "Rideshare",
+          tier: "T9",
+          payload: t9Prepared.payload,
+          attachments: requestAttachments,
+        };
+        setRuntimePendingApproval(cacheKey, pending);
+        t9FinalMessage = formatApiApprovalPreviewMessage(pending, userLang);
       }
 
       chatSessionService
@@ -1439,7 +2057,7 @@ exports.processMessage = async (
             { role: "assistant", content: t9FinalMessage },
           ],
           sessionCache[cacheKey].last_filters,
-          t9FunctionResult,
+          t9Prepared,
         )
         .catch((err) =>
           logger.error(
@@ -1453,46 +2071,28 @@ exports.processMessage = async (
     const jdcIntent = detectJdcT3SendIntent(normalizedUserMessage);
     if (jdcIntent) {
       logger.warn(
-        `[JDC T3 Safety Net] Model skipped function call. Forcing sendJdcT3Payload for case ${jdcIntent.caseNumber}`,
+        `[JDC T3 Safety Net] Model skipped function call. Forcing preview workflow for case ${jdcIntent.caseNumber}`,
       );
-      const jdcFunctionResult = await apiIntegrations.jdcT3.sendJdcT3Payload({
+      const jdcPrepared = await apiIntegrations.jdcT3.prepareJdcT3Payload({
         caseNumber: jdcIntent.caseNumber,
-        attachments: requestAttachments,
       });
 
       let jdcFinalMessage;
-      if (jdcFunctionResult.sent) {
-        const sfText =
-          typeof jdcFunctionResult.salesforceUpdated === "boolean"
-            ? jdcFunctionResult.salesforceUpdated
-              ? i18n(userLang, "si", "yes")
-              : i18n(userLang, "no", "no")
-            : "N/A";
-        jdcFinalMessage = `${i18n(userLang, `Listo, envié correctamente el API del caso ${jdcFunctionResult.caseNumber}.`, `Done, I sent the API successfully for case ${jdcFunctionResult.caseNumber}.`)}\n\n${i18n(userLang, "HTTP", "HTTP")}: ${jdcFunctionResult.statusCode || "N/A"}\n${i18n(userLang, "Respuesta del cliente", "Client response")}: ${jdcFunctionResult.clientResponse || "N/A"}\n${i18n(userLang, "Guardado en Salesforce", "Saved in Salesforce")}: ${sfText}`;
-      } else if (jdcFunctionResult.attachmentsRequired) {
-        jdcFinalMessage = i18n(
+      if (!jdcPrepared.found || !jdcPrepared.ready) {
+        jdcFinalMessage = formatSendJdcT3PayloadResult(
+          { sent: false, ...jdcPrepared },
           userLang,
-          `No se hizo el envío JDC T3 del case ${jdcFunctionResult.caseNumber} porque los archivos son obligatorios. Adjunta los documentos directamente en el mismo mensaje.`,
-          `JDC T3 delivery was not started for case ${jdcFunctionResult.caseNumber} because files are mandatory. Attach the documents directly in the same message.`,
-        );
-      } else if (!jdcFunctionResult.found) {
-        jdcFinalMessage = i18n(
-          userLang,
-          `No encontré el case ${jdcIntent.caseNumber} en Salesforce. Verifica el número e intenta de nuevo.`,
-          `I couldn't find case ${jdcIntent.caseNumber} in Salesforce. Please verify the case number and try again.`,
-        );
+        ).message;
       } else {
-        const sfText =
-          typeof jdcFunctionResult.salesforceUpdated === "boolean"
-            ? jdcFunctionResult.salesforceUpdated
-              ? i18n(userLang, "si", "yes")
-              : i18n(userLang, "no", "no")
-            : "N/A";
-        jdcFinalMessage = `${i18n(
-          userLang,
-          `No se completó el envío JDC T3 para el case ${jdcFunctionResult.caseNumber}. ${jdcFunctionResult.message || jdcFunctionResult.error || "Revisa la configuración del endpoint"}.`,
-          `JDC T3 delivery for case ${jdcFunctionResult.caseNumber} was not completed. ${jdcFunctionResult.message || jdcFunctionResult.error || "Check endpoint configuration"}.`,
-        )}\n\n${i18n(userLang, "HTTP", "HTTP")}: ${jdcFunctionResult.statusCode || "N/A"}\n${i18n(userLang, "Respuesta del cliente", "Client response")}: ${jdcFunctionResult.clientResponse || "N/A"}\n${i18n(userLang, "Guardado en Salesforce", "Saved in Salesforce")}: ${sfText}`;
+        const pending = {
+          kind: "jdc_t3",
+          apiLabel: "JDC T3",
+          caseNumber: jdcPrepared.caseNumber,
+          payload: jdcPrepared.payload,
+          attachments: requestAttachments,
+        };
+        setRuntimePendingApproval(cacheKey, pending);
+        jdcFinalMessage = formatApiApprovalPreviewMessage(pending, userLang);
       }
 
       chatSessionService
@@ -1503,7 +2103,7 @@ exports.processMessage = async (
             { role: "assistant", content: jdcFinalMessage },
           ],
           sessionCache[cacheKey].last_filters,
-          jdcFunctionResult,
+          jdcPrepared,
         )
         .catch((err) =>
           logger.error(
@@ -2676,6 +3276,12 @@ function formatSendT9RidesharePayloadResult(data, lang = "en") {
     };
   }
 
+  if (data.approvalRequired) {
+    return {
+      message: formatApiApprovalPreviewMessage(data, lang),
+    };
+  }
+
   if (!data.sent) {
     if (data.dryRun) {
       return {
@@ -2768,6 +3374,12 @@ function formatSendBardPortT2PayloadResult(data, lang = "en") {
     };
   }
 
+  if (data.approvalRequired) {
+    return {
+      message: formatBardT2ApprovalPreviewMessage(data, lang),
+    };
+  }
+
   if (!data.sent) {
     const httpText = data.statusCode || "N/A";
     let salesforceSavedText = "N/A";
@@ -2853,6 +3465,12 @@ function formatSendA4DRideshareT11PayloadResult(data, lang = "en") {
         `⚠️ No se puede enviar el payload de A4D Rideshare T11 para el case ${data.caseNumber}. Los siguientes campos están vacíos o no tienen datos en Salesforce: **${fields}**. Verifica que el registro esté completo antes de continuar.`,
         `⚠️ Cannot send A4D Rideshare T11 payload for case ${data.caseNumber}. The following fields are empty or missing in Salesforce: **${fields}**. Please verify the record is complete before proceeding.`,
       ),
+    };
+  }
+
+  if (data.approvalRequired) {
+    return {
+      message: formatApiApprovalPreviewMessage(data, lang),
     };
   }
 
@@ -2943,6 +3561,12 @@ function formatSendJdcT3PayloadResult(data, lang = "en") {
         `⚠️ No se puede enviar el payload JDC T3 para el case ${data.caseNumber}. Los siguientes campos están vacíos o no tienen datos en Salesforce: **${fields}**. Verifica que el registro esté completo antes de continuar.`,
         `⚠️ Cannot send JDC T3 payload for case ${data.caseNumber}. The following fields are empty or missing in Salesforce: **${fields}**. Please verify the record is complete before proceeding.`,
       ),
+    };
+  }
+
+  if (data.approvalRequired) {
+    return {
+      message: formatApiApprovalPreviewMessage(data, lang),
     };
   }
 

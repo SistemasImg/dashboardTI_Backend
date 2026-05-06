@@ -14,6 +14,47 @@ const A4D_T11_API_ENDPOINT = "https://leads.iscale.com/api/v1/leads/submit";
 const A4D_T11_BEARER_TOKEN =
   "pk_c66da00d5729d4758f687f93f949c91f76f5c12b4706ba166227b27841857e9b";
 
+const A4D_T11_FIELD_TO_SF = Object.freeze({
+  firstName: "FirstName__c",
+  lastName: "Last_Name__c",
+  phone: "Phone_Numbercontact__c",
+  zipCode: "Area_Code__c",
+  email: "Email__c",
+  abuse_type: "What_describes_the_misconduct__c",
+  year: "Incident_Date__c",
+  suffer_abuse: "Were_you_abused_in_an_Uber_or_Lyft_ride__c",
+  reported: "Reported_to_any_of_the_following__c",
+  description: "Abuse_Details__c",
+  lpUrl: "Landing_Page_URL__c",
+  trustedFormCertUrl: "Trusted_Form__c",
+  ipAddress: "ip_address__c",
+  receipt: "Have_a_Receipt__c",
+});
+
+const A4D_T11_FIELD_ALIASES = Object.freeze({
+  first_name: "firstName",
+  firstname: "firstName",
+  last_name: "lastName",
+  lastname: "lastName",
+  phone: "phone",
+  zipcode: "zipCode",
+  zip: "zipCode",
+  zip_code: "zipCode",
+  email: "email",
+  abuse_type: "abuse_type",
+  year: "year",
+  suffer_abuse: "suffer_abuse",
+  reported: "reported",
+  description: "description",
+  lpurl: "lpUrl",
+  lp_url: "lpUrl",
+  trustedformcerturl: "trustedFormCertUrl",
+  trusted_form_cert_url: "trustedFormCertUrl",
+  ipaddress: "ipAddress",
+  ip_address: "ipAddress",
+  receipt: "receipt",
+});
+
 function normalizeCaseNumber(caseNumberInput) {
   const trimmed = String(caseNumberInput || "").trim();
   const numericOnly = trimmed.replaceAll(/\D/g, "");
@@ -86,6 +127,60 @@ function normalizeA4DYesNo(value, useNAForEmpty = false) {
   if (noValues.has(normalized)) return "no";
 
   return raw.toLowerCase();
+}
+
+function normalizeA4DT11FieldName(fieldName) {
+  const raw = String(fieldName || "")
+    .trim()
+    .replaceAll(/[^a-zA-Z0-9]+/g, "_")
+    .toLowerCase();
+
+  if (!raw) return null;
+  return A4D_T11_FIELD_ALIASES[raw] || null;
+}
+
+function normalizeA4DValueForSalesforce(fieldName, value) {
+  const raw = String(value ?? "").trim();
+
+  if (fieldName === "year") {
+    const yearMatch = /(19|20)\d{2}/.exec(raw);
+    if (yearMatch?.[0]) {
+      return `${yearMatch[0]}-01-01`;
+    }
+  }
+
+  return raw;
+}
+
+async function updateA4DT11CaseField({ caseId, fieldName, value }) {
+  const sfField = A4D_T11_FIELD_TO_SF[fieldName];
+  if (!sfField) {
+    throw new Error("A4D_T11_FIELD_NOT_ALLOWED");
+  }
+
+  const sf = await authenticateSalesforce();
+  const updateEndpoint = `${sf.instanceUrl}/services/data/${salesforceConfig.apiVersion}/sobjects/Case/${caseId}`;
+
+  const response = await fetch(updateEndpoint, {
+    method: "PATCH",
+    headers: {
+      Authorization: `Bearer ${sf.accessToken}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      [sfField]: normalizeA4DValueForSalesforce(fieldName, value),
+    }),
+  });
+
+  if (!response.ok) {
+    const body = await response.text();
+    logger.warn(
+      `A4D T11 Case update failed: caseId=${caseId}, field=${sfField}, status=${response.status}, body=${body}`,
+    );
+    throw new Error("A4D_T11_SF_UPDATE_FAILED");
+  }
+
+  return sfField;
 }
 
 function mapCaseToA4DT11Payload(junctionRecord) {
@@ -359,4 +454,68 @@ exports.sendA4DRideshareT11Payload = async ({ caseNumber }) => {
       error: "CLIENT_API_REQUEST_FAILED",
     };
   }
+};
+
+exports.reviseA4DRideshareT11PayloadField = async ({
+  caseNumber,
+  field,
+  value,
+}) => {
+  const normalizedCaseNumber = normalizeCaseNumber(caseNumber);
+  const normalizedField = normalizeA4DT11FieldName(field);
+
+  if (!normalizedCaseNumber) {
+    throw new Error("A4D_T11_CASE_NUMBER_REQUIRED");
+  }
+
+  if (!normalizedField) {
+    return {
+      updated: false,
+      found: true,
+      ready: false,
+      caseNumber: normalizedCaseNumber,
+      error: "A4D_T11_FIELD_NOT_ALLOWED",
+      allowedFields: Object.keys(A4D_T11_FIELD_TO_SF),
+    };
+  }
+
+  const caseRecord = await fetchCaseForA4DT11(normalizedCaseNumber);
+  if (!caseRecord) {
+    return {
+      updated: false,
+      found: false,
+      caseNumber: normalizedCaseNumber,
+    };
+  }
+
+  const caseId = caseRecord.Lead__r?.Id;
+  if (!caseId) {
+    return {
+      updated: false,
+      found: true,
+      caseNumber: normalizedCaseNumber,
+      error: "A4D_T11_CASE_NOT_FOUND",
+    };
+  }
+
+  await updateA4DT11CaseField({
+    caseId,
+    fieldName: normalizedField,
+    value,
+  });
+
+  const prepared = await exports.prepareA4DRideshareT11Payload({
+    caseNumber: normalizedCaseNumber,
+  });
+
+  return {
+    updated: true,
+    found: prepared.found,
+    ready: prepared.ready,
+    caseNumber: prepared.caseNumber,
+    field: normalizedField,
+    value: String(value ?? "").trim(),
+    payload: prepared.payload || null,
+    missingFields: prepared.missingFields || [],
+  };
 };

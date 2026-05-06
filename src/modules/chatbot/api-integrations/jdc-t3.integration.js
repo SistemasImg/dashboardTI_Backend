@@ -21,6 +21,46 @@ const JDC_T3_STATIC_FIELDS = Object.freeze({
   custom897: "Phillips Law",
 });
 
+const JDC_T3_FIELD_TO_SF = Object.freeze({
+  Email1: "Email__c",
+  CellPhone: "Phone_Numbercontact__c",
+  FirstName: "FirstName__c",
+  LastName: "Last_Name__c",
+  Address1: "Address_Street__c",
+  City: "City__c",
+  State: "StateUS__c",
+  Zip: "Area_Code__c",
+  dob: "Date_of_Birth__c",
+  custom1016: "Date_of_Abuse__c",
+  custom699: "VictimLName__c",
+  custom700: "VictimLName__c",
+});
+
+const JDC_T3_FIELD_ALIASES = Object.freeze({
+  email: "Email1",
+  email1: "Email1",
+  cell_phone: "CellPhone",
+  cellphone: "CellPhone",
+  phone: "CellPhone",
+  first_name: "FirstName",
+  firstname: "FirstName",
+  last_name: "LastName",
+  lastname: "LastName",
+  address: "Address1",
+  address1: "Address1",
+  city: "City",
+  state: "State",
+  zip: "Zip",
+  zipcode: "Zip",
+  dob: "dob",
+  custom1016: "custom1016",
+  date_of_abuse: "custom1016",
+  custom699: "custom699",
+  custom700: "custom700",
+  victim_last_name: "custom699",
+  victim_lname: "custom699",
+});
+
 function normalizeCaseNumber(caseNumberInput) {
   const trimmed = String(caseNumberInput || "").trim();
   const numericOnly = trimmed.replaceAll(/\D/g, "");
@@ -163,6 +203,68 @@ function getAttachmentBuffer(attachment) {
   if (attachment.fileBase64)
     return Buffer.from(attachment.fileBase64, "base64");
   return null;
+}
+
+function normalizeJdcFieldName(fieldName) {
+  const raw = String(fieldName || "")
+    .trim()
+    .replaceAll(/[^a-zA-Z0-9]+/g, "_")
+    .toLowerCase();
+
+  if (!raw) return null;
+  return JDC_T3_FIELD_ALIASES[raw] || null;
+}
+
+function normalizeDateForSalesforce(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return "";
+
+  const ymd = /^(\d{4})-(\d{2})-(\d{2})$/.exec(raw);
+  if (ymd) return raw;
+
+  const mdy = /^(\d{2})\/(\d{2})\/(\d{4})$/.exec(raw);
+  if (mdy) {
+    const [, month, day, year] = mdy;
+    return `${year}-${month}-${day}`;
+  }
+
+  return raw;
+}
+
+async function updateJdcT3CaseField({ caseId, fieldName, value }) {
+  const sfField = JDC_T3_FIELD_TO_SF[fieldName];
+  if (!sfField) {
+    throw new Error("JDC_T3_FIELD_NOT_ALLOWED");
+  }
+
+  const payloadValue =
+    sfField === "Date_of_Birth__c" || sfField === "Date_of_Abuse__c"
+      ? normalizeDateForSalesforce(value)
+      : String(value ?? "").trim();
+
+  const sf = await authenticateSalesforce();
+  const updateEndpoint = `${sf.instanceUrl}/services/data/${salesforceConfig.apiVersion}/sobjects/Case/${caseId}`;
+
+  const response = await fetch(updateEndpoint, {
+    method: "PATCH",
+    headers: {
+      Authorization: `Bearer ${sf.accessToken}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      [sfField]: payloadValue,
+    }),
+  });
+
+  if (!response.ok) {
+    const body = await response.text();
+    logger.warn(
+      `JDC T3 Case update failed: caseId=${caseId}, field=${sfField}, status=${response.status}, body=${body}`,
+    );
+    throw new Error("JDC_T3_SF_UPDATE_FAILED");
+  }
+
+  return sfField;
 }
 
 async function postJdcT3Payload(payload, attachments, caseNumber) {
@@ -390,4 +492,70 @@ exports.sendJdcT3Payload = async ({ caseNumber, attachments = [] }) => {
       error: "CLIENT_API_REQUEST_FAILED",
     };
   }
+};
+
+exports.reviseJdcT3PayloadField = async ({
+  caseNumber,
+  attachments = [],
+  field,
+  value,
+}) => {
+  const normalizedCaseNumber = normalizeCaseNumber(caseNumber);
+  const normalizedField = normalizeJdcFieldName(field);
+
+  if (!normalizedCaseNumber) {
+    throw new Error("JDC_T3_CASE_NUMBER_REQUIRED");
+  }
+
+  if (!normalizedField) {
+    return {
+      updated: false,
+      found: true,
+      ready: false,
+      caseNumber: normalizedCaseNumber,
+      error: "JDC_T3_FIELD_NOT_ALLOWED",
+      allowedFields: Object.keys(JDC_T3_FIELD_TO_SF),
+    };
+  }
+
+  const caseRecord = await fetchCaseForJdcT3(normalizedCaseNumber);
+  if (!caseRecord) {
+    return {
+      updated: false,
+      found: false,
+      caseNumber: normalizedCaseNumber,
+    };
+  }
+
+  const caseId = caseRecord.Lead__r?.Id;
+  if (!caseId) {
+    return {
+      updated: false,
+      found: true,
+      caseNumber: normalizedCaseNumber,
+      error: "JDC_T3_CASE_NOT_FOUND",
+    };
+  }
+
+  await updateJdcT3CaseField({
+    caseId,
+    fieldName: normalizedField,
+    value,
+  });
+
+  const prepared = await exports.prepareJdcT3Payload({
+    caseNumber: normalizedCaseNumber,
+  });
+
+  return {
+    updated: true,
+    found: prepared.found,
+    ready: prepared.ready,
+    caseNumber: prepared.caseNumber,
+    field: normalizedField,
+    value: String(value ?? "").trim(),
+    payload: prepared.payload || null,
+    missingFields: prepared.missingFields || [],
+    attachmentsCount: sanitizeAttachments(attachments).length,
+  };
 };

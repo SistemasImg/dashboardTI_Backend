@@ -21,6 +21,40 @@ const T9_STATIC_FIELDS = Object.freeze({
   custom894: "Rideshare - Phillips Law",
 });
 
+const T9_FIELD_TO_SF = Object.freeze({
+  CellPhone: "Phone_Numbercontact__c",
+  Email1: "Email__c",
+  FirstName: "FirstName__c",
+  LastName: "Last_Name__c",
+  Address1: "Address_Street__c",
+  City: "City__c",
+  State: "StateUS__c",
+  Zip: "Area_Code__c",
+  dob: "Date_of_Birth__c",
+  custom1016: "Incident_Date__c",
+});
+
+const T9_FIELD_ALIASES = Object.freeze({
+  cell_phone: "CellPhone",
+  cellphone: "CellPhone",
+  phone: "CellPhone",
+  email: "Email1",
+  email1: "Email1",
+  first_name: "FirstName",
+  firstname: "FirstName",
+  last_name: "LastName",
+  lastname: "LastName",
+  address: "Address1",
+  address1: "Address1",
+  city: "City",
+  state: "State",
+  zip: "Zip",
+  zipcode: "Zip",
+  dob: "dob",
+  custom1016: "custom1016",
+  incident_date: "custom1016",
+});
+
 function normalizeTierInput(tierInput) {
   const raw = String(tierInput || "")
     .trim()
@@ -160,6 +194,68 @@ function getAttachmentBuffer(attachment) {
   return null;
 }
 
+function normalizeT9FieldName(fieldName) {
+  const raw = String(fieldName || "")
+    .trim()
+    .replaceAll(/[^a-zA-Z0-9]+/g, "_")
+    .toLowerCase();
+
+  if (!raw) return null;
+  return T9_FIELD_ALIASES[raw] || null;
+}
+
+function normalizeDateForSalesforce(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return "";
+
+  const ymd = /^(\d{4})-(\d{2})-(\d{2})$/.exec(raw);
+  if (ymd) return raw;
+
+  const mdy = /^(\d{2})\/(\d{2})\/(\d{4})$/.exec(raw);
+  if (mdy) {
+    const [, month, day, year] = mdy;
+    return `${year}-${month}-${day}`;
+  }
+
+  return raw;
+}
+
+async function updateT9CaseField({ caseId, fieldName, value }) {
+  const sfField = T9_FIELD_TO_SF[fieldName];
+  if (!sfField) {
+    throw new Error("T9_FIELD_NOT_ALLOWED");
+  }
+
+  const payloadValue =
+    sfField === "Date_of_Birth__c" || sfField === "Incident_Date__c"
+      ? normalizeDateForSalesforce(value)
+      : String(value ?? "").trim();
+
+  const sf = await authenticateSalesforce();
+  const updateEndpoint = `${sf.instanceUrl}/services/data/${salesforceConfig.apiVersion}/sobjects/Case/${caseId}`;
+
+  const response = await fetch(updateEndpoint, {
+    method: "PATCH",
+    headers: {
+      Authorization: `Bearer ${sf.accessToken}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      [sfField]: payloadValue,
+    }),
+  });
+
+  if (!response.ok) {
+    const body = await response.text();
+    logger.warn(
+      `T9 Case update failed: caseId=${caseId}, field=${sfField}, status=${response.status}, body=${body}`,
+    );
+    throw new Error("T9_SF_UPDATE_FAILED");
+  }
+
+  return sfField;
+}
+
 function extractLeadIdFromClientResponse(responseText = "") {
   const successLeadMatch = /Success\s+Lead\s+#(\d+)/i.exec(responseText);
   if (successLeadMatch?.[1]) return successLeadMatch[1];
@@ -199,6 +295,7 @@ async function postT9Payload(payload, attachments, caseNumber) {
     method: "POST",
     body: form,
   });
+
   const responseText = await response.text();
   const clientLeadId = extractLeadIdFromClientResponse(responseText);
   const leadLogSuffix = clientLeadId ? `, clientLeadId=${clientLeadId}` : "";
@@ -442,4 +539,78 @@ exports.sendT9RidesharePayload = async ({
       error: "CLIENT_API_REQUEST_FAILED",
     };
   }
+};
+
+exports.reviseT9RidesharePayloadField = async ({
+  caseNumber,
+  tort,
+  tier,
+  attachments = [],
+  field,
+  value,
+}) => {
+  const normalizedCaseNumber = normalizeCaseNumber(caseNumber);
+  const normalizedField = normalizeT9FieldName(field);
+
+  if (!normalizedCaseNumber) {
+    throw new Error("T9_CASE_NUMBER_REQUIRED");
+  }
+
+  if (!normalizedField) {
+    return {
+      updated: false,
+      found: true,
+      ready: false,
+      caseNumber: normalizedCaseNumber,
+      error: "T9_FIELD_NOT_ALLOWED",
+      allowedFields: Object.keys(T9_FIELD_TO_SF),
+    };
+  }
+
+  const caseRecord = await fetchCaseForT9(normalizedCaseNumber);
+  if (!caseRecord) {
+    return {
+      updated: false,
+      found: false,
+      caseNumber: normalizedCaseNumber,
+    };
+  }
+
+  const caseId = caseRecord.Lead__r?.Id;
+  if (!caseId) {
+    return {
+      updated: false,
+      found: true,
+      caseNumber: normalizedCaseNumber,
+      error: "T9_CASE_NOT_FOUND",
+    };
+  }
+
+  await updateT9CaseField({
+    caseId,
+    fieldName: normalizedField,
+    value,
+  });
+
+  const prepared = await exports.prepareT9RidesharePayload({
+    caseNumber: normalizedCaseNumber,
+    tort,
+    tier,
+    attachments,
+  });
+
+  return {
+    updated: true,
+    found: prepared.found,
+    ready: prepared.ready,
+    caseNumber: prepared.caseNumber,
+    tort: prepared.tort,
+    tier: prepared.tier,
+    field: normalizedField,
+    value: String(value ?? "").trim(),
+    payload: prepared.payload || null,
+    missingFields: prepared.missingFields || [],
+    attachmentsCount:
+      prepared.attachmentsCount || sanitizeAttachments(attachments).length,
+  };
 };

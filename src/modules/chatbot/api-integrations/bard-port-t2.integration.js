@@ -17,6 +17,29 @@ const BARD_PORT_T2_STATIC_FIELDS = Object.freeze({
   lp_key: "dyrvskn3xijz7y",
 });
 
+const BARD_T2_FIELD_TO_SF = Object.freeze({
+  Email: "Email__c",
+  CellPhone: "Phone_Numbercontact__c",
+  FirstName: "FirstName__c",
+  LastName: "Last_Name__c",
+  have_attorney: "Do_you_have_an_attorney__c",
+  received_port: "Receive_an_Implanted_Port_Catheter__c",
+  catheter_issues: "Implanted_Port_Catheter_infection__c",
+});
+
+const BARD_T2_FIELD_ALIASES = Object.freeze({
+  email: "Email",
+  cellphone: "CellPhone",
+  phone: "CellPhone",
+  first_name: "FirstName",
+  firstname: "FirstName",
+  last_name: "LastName",
+  lastname: "LastName",
+  have_attorney: "have_attorney",
+  received_port: "received_port",
+  catheter_issues: "catheter_issues",
+});
+
 function normalizeTierInput(tierInput) {
   const raw = String(tierInput || "")
     .trim()
@@ -134,6 +157,47 @@ async function updateCaseApiMessageResult(caseId, apiMessageResult) {
   logger.info(`Bard Port T2 Salesforce update completed for caseId ${caseId}`);
 
   return true;
+}
+
+function normalizeBardT2FieldName(fieldName) {
+  const raw = String(fieldName || "")
+    .trim()
+    .replaceAll(/[^a-zA-Z0-9]+/g, "_")
+    .toLowerCase();
+
+  if (!raw) return null;
+  return BARD_T2_FIELD_ALIASES[raw] || null;
+}
+
+async function updateBardT2CaseField({ caseId, fieldName, value }) {
+  const sfField = BARD_T2_FIELD_TO_SF[fieldName];
+  if (!sfField) {
+    throw new Error("BARD_PORT_T2_FIELD_NOT_ALLOWED");
+  }
+
+  const sf = await authenticateSalesforce();
+  const updateEndpoint = `${sf.instanceUrl}/services/data/${salesforceConfig.apiVersion}/sobjects/Case/${caseId}`;
+
+  const response = await fetch(updateEndpoint, {
+    method: "PATCH",
+    headers: {
+      Authorization: `Bearer ${sf.accessToken}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      [sfField]: String(value ?? "").trim(),
+    }),
+  });
+
+  if (!response.ok) {
+    const body = await response.text();
+    logger.warn(
+      `Bard Port T2 Case update failed: caseId=${caseId}, field=${sfField}, status=${response.status}, body=${body}`,
+    );
+    throw new Error("BARD_PORT_T2_SF_UPDATE_FAILED");
+  }
+
+  return sfField;
 }
 
 exports.prepareBardPortT2Payload = async ({ caseNumber, tort, tier }) => {
@@ -290,4 +354,75 @@ exports.sendBardPortT2Payload = async ({ caseNumber, tort, tier }) => {
       error: "CLIENT_API_REQUEST_FAILED",
     };
   }
+};
+
+exports.reviseBardPortT2PayloadField = async ({
+  caseNumber,
+  field,
+  value,
+  tort,
+  tier,
+}) => {
+  const normalizedCaseNumber = normalizeCaseNumber(caseNumber);
+  const normalizedField = normalizeBardT2FieldName(field);
+  const normalizedValue = String(value ?? "").trim();
+
+  if (!normalizedCaseNumber) {
+    throw new Error("BARD_PORT_T2_CASE_NUMBER_REQUIRED");
+  }
+
+  if (!normalizedField) {
+    return {
+      updated: false,
+      found: true,
+      ready: false,
+      caseNumber: normalizedCaseNumber,
+      error: "BARD_PORT_T2_FIELD_NOT_ALLOWED",
+      allowedFields: Object.keys(BARD_T2_FIELD_TO_SF),
+    };
+  }
+
+  const caseRecord = await fetchCaseForBardPortT2(normalizedCaseNumber);
+  if (!caseRecord) {
+    return {
+      updated: false,
+      found: false,
+      caseNumber: normalizedCaseNumber,
+    };
+  }
+
+  const caseId = caseRecord.Lead__r?.Id;
+  if (!caseId) {
+    return {
+      updated: false,
+      found: true,
+      caseNumber: normalizedCaseNumber,
+      error: "BARD_PORT_T2_CASE_NOT_FOUND",
+    };
+  }
+
+  await updateBardT2CaseField({
+    caseId,
+    fieldName: normalizedField,
+    value: normalizedValue,
+  });
+
+  const prepared = await exports.prepareBardPortT2Payload({
+    caseNumber: normalizedCaseNumber,
+    tort,
+    tier,
+  });
+
+  return {
+    updated: true,
+    found: prepared.found,
+    ready: prepared.ready,
+    caseNumber: prepared.caseNumber,
+    tort: prepared.tort,
+    tier: prepared.tier,
+    field: normalizedField,
+    value: normalizedValue,
+    payload: prepared.payload || null,
+    missingFields: prepared.missingFields || [],
+  };
 };
