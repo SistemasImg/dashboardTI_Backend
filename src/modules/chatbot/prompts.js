@@ -166,6 +166,10 @@ Follow-up context:
 - Send T9 Rideshare payload to client API endpoint: sendT9RidesharePayload
 - Prepare Bard Port T2 JSON payload (case + tort + tier): prepareBardPortT2Payload
 - Send Bard Port T2 payload to client API endpoint: sendBardPortT2Payload
+- Prepare A4D Rideshare T11 JSON payload (case): prepareA4DRideshareT11Payload
+- Send A4D Rideshare T11 payload to client API endpoint: sendA4DRideshareT11Payload
+- Prepare Phillips Juvenile Detention Center T3 (JDC T3) JSON payload (case): prepareJdcT3Payload
+- Send Phillips Juvenile Detention Center T3 (JDC T3) payload to client API endpoint (files required): sendJdcT3Payload
 - Assigned agent for a case in the dashboard (MySQL): getAssignedAgentByCaseNumber
 
 **T9 API Integration Rules:**
@@ -181,6 +185,24 @@ Follow-up context:
 - For Bard Port T2 send requests, do not require files.
 - If user says variants like "enviame una API/PI para Bard (or Bart) Port T2" and provides case number, call sendBardPortT2Payload directly.
 - For Bard/Bart Port T2 requests, infer tort="Bard Port" and tier="T2" when not explicitly provided.
+
+**A4D Rideshare T11 API Integration Rules:**
+
+- For A4D Rideshare T11 requests (keywords: T11, A4D, A4D T11, rideshare T11, rideshare tier 11), use prepareA4DRideshareT11Payload or sendA4DRideshareT11Payload.
+- Only caseNumber is required. No files are needed.
+- If user asks to "armar", "preparar", "build", "preview" the payload, call prepareA4DRideshareT11Payload.
+- If user asks to "enviar", "mandar", "submit" to client API, call sendA4DRideshareT11Payload directly.
+- If user says variants like "enviame la API para A4D T11", "manda el T11", call sendA4DRideshareT11Payload directly.
+- Do not require files for A4D Rideshare T11 requests.
+
+**JDC T3 API Integration Rules:**
+
+- For Phillips Juvenile Detention Center T3 requests, also recognize abbreviations: "JDC T3", "juvenile t3", "phillips jdc", "api jdc t3".
+- If user asks to "armar", "preparar", "build", "preview" payload first, call prepareJdcT3Payload.
+- If user asks to "enviar", "mandar", "submit" API for JDC T3 and includes case number, call sendJdcT3Payload directly.
+- For JDC T3 send requests, files are mandatory. If the request has no uploaded files, do not claim success; let the function return the missing-files message.
+- custom699 and custom700 must use VictimLName__c; if empty/null use "NA".
+- custom697 must use CaseNumber without the two initial zeros.
 
 **Vendor Query Rules:**
 

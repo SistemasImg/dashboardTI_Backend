@@ -319,6 +319,31 @@ function detectT9SendIntent(message) {
   return { caseNumber: caseMatch[1] };
 }
 
+function detectJdcT3SendIntent(message) {
+  const text = String(message || "").toLowerCase();
+
+  const mentionsSend =
+    text.includes("envi") ||
+    text.includes("manda") ||
+    text.includes("send") ||
+    text.includes("submit");
+
+  const mentionsJdcT3 =
+    text.includes("jdc t3") ||
+    text.includes("jdc") ||
+    text.includes("juvenile detention center") ||
+    text.includes("juvenile t3") ||
+    text.includes("detention center t3") ||
+    (text.includes("juvenile") && text.includes("t3"));
+
+  if (!mentionsSend || !mentionsJdcT3) return null;
+
+  const caseMatch = /\b(0*\d{5,8})\b/.exec(text);
+  if (!caseMatch) return null;
+
+  return { caseNumber: caseMatch[1] };
+}
+
 function detectCaseAttemptsByDateIntent(message) {
   const text = String(message || "").toLowerCase();
   const mentionsAttempts =
@@ -537,7 +562,7 @@ exports.processMessage = async (
                 .map((file) => file.fileName)
                 .join(
                   ", ",
-                )}. If user asks to send T9 API, treat attachments as provided in this request.`,
+                )}. If user asks to send T9 or JDC T3 API, treat attachments as provided in this request.`,
             },
           ]
         : [
@@ -545,8 +570,8 @@ exports.processMessage = async (
               role: "system",
               content:
                 "IMPORTANT: No files were attached to this request. " +
-                "If the user asks to send a T9 Rideshare payload (any variant: enviar API, envíame el API, send API, PI, etc.), " +
-                "you MUST call the sendT9RidesharePayload function with the provided case number — do NOT generate a text response, " +
+                "If the user asks to send a T9 Rideshare or JDC T3 payload (any variant: enviar API, envíame el API, send API, PI, etc.), " +
+                "you MUST call the sendT9RidesharePayload or sendJdcT3Payload function with the provided case number — do NOT generate a text response, " +
                 "do NOT simulate success, do NOT invent HTTP codes, do NOT invent Lead IDs. " +
                 "The function itself will detect missing files and return the appropriate error. " +
                 "Never fabricate a successful delivery response under any circumstances.",
@@ -975,6 +1000,64 @@ exports.processMessage = async (
             break;
           }
 
+          case "prepareA4DRideshareT11Payload":
+            functionResult =
+              await apiIntegrations.a4dRideshareT11.prepareA4DRideshareT11Payload(
+                { caseNumber: args.caseNumber },
+              );
+            if (args.caseNumber) {
+              sessionData.last_filters = {
+                ...(sessionData.last_filters || {}),
+                caseNumber: args.caseNumber,
+              };
+              sessionCache[cacheKey].last_filters = sessionData.last_filters;
+            }
+            break;
+
+          case "sendA4DRideshareT11Payload":
+            functionResult =
+              await apiIntegrations.a4dRideshareT11.sendA4DRideshareT11Payload({
+                caseNumber: args.caseNumber,
+              });
+            if (args.caseNumber) {
+              sessionData.last_filters = {
+                ...(sessionData.last_filters || {}),
+                caseNumber: args.caseNumber,
+              };
+              sessionCache[cacheKey].last_filters = sessionData.last_filters;
+            }
+            break;
+
+          case "prepareJdcT3Payload":
+            functionResult = await apiIntegrations.jdcT3.prepareJdcT3Payload({
+              caseNumber: args.caseNumber,
+            });
+            if (args.caseNumber) {
+              sessionData.last_filters = {
+                ...(sessionData.last_filters || {}),
+                caseNumber: args.caseNumber,
+              };
+              sessionCache[cacheKey].last_filters = sessionData.last_filters;
+            }
+            break;
+
+          case "sendJdcT3Payload":
+            functionResult = await apiIntegrations.jdcT3.sendJdcT3Payload({
+              caseNumber: args.caseNumber,
+              attachments:
+                requestAttachments.length > 0
+                  ? requestAttachments
+                  : args.attachments,
+            });
+            if (args.caseNumber) {
+              sessionData.last_filters = {
+                ...(sessionData.last_filters || {}),
+                caseNumber: args.caseNumber,
+              };
+              sessionCache[cacheKey].last_filters = sessionData.last_filters;
+            }
+            break;
+
           case "getVendorsBySupplierSegment":
             functionResult = await metrics.sf.getVendorsBySupplierSegment(
               args.segment,
@@ -1212,6 +1295,36 @@ exports.processMessage = async (
         finalMessage = `${sentMessage}\n\n${i18n(userLang, "Respuesta del cliente", "Client response")}: ${clientResponseText}\n${i18n(userLang, "Guardado en Salesforce", "Saved in Salesforce")}: ${salesforceSavedText}`;
       }
 
+      if (
+        functionName === "sendJdcT3Payload" &&
+        functionResult?.sent === false &&
+        functionResult?.attachmentsRequired === true
+      ) {
+        finalMessage = i18n(
+          userLang,
+          `No se hizo el envío JDC T3 del case ${functionResult.caseNumber} porque los archivos son obligatorios. Adjunta los documentos directamente en el mismo mensaje y vuelve a pedir el envío.`,
+          `JDC T3 delivery was not started for case ${functionResult.caseNumber} because files are mandatory. Attach the required documents directly in the same message and request the submission again.`,
+        );
+      }
+
+      if (functionName === "sendJdcT3Payload" && functionResult?.sent) {
+        const sentMessage = i18n(
+          userLang,
+          `Listo, envié correctamente el API del caso ${functionResult.caseNumber}.`,
+          `Done, I sent the API successfully for case ${functionResult.caseNumber}.`,
+        );
+
+        const clientResponseText = functionResult.clientResponse || "N/A";
+        let salesforceSavedText = "N/A";
+        if (typeof functionResult.salesforceUpdated === "boolean") {
+          salesforceSavedText = functionResult.salesforceUpdated
+            ? i18n(userLang, "si", "yes")
+            : i18n(userLang, "no", "no");
+        }
+
+        finalMessage = `${sentMessage}\n\n${i18n(userLang, "HTTP", "HTTP")}: ${functionResult.statusCode || "N/A"}\n${i18n(userLang, "Respuesta del cliente", "Client response")}: ${clientResponseText}\n${i18n(userLang, "Guardado en Salesforce", "Saved in Salesforce")}: ${salesforceSavedText}`;
+      }
+
       if (functionName === "sendBardPortT2Payload" && functionResult?.sent) {
         const sentMessage = i18n(
           userLang,
@@ -1228,6 +1341,24 @@ exports.processMessage = async (
         }
 
         finalMessage = `${sentMessage}\n\n${i18n(userLang, "HTTP", "HTTP")}: ${functionResult.statusCode || "N/A"}\n${i18n(userLang, "Respuesta del cliente", "Client response")}: ${clientResponseText}\n${i18n(userLang, "Guardado en Salesforce", "Saved in Salesforce")}: ${salesforceSavedText}`;
+      }
+
+      if (
+        functionName === "sendA4DRideshareT11Payload" &&
+        functionResult?.sent
+      ) {
+        const sentMessage = i18n(
+          userLang,
+          `Listo, envié correctamente el API del caso ${functionResult.caseNumber}.`,
+          `Done, I sent the API successfully for case ${functionResult.caseNumber}.`,
+        );
+        const sfText =
+          typeof functionResult.salesforceUpdated === "boolean"
+            ? functionResult.salesforceUpdated
+              ? i18n(userLang, "si", "yes")
+              : i18n(userLang, "no", "no")
+            : "N/A";
+        finalMessage = `${sentMessage}\n\n${i18n(userLang, "Respuesta del cliente", "Client response")}: ${functionResult.clientResponse || "N/A"}\n${i18n(userLang, "Guardado en Salesforce", "Saved in Salesforce")}: ${sfText}`;
       }
 
       const finalPayload = humanizePayload({
@@ -1317,6 +1448,70 @@ exports.processMessage = async (
         );
 
       return { message: t9FinalMessage };
+    }
+
+    const jdcIntent = detectJdcT3SendIntent(normalizedUserMessage);
+    if (jdcIntent) {
+      logger.warn(
+        `[JDC T3 Safety Net] Model skipped function call. Forcing sendJdcT3Payload for case ${jdcIntent.caseNumber}`,
+      );
+      const jdcFunctionResult = await apiIntegrations.jdcT3.sendJdcT3Payload({
+        caseNumber: jdcIntent.caseNumber,
+        attachments: requestAttachments,
+      });
+
+      let jdcFinalMessage;
+      if (jdcFunctionResult.sent) {
+        const sfText =
+          typeof jdcFunctionResult.salesforceUpdated === "boolean"
+            ? jdcFunctionResult.salesforceUpdated
+              ? i18n(userLang, "si", "yes")
+              : i18n(userLang, "no", "no")
+            : "N/A";
+        jdcFinalMessage = `${i18n(userLang, `Listo, envié correctamente el API del caso ${jdcFunctionResult.caseNumber}.`, `Done, I sent the API successfully for case ${jdcFunctionResult.caseNumber}.`)}\n\n${i18n(userLang, "HTTP", "HTTP")}: ${jdcFunctionResult.statusCode || "N/A"}\n${i18n(userLang, "Respuesta del cliente", "Client response")}: ${jdcFunctionResult.clientResponse || "N/A"}\n${i18n(userLang, "Guardado en Salesforce", "Saved in Salesforce")}: ${sfText}`;
+      } else if (jdcFunctionResult.attachmentsRequired) {
+        jdcFinalMessage = i18n(
+          userLang,
+          `No se hizo el envío JDC T3 del case ${jdcFunctionResult.caseNumber} porque los archivos son obligatorios. Adjunta los documentos directamente en el mismo mensaje.`,
+          `JDC T3 delivery was not started for case ${jdcFunctionResult.caseNumber} because files are mandatory. Attach the documents directly in the same message.`,
+        );
+      } else if (!jdcFunctionResult.found) {
+        jdcFinalMessage = i18n(
+          userLang,
+          `No encontré el case ${jdcIntent.caseNumber} en Salesforce. Verifica el número e intenta de nuevo.`,
+          `I couldn't find case ${jdcIntent.caseNumber} in Salesforce. Please verify the case number and try again.`,
+        );
+      } else {
+        const sfText =
+          typeof jdcFunctionResult.salesforceUpdated === "boolean"
+            ? jdcFunctionResult.salesforceUpdated
+              ? i18n(userLang, "si", "yes")
+              : i18n(userLang, "no", "no")
+            : "N/A";
+        jdcFinalMessage = `${i18n(
+          userLang,
+          `No se completó el envío JDC T3 para el case ${jdcFunctionResult.caseNumber}. ${jdcFunctionResult.message || jdcFunctionResult.error || "Revisa la configuración del endpoint"}.`,
+          `JDC T3 delivery for case ${jdcFunctionResult.caseNumber} was not completed. ${jdcFunctionResult.message || jdcFunctionResult.error || "Check endpoint configuration"}.`,
+        )}\n\n${i18n(userLang, "HTTP", "HTTP")}: ${jdcFunctionResult.statusCode || "N/A"}\n${i18n(userLang, "Respuesta del cliente", "Client response")}: ${jdcFunctionResult.clientResponse || "N/A"}\n${i18n(userLang, "Guardado en Salesforce", "Saved in Salesforce")}: ${sfText}`;
+      }
+
+      chatSessionService
+        .appendMessages(
+          userId,
+          [
+            { role: "user", content: userMessage },
+            { role: "assistant", content: jdcFinalMessage },
+          ],
+          sessionCache[cacheKey].last_filters,
+          jdcFunctionResult,
+        )
+        .catch((err) =>
+          logger.error(
+            `[ChatSession] Failed to persist messages: ${err.message}`,
+          ),
+        );
+
+      return { message: jdcFinalMessage };
     }
 
     const assistantContent = message.content || "";
@@ -1468,6 +1663,22 @@ async function formatResult(type, data, lang = "en") {
 
   if (type === "sendBardPortT2Payload") {
     return formatSendBardPortT2PayloadResult(data, lang);
+  }
+
+  if (type === "prepareA4DRideshareT11Payload") {
+    return formatPrepareA4DRideshareT11PayloadResult(data, lang);
+  }
+
+  if (type === "sendA4DRideshareT11Payload") {
+    return formatSendA4DRideshareT11PayloadResult(data, lang);
+  }
+
+  if (type === "prepareJdcT3Payload") {
+    return formatPrepareJdcT3PayloadResult(data, lang);
+  }
+
+  if (type === "sendJdcT3Payload") {
+    return formatSendJdcT3PayloadResult(data, lang);
   }
 
   // Grouped result
@@ -2493,7 +2704,7 @@ function formatSendT9RidesharePayloadResult(data, lang = "en") {
       : "N/A";
 
   return {
-    message: `${i18n(lang, `Listo, envié correctamente el API del caso ${data.caseNumber}.`, `Done, I sent the API successfully for case ${data.caseNumber}.`)}\n\n${i18n(lang, "Respuesta del cliente", "Client response")}: ${data.clientResponse || "N/A"}\n${i18n(lang, "Guardado en Salesforce", "Saved in Salesforce")}: ${sfText}`,
+    message: `${i18n(lang, `Listo, envié correctamente el API del caso ${data.caseNumber}.`, `Done, I sent the API successfully for case ${data.caseNumber}.`)}\n\n${i18n(lang, "HTTP", "HTTP")}: ${data.statusCode || "N/A"}\n${i18n(lang, "Respuesta del cliente", "Client response")}: ${data.clientResponse || "N/A"}\n${i18n(lang, "Guardado en Salesforce", "Saved in Salesforce")}: ${sfText}`,
   };
 }
 
@@ -2572,6 +2783,183 @@ function formatSendBardPortT2PayloadResult(data, lang = "en") {
         `No se completó el envío de Bard Port T2 para el case ${data.caseNumber}. ${data.message || data.error || "Revisa la configuración del endpoint"}.`,
         `Bard Port T2 delivery for case ${data.caseNumber} was not completed. ${data.message || data.error || "Check endpoint configuration"}.`,
       )}\n\n${i18n(lang, "HTTP", "HTTP")}: ${httpText}\n${i18n(lang, "Respuesta del cliente", "Client response")}: ${data.clientResponse || "N/A"}\n${i18n(lang, "Guardado en Salesforce", "Saved in Salesforce")}: ${salesforceSavedText}`,
+    };
+  }
+
+  const sfText =
+    typeof data.salesforceUpdated === "boolean"
+      ? data.salesforceUpdated
+        ? i18n(lang, "si", "yes")
+        : i18n(lang, "no", "no")
+      : "N/A";
+
+  return {
+    message: `${i18n(lang, `Listo, envié correctamente el API del caso ${data.caseNumber}.`, `Done, I sent the API successfully for case ${data.caseNumber}.`)}\n\n${i18n(lang, "Respuesta del cliente", "Client response")}: ${data.clientResponse || "N/A"}\n${i18n(lang, "Guardado en Salesforce", "Saved in Salesforce")}: ${sfText}`,
+  };
+}
+
+function formatPrepareA4DRideshareT11PayloadResult(data, lang = "en") {
+  if (!data.found) {
+    return {
+      message: i18n(
+        lang,
+        `No encontré el case ${data.caseNumber} para armar el payload de A4D Rideshare T11.`,
+        `I couldn't find case ${data.caseNumber} to build the A4D Rideshare T11 payload.`,
+      ),
+    };
+  }
+
+  if (!data.ready) {
+    const fields = (data.missingFields || []).join(", ");
+    return {
+      message: i18n(
+        lang,
+        `⚠️ No se puede armar el payload de A4D Rideshare T11 para el case ${data.caseNumber}. Los siguientes campos están vacíos o no tienen datos en Salesforce: **${fields}**. Verifica que el registro esté completo antes de continuar.`,
+        `⚠️ Cannot build A4D Rideshare T11 payload for case ${data.caseNumber}. The following fields are empty or missing in Salesforce: **${fields}**. Please verify the record is complete before proceeding.`,
+      ),
+    };
+  }
+
+  return {
+    message: `
+🧩 **${i18n(lang, "Payload A4D Rideshare T11 preparado", "A4D Rideshare T11 payload prepared")}**
+• **Case:** ${data.caseNumber}
+
+${i18n(
+  lang,
+  "La estructura JSON quedó lista para envío al endpoint del cliente.",
+  "The JSON structure is ready to be sent to the client endpoint.",
+)}
+`,
+  };
+}
+
+function formatSendA4DRideshareT11PayloadResult(data, lang = "en") {
+  if (!data.found) {
+    return {
+      message: i18n(
+        lang,
+        `No encontré el case ${data.caseNumber}. No pude enviar el payload de A4D Rideshare T11.`,
+        `I couldn't find case ${data.caseNumber}. I could not send the A4D Rideshare T11 payload.`,
+      ),
+    };
+  }
+
+  if (!data.ready) {
+    const fields = (data.missingFields || []).join(", ");
+    return {
+      message: i18n(
+        lang,
+        `⚠️ No se puede enviar el payload de A4D Rideshare T11 para el case ${data.caseNumber}. Los siguientes campos están vacíos o no tienen datos en Salesforce: **${fields}**. Verifica que el registro esté completo antes de continuar.`,
+        `⚠️ Cannot send A4D Rideshare T11 payload for case ${data.caseNumber}. The following fields are empty or missing in Salesforce: **${fields}**. Please verify the record is complete before proceeding.`,
+      ),
+    };
+  }
+
+  if (!data.sent) {
+    return {
+      message: i18n(
+        lang,
+        `No se completó el envío de A4D Rideshare T11 para el case ${data.caseNumber}. ${data.error || "Revisa la configuración del endpoint"}.`,
+        `A4D Rideshare T11 delivery for case ${data.caseNumber} was not completed. ${data.error || "Check endpoint configuration"}.`,
+      ),
+    };
+  }
+
+  const sfText =
+    typeof data.salesforceUpdated === "boolean"
+      ? data.salesforceUpdated
+        ? i18n(lang, "si", "yes")
+        : i18n(lang, "no", "no")
+      : "N/A";
+
+  return {
+    message: `${i18n(lang, `Listo, envié correctamente el API del caso ${data.caseNumber}.`, `Done, I sent the API successfully for case ${data.caseNumber}.`)}\n\n${i18n(lang, "Respuesta del cliente", "Client response")}: ${data.clientResponse || "N/A"}\n${i18n(lang, "Guardado en Salesforce", "Saved in Salesforce")}: ${sfText}`,
+  };
+}
+
+function formatPrepareJdcT3PayloadResult(data, lang = "en") {
+  if (!data.found) {
+    return {
+      message: i18n(
+        lang,
+        `No encontré el case ${data.caseNumber} para armar el payload de JDC T3.`,
+        `I couldn't find case ${data.caseNumber} to build the JDC T3 payload.`,
+      ),
+    };
+  }
+
+  if (!data.ready) {
+    const fields = (data.missingFields || []).join(", ");
+    return {
+      message: i18n(
+        lang,
+        `⚠️ No se puede armar el payload de JDC T3 para el case ${data.caseNumber}. Los siguientes campos están vacíos o no tienen datos en Salesforce: **${fields}**. Verifica que el registro esté completo antes de continuar.`,
+        `⚠️ Cannot build JDC T3 payload for case ${data.caseNumber}. The following fields are empty or missing in Salesforce: **${fields}**. Please verify the record is complete before proceeding.`,
+      ),
+    };
+  }
+
+  return {
+    message: `
+🧩 **${i18n(lang, "Payload JDC T3 preparado", "JDC T3 payload prepared")}**
+• **Case:** ${data.caseNumber}
+
+${i18n(
+  lang,
+  "La estructura JSON quedó lista para envío al endpoint del cliente.",
+  "The JSON structure is ready to be sent to the client endpoint.",
+)}
+`,
+  };
+}
+
+function formatSendJdcT3PayloadResult(data, lang = "en") {
+  if (!data.found) {
+    return {
+      message: i18n(
+        lang,
+        `No encontré el case ${data.caseNumber}. No pude enviar el payload de JDC T3.`,
+        `I couldn't find case ${data.caseNumber}. I could not send the JDC T3 payload.`,
+      ),
+    };
+  }
+
+  if (data.attachmentsRequired) {
+    return {
+      message: i18n(
+        lang,
+        `No se hizo el envío JDC T3 del case ${data.caseNumber} porque los archivos son obligatorios. Vuelve a enviar tu mensaje del chatbot adjuntando los documentos en la misma solicitud usando el campo files, y luego pide el envío otra vez.`,
+        `JDC T3 delivery was not started for case ${data.caseNumber} because files are mandatory. Send your chatbot message again with the required documents attached in the same request using the files field, then ask to submit it again.`,
+      ),
+    };
+  }
+
+  if (!data.ready) {
+    const fields = (data.missingFields || []).join(", ");
+    return {
+      message: i18n(
+        lang,
+        `⚠️ No se puede enviar el payload JDC T3 para el case ${data.caseNumber}. Los siguientes campos están vacíos o no tienen datos en Salesforce: **${fields}**. Verifica que el registro esté completo antes de continuar.`,
+        `⚠️ Cannot send JDC T3 payload for case ${data.caseNumber}. The following fields are empty or missing in Salesforce: **${fields}**. Please verify the record is complete before proceeding.`,
+      ),
+    };
+  }
+
+  if (!data.sent) {
+    const sfText =
+      typeof data.salesforceUpdated === "boolean"
+        ? data.salesforceUpdated
+          ? i18n(lang, "si", "yes")
+          : i18n(lang, "no", "no")
+        : "N/A";
+
+    return {
+      message: `${i18n(
+        lang,
+        `No se completó el envío JDC T3 para el case ${data.caseNumber}. ${data.error || "Revisa la configuración del endpoint"}.`,
+        `JDC T3 delivery for case ${data.caseNumber} was not completed. ${data.error || "Check endpoint configuration"}.`,
+      )}\n\n${i18n(lang, "HTTP", "HTTP")}: ${data.statusCode || "N/A"}\n${i18n(lang, "Respuesta del cliente", "Client response")}: ${data.clientResponse || "N/A"}\n${i18n(lang, "Guardado en Salesforce", "Saved in Salesforce")}: ${sfText}`,
     };
   }
 

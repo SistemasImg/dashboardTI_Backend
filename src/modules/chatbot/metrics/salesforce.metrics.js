@@ -67,6 +67,13 @@ function normalizeDateKeywordValue(value) {
   return null;
 }
 
+function resolveDateFieldForStatus(status) {
+  const normalized = String(status || "")
+    .trim()
+    .toLowerCase();
+  return normalized === "sent" ? "Sent_Date2__c" : "CreatedDate";
+}
+
 function buildVendorDateFilter({
   dateKeyword,
   date,
@@ -288,7 +295,11 @@ exports.getCasesByStatus = async (status, dateKeyword = null, date = null) => {
     logger.info(`Fetching cases with status: ${status}`);
 
     const sf = await authenticateSalesforce();
-    const dateFilter = buildDateFilter(dateKeyword, date);
+    const dateField = resolveDateFieldForStatus(status);
+    const dateFilter = buildDateFilter(dateKeyword, date).replaceAll(
+      "CreatedDate",
+      dateField,
+    );
 
     const soql = `
    SELECT   
@@ -304,11 +315,12 @@ exports.getCasesByStatus = async (status, dateKeyword = null, date = null) => {
         Owner.Name,
         FullName__c,
         CreatedDate,
+        Sent_Date2__c,
         LastModifiedDate
         FROM Case
       WHERE Status = '${status}'
       ${dateFilter}
-      ORDER BY CreatedDate DESC
+      ORDER BY ${dateField} DESC
     `;
 
     const result = await runSoqlQueryFull(sf, soql);
@@ -656,6 +668,7 @@ exports.getCasesByFilters = async (filters) => {
     const sf = await authenticateSalesforce();
 
     const conditions = [];
+    const dateField = resolveDateFieldForStatus(filters.status);
     const originValue = normalizeOriginValue(filters.origin);
     const tierValue = normalizeTierValue(filters.tier);
     const includeDisqualificationReasons =
@@ -682,24 +695,28 @@ exports.getCasesByFilters = async (filters) => {
       conditions.push(`Owner.Name LIKE '%${filters.agentName}%'`);
 
     if (filters.dateKeyword) {
-      conditions.push(`CreatedDate = ${filters.dateKeyword.toUpperCase()}`);
+      conditions.push(`${dateField} = ${filters.dateKeyword.toUpperCase()}`);
     } else if (filters.period === "last_month") {
-      conditions.push("CreatedDate = LAST_N_DAYS:30");
+      conditions.push(`${dateField} = LAST_N_DAYS:30`);
     } else if (filters.date) {
       const { startUTC, endUTC } = normalizeDateRange(
         filters.date,
         filters.date,
       );
-      conditions.push(`CreatedDate >= ${startUTC} AND CreatedDate < ${endUTC}`);
+      conditions.push(
+        `${dateField} >= ${startUTC} AND ${dateField} < ${endUTC}`,
+      );
     } else if (filters.startDate && filters.endDate) {
       const { startUTC, endUTC } = normalizeDateRange(
         filters.startDate,
         filters.endDate,
       );
-      conditions.push(`CreatedDate >= ${startUTC} AND CreatedDate < ${endUTC}`);
+      conditions.push(
+        `${dateField} >= ${startUTC} AND ${dateField} < ${endUTC}`,
+      );
     } else {
       // Default scope for filtered case queries when no date is provided.
-      conditions.push("CreatedDate = TODAY");
+      conditions.push(`${dateField} = TODAY`);
     }
 
     const whereClause = conditions.length
@@ -721,10 +738,11 @@ exports.getCasesByFilters = async (filters) => {
         Phone_Numbercontact__c,
         Owner.Name,
         FullName__c,
-        CreatedDate
+        CreatedDate,
+        Sent_Date2__c
       FROM Case
       ${whereClause}
-      ORDER BY CreatedDate DESC
+      ORDER BY ${dateField} DESC
     `;
 
     const result = await runSoqlQueryFull(sf, soql);

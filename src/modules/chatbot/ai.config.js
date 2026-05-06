@@ -634,6 +634,67 @@ exports.askModel = async (messages) => {
           },
         },
         {
+          name: "prepareA4DRideshareT11Payload",
+          description:
+            "Prepare the JSON payload for A4D Rideshare T11 using a Salesforce case number. No files required.",
+          parameters: {
+            type: "object",
+            properties: {
+              caseNumber: { type: "string" },
+            },
+            required: ["caseNumber"],
+          },
+        },
+        {
+          name: "sendA4DRideshareT11Payload",
+          description:
+            "Send the A4D Rideshare T11 payload to the client API endpoint. No files required. Use when the user asks to send/enviar API for A4D Rideshare T11.",
+          parameters: {
+            type: "object",
+            properties: {
+              caseNumber: { type: "string" },
+            },
+            required: ["caseNumber"],
+          },
+        },
+        {
+          name: "prepareJdcT3Payload",
+          description:
+            "Prepare the JSON payload for Phillips Juvenile Detention Center T3 (JDC T3) using a Salesforce case number. This step only builds/validates payload.",
+          parameters: {
+            type: "object",
+            properties: {
+              caseNumber: { type: "string" },
+            },
+            required: ["caseNumber"],
+          },
+        },
+        {
+          name: "sendJdcT3Payload",
+          description:
+            "Send JDC T3 payload (Phillips Juvenile Detention Center T3) to LawRuler client API endpoint. Requires uploaded files in the same request.",
+          parameters: {
+            type: "object",
+            properties: {
+              caseNumber: { type: "string" },
+              attachments: {
+                type: "array",
+                items: {
+                  type: "object",
+                  properties: {
+                    fileName: { type: "string" },
+                    mimeType: { type: "string" },
+                    fileBase64: { type: "string" },
+                    note: { type: "string" },
+                  },
+                  required: ["fileName", "fileBase64"],
+                },
+              },
+            },
+            required: ["caseNumber"],
+          },
+        },
+        {
           name: "prepareT9RidesharePayload",
           description:
             "Prepare the JSON payload for T9 Rideshare (Phillips Law Group) using a Salesforce case number, tort, tier, and optional attachments.",

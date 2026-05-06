@@ -86,6 +86,17 @@ exports.generateCasesExcel = async (cases) => {
       );
     });
 
+    const allSent =
+      (cases || []).length > 0 &&
+      (cases || []).every(
+        (c) =>
+          String(c.Status || "")
+            .trim()
+            .toLowerCase() === "sent",
+      );
+    const dateFieldLabel = allSent ? "Sent Date" : "Created Date";
+    const dateFieldKey = dateFieldLabel.toLowerCase().replaceAll(" ", "_");
+
     // Define headers for the report
     const headers = [
       "Case Number",
@@ -98,7 +109,7 @@ exports.generateCasesExcel = async (cases) => {
       "Owner",
       "Email",
       "Phone",
-      "Created Date",
+      dateFieldLabel,
     ];
 
     if (includeDisqualificationReasons) {
@@ -148,8 +159,16 @@ exports.generateCasesExcel = async (cases) => {
         owner: caseItem.Owner?.Name || "N/A",
         email: emailValue || "N/A",
         phone: phoneValue || "N/A",
-        created_date: formatDate(caseItem.CreatedDate),
       };
+
+      // Use dynamic key based on label (sent_date or created_date)
+      row[dateFieldKey] = formatDate(
+        String(caseItem.Status || "")
+          .trim()
+          .toLowerCase() === "sent"
+          ? caseItem.Sent_Date2__c
+          : caseItem.CreatedDate,
+      );
 
       if (includeDisqualificationReasons) {
         row.reason_for_dq__c = caseItem.Reason_for_DQ__c || "N/A";
