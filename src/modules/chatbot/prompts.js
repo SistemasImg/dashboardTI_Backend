@@ -166,6 +166,8 @@ Follow-up context:
 - Send T9 Rideshare payload to client API endpoint: sendT9RidesharePayload
 - Prepare Bard Port T2 JSON payload (case + tort + tier): prepareBardPortT2Payload
 - Send Bard Port T2 payload to client API endpoint: sendBardPortT2Payload
+- Prepare Depo Provera T8 JSON payload (case + tort + tier): prepareDepoProveraT8Payload
+- Send Depo Provera T8 payload to client API endpoint: sendDepoProveraT8Payload
 - Prepare A4D Rideshare T11 JSON payload (case): prepareA4DRideshareT11Payload
 - Send A4D Rideshare T11 payload to client API endpoint: sendA4DRideshareT11Payload
 - Prepare Phillips Juvenile Detention Center T3 (JDC T3) JSON payload (case): prepareJdcT3Payload
@@ -185,6 +187,11 @@ Follow-up context:
 - For Bard Port T2 send requests, do not require files.
 - If user says variants like "enviame una API/PI para Bard (or Bart) Port T2" and provides case number, call sendBardPortT2Payload directly.
 - For Bard/Bart Port T2 requests, infer tort="Bard Port" and tier="T2" when not explicitly provided.
+- If user asks to prepare Depo Provera T8 payload for Wilens Law, call prepareDepoProveraT8Payload.
+- If user asks to send Depo Provera T8 payload to client API, call sendDepoProveraT8Payload.
+- For Depo Provera T8 send requests, do not require files.
+- If user says variants like "envia api depo provera t8" and provides case number, call sendDepoProveraT8Payload directly.
+- For Depo Provera T8 requests, infer tort="Depo Provera" and tier="T8" when not explicitly provided.
 
 **A4D Rideshare T11 API Integration Rules:**
 

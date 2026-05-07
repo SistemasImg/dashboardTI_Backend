@@ -802,6 +802,46 @@ exports.askModel = async (messages) => {
             required: ["caseNumber", "tort", "tier"],
           },
         },
+        {
+          name: "prepareDepoProveraT8Payload",
+          description:
+            "Prepare the JSON payload for Wilens Law - Depo Provera T8 using a Salesforce case number, tort, and tier. This tier does not require files.",
+          parameters: {
+            type: "object",
+            properties: {
+              caseNumber: { type: "string" },
+              tort: {
+                type: "string",
+                description: "Tort/campaign name, e.g. Depo Provera",
+              },
+              tier: {
+                type: "string",
+                description: "Tier value (T8, Tier 8, or 8)",
+              },
+            },
+            required: ["caseNumber", "tort", "tier"],
+          },
+        },
+        {
+          name: "sendDepoProveraT8Payload",
+          description:
+            "Send Depo Provera T8 payload to Wilens Law LeadProsper API endpoint. Use for requests like send API/PI for Depo Provera T8 with a case number. No files required for this tier.",
+          parameters: {
+            type: "object",
+            properties: {
+              caseNumber: { type: "string" },
+              tort: {
+                type: "string",
+                description: "Tort/campaign name, e.g. Depo Provera",
+              },
+              tier: {
+                type: "string",
+                description: "Tier value (T8, Tier 8, or 8)",
+              },
+            },
+            required: ["caseNumber", "tort", "tier"],
+          },
+        },
       ],
       function_call: "auto",
     });

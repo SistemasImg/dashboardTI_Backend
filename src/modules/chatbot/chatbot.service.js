@@ -345,6 +345,31 @@ function detectJdcT3SendIntent(message) {
   return { caseNumber: caseMatch[1] };
 }
 
+function detectDepoProveraT8SendIntent(message) {
+  const text = String(message || "").toLowerCase();
+
+  const mentionsSend =
+    text.includes("envi") ||
+    text.includes("manda") ||
+    text.includes("send") ||
+    text.includes("submit");
+
+  const mentionsDepoT8 =
+    text.includes("depo") ||
+    text.includes("provera") ||
+    text.includes("depo provera") ||
+    text.includes("t8") ||
+    text.includes("tier 8") ||
+    text.includes("tier8");
+
+  if (!mentionsSend || !mentionsDepoT8) return null;
+
+  const caseMatch = /\b(0*\d{5,8})\b/.exec(text);
+  if (!caseMatch) return null;
+
+  return { caseNumber: caseMatch[1] };
+}
+
 function getPendingBardT2Approval(sessionData) {
   return sessionData?.last_filters?.pendingBardPortT2 || null;
 }
@@ -857,6 +882,17 @@ exports.processMessage = async (
             field: editIntent.field,
             value: editIntent.value,
           });
+        } else if (pendingRuntime.kind === "depo_t8") {
+          revised =
+            await apiIntegrations.depoProveraT8.reviseDepoProveraT8PayloadField(
+              {
+                caseNumber: pendingRuntime.caseNumber,
+                tort: pendingRuntime.tort,
+                tier: pendingRuntime.tier,
+                field: editIntent.field,
+                value: editIntent.value,
+              },
+            );
         } else {
           revised =
             await apiIntegrations.a4dRideshareT11.reviseA4DRideshareT11PayloadField(
@@ -941,6 +977,13 @@ exports.processMessage = async (
             caseNumber: pendingRuntime.caseNumber,
             attachments: pendingRuntime.attachments || [],
           });
+        } else if (pendingRuntime.kind === "depo_t8") {
+          sendResult =
+            await apiIntegrations.depoProveraT8.sendDepoProveraT8Payload({
+              caseNumber: pendingRuntime.caseNumber,
+              tort: pendingRuntime.tort,
+              tier: pendingRuntime.tier,
+            });
         } else {
           sendResult =
             await apiIntegrations.a4dRideshareT11.sendA4DRideshareT11Payload({
@@ -984,6 +1027,11 @@ exports.processMessage = async (
           ).message;
         } else if (pendingRuntime.kind === "jdc_t3") {
           sentMessage = formatSendJdcT3PayloadResult(
+            sendResult,
+            userLang,
+          ).message;
+        } else if (pendingRuntime.kind === "depo_t8") {
+          sentMessage = formatSendDepoProveraT8PayloadResult(
             sendResult,
             userLang,
           ).message;
@@ -1562,6 +1610,81 @@ exports.processMessage = async (
             break;
           }
 
+          case "prepareDepoProveraT8Payload": {
+            const depoTort = args.tort || "Depo Provera";
+            const depoTier = args.tier || "T8";
+
+            functionResult =
+              await apiIntegrations.depoProveraT8.prepareDepoProveraT8Payload({
+                caseNumber: args.caseNumber,
+                tort: depoTort,
+                tier: depoTier,
+              });
+
+            if (args.caseNumber) {
+              sessionData.last_filters = {
+                ...(sessionData.last_filters || {}),
+                caseNumber: args.caseNumber,
+                tier: depoTier,
+                type: depoTort,
+              };
+              sessionCache[cacheKey].last_filters = sessionData.last_filters;
+            }
+            break;
+          }
+
+          case "sendDepoProveraT8Payload": {
+            const depoTort = args.tort || "Depo Provera";
+            const depoTier = args.tier || "T8";
+
+            const prepared =
+              await apiIntegrations.depoProveraT8.prepareDepoProveraT8Payload({
+                caseNumber: args.caseNumber,
+                tort: depoTort,
+                tier: depoTier,
+              });
+
+            if (prepared.found && prepared.ready) {
+              setRuntimePendingApproval(cacheKey, {
+                kind: "depo_t8",
+                apiLabel: "Depo Provera T8",
+                caseNumber: prepared.caseNumber,
+                tort: depoTort,
+                tier: depoTier,
+                payload: prepared.payload,
+                attachments: [],
+              });
+
+              functionResult = {
+                sent: false,
+                approvalRequired: true,
+                found: true,
+                ready: true,
+                caseNumber: prepared.caseNumber,
+                tort: depoTort,
+                tier: depoTier,
+                payload: prepared.payload,
+                attachments: [],
+              };
+            } else {
+              functionResult = {
+                sent: false,
+                ...prepared,
+              };
+            }
+
+            if (args.caseNumber) {
+              sessionData.last_filters = {
+                ...(sessionData.last_filters || {}),
+                caseNumber: args.caseNumber,
+                tier: depoTier,
+                type: depoTort,
+              };
+              sessionCache[cacheKey].last_filters = sessionData.last_filters;
+            }
+            break;
+          }
+
           case "prepareA4DRideshareT11Payload":
             functionResult =
               await apiIntegrations.a4dRideshareT11.prepareA4DRideshareT11Payload(
@@ -1886,7 +2009,8 @@ exports.processMessage = async (
         (functionName === "sendBardPortT2Payload" ||
           functionName === "sendT9RidesharePayload" ||
           functionName === "sendA4DRideshareT11Payload" ||
-          functionName === "sendJdcT3Payload") &&
+          functionName === "sendJdcT3Payload" ||
+          functionName === "sendDepoProveraT8Payload") &&
         functionResult?.approvalRequired
       ) {
         finalMessage = formattedResponse.message;
@@ -1953,6 +2077,24 @@ exports.processMessage = async (
       }
 
       if (functionName === "sendBardPortT2Payload" && functionResult?.sent) {
+        const sentMessage = i18n(
+          userLang,
+          `Listo, envié correctamente el API del caso ${functionResult.caseNumber}.`,
+          `Done, I sent the API successfully for case ${functionResult.caseNumber}.`,
+        );
+
+        const clientResponseText = functionResult.clientResponse || "N/A";
+        let salesforceSavedText = "N/A";
+        if (typeof functionResult.salesforceUpdated === "boolean") {
+          salesforceSavedText = functionResult.salesforceUpdated
+            ? i18n(userLang, "si", "yes")
+            : i18n(userLang, "no", "no");
+        }
+
+        finalMessage = `${sentMessage}\n\n${i18n(userLang, "HTTP", "HTTP")}: ${functionResult.statusCode || "N/A"}\n${i18n(userLang, "Respuesta del cliente", "Client response")}: ${clientResponseText}\n${i18n(userLang, "Guardado en Salesforce", "Saved in Salesforce")}: ${salesforceSavedText}`;
+      }
+
+      if (functionName === "sendDepoProveraT8Payload" && functionResult?.sent) {
         const sentMessage = i18n(
           userLang,
           `Listo, envié correctamente el API del caso ${functionResult.caseNumber}.`,
@@ -2114,6 +2256,57 @@ exports.processMessage = async (
       return { message: jdcFinalMessage };
     }
 
+    const depoIntent = detectDepoProveraT8SendIntent(normalizedUserMessage);
+    if (depoIntent) {
+      logger.warn(
+        `[Depo Provera T8 Safety Net] Model skipped function call. Forcing preview workflow for case ${depoIntent.caseNumber}`,
+      );
+      const depoPrepared =
+        await apiIntegrations.depoProveraT8.prepareDepoProveraT8Payload({
+          caseNumber: depoIntent.caseNumber,
+          tort: "Depo Provera",
+          tier: "T8",
+        });
+
+      let depoFinalMessage;
+      if (!depoPrepared.found || !depoPrepared.ready) {
+        depoFinalMessage = formatSendDepoProveraT8PayloadResult(
+          { sent: false, ...depoPrepared },
+          userLang,
+        ).message;
+      } else {
+        const pending = {
+          kind: "depo_t8",
+          apiLabel: "Depo Provera T8",
+          caseNumber: depoPrepared.caseNumber,
+          tort: "Depo Provera",
+          tier: "T8",
+          payload: depoPrepared.payload,
+          attachments: [],
+        };
+        setRuntimePendingApproval(cacheKey, pending);
+        depoFinalMessage = formatApiApprovalPreviewMessage(pending, userLang);
+      }
+
+      chatSessionService
+        .appendMessages(
+          userId,
+          [
+            { role: "user", content: userMessage },
+            { role: "assistant", content: depoFinalMessage },
+          ],
+          sessionCache[cacheKey].last_filters,
+          depoPrepared,
+        )
+        .catch((err) =>
+          logger.error(
+            `[ChatSession] Failed to persist messages: ${err.message}`,
+          ),
+        );
+
+      return { message: depoFinalMessage };
+    }
+
     const assistantContent = message.content || "";
 
     chatSessionService
@@ -2263,6 +2456,14 @@ async function formatResult(type, data, lang = "en") {
 
   if (type === "sendBardPortT2Payload") {
     return formatSendBardPortT2PayloadResult(data, lang);
+  }
+
+  if (type === "prepareDepoProveraT8Payload") {
+    return formatPrepareDepoProveraT8PayloadResult(data, lang);
+  }
+
+  if (type === "sendDepoProveraT8Payload") {
+    return formatSendDepoProveraT8PayloadResult(data, lang);
   }
 
   if (type === "prepareA4DRideshareT11Payload") {
@@ -3395,6 +3596,101 @@ function formatSendBardPortT2PayloadResult(data, lang = "en") {
         `No se completó el envío de Bard Port T2 para el case ${data.caseNumber}. ${data.message || data.error || "Revisa la configuración del endpoint"}.`,
         `Bard Port T2 delivery for case ${data.caseNumber} was not completed. ${data.message || data.error || "Check endpoint configuration"}.`,
       )}\n\n${i18n(lang, "HTTP", "HTTP")}: ${httpText}\n${i18n(lang, "Respuesta del cliente", "Client response")}: ${data.clientResponse || "N/A"}\n${i18n(lang, "Guardado en Salesforce", "Saved in Salesforce")}: ${salesforceSavedText}`,
+    };
+  }
+
+  const sfText =
+    typeof data.salesforceUpdated === "boolean"
+      ? data.salesforceUpdated
+        ? i18n(lang, "si", "yes")
+        : i18n(lang, "no", "no")
+      : "N/A";
+
+  return {
+    message: `${i18n(lang, `Listo, envié correctamente el API del caso ${data.caseNumber}.`, `Done, I sent the API successfully for case ${data.caseNumber}.`)}\n\n${i18n(lang, "Respuesta del cliente", "Client response")}: ${data.clientResponse || "N/A"}\n${i18n(lang, "Guardado en Salesforce", "Saved in Salesforce")}: ${sfText}`,
+  };
+}
+
+function formatPrepareDepoProveraT8PayloadResult(data, lang = "en") {
+  if (!data.found) {
+    return {
+      message: i18n(
+        lang,
+        `No encontré el case ${data.caseNumber} para armar el payload de Depo Provera T8.`,
+        `I couldn't find case ${data.caseNumber} to build the Depo Provera T8 payload.`,
+      ),
+    };
+  }
+
+  if (!data.ready) {
+    const fields = (data.missingFields || []).join(", ");
+    return {
+      message: i18n(
+        lang,
+        `⚠️ No se puede armar el payload de Depo Provera T8 para el case ${data.caseNumber}. Los siguientes campos están vacíos o no tienen datos en Salesforce: **${fields}**. Verifica que el registro esté completo antes de continuar.`,
+        `⚠️ Cannot build Depo Provera T8 payload for case ${data.caseNumber}. The following fields are empty or missing in Salesforce: **${fields}**. Please verify the record is complete before proceeding.`,
+      ),
+    };
+  }
+
+  return {
+    message: `
+🧩 **${i18n(lang, "Payload Depo Provera T8 preparado", "Depo Provera T8 payload prepared")}**
+• **Case:** ${data.caseNumber}
+• **Tort:** ${data.tort}
+• **Tier:** ${data.tier}
+
+${i18n(
+  lang,
+  "La estructura JSON quedó lista para envío al endpoint del cliente.",
+  "The JSON structure is ready to be sent to the client endpoint.",
+)}
+`,
+  };
+}
+
+function formatSendDepoProveraT8PayloadResult(data, lang = "en") {
+  if (!data.found) {
+    return {
+      message: i18n(
+        lang,
+        `No encontré el case ${data.caseNumber}. No pude enviar el payload de Depo Provera T8.`,
+        `I couldn't find case ${data.caseNumber}. I could not send the Depo Provera T8 payload.`,
+      ),
+    };
+  }
+
+  if (!data.ready) {
+    const fields = (data.missingFields || []).join(", ");
+    return {
+      message: i18n(
+        lang,
+        `⚠️ No se puede enviar el payload de Depo Provera T8 para el case ${data.caseNumber}. Los siguientes campos están vacíos o no tienen datos en Salesforce: **${fields}**. Verifica que el registro esté completo antes de continuar.`,
+        `⚠️ Cannot send Depo Provera T8 payload for case ${data.caseNumber}. The following fields are empty or missing in Salesforce: **${fields}**. Please verify the record is complete before proceeding.`,
+      ),
+    };
+  }
+
+  if (data.approvalRequired) {
+    return {
+      message: formatApiApprovalPreviewMessage(data, lang),
+    };
+  }
+
+  if (!data.sent) {
+    const sfText =
+      typeof data.salesforceUpdated === "boolean"
+        ? data.salesforceUpdated
+          ? i18n(lang, "si", "yes")
+          : i18n(lang, "no", "no")
+        : "N/A";
+
+    return {
+      message: `${i18n(
+        lang,
+        `No se completó el envío de Depo Provera T8 para el case ${data.caseNumber}. ${data.message || data.error || "Revisa la configuración del endpoint"}.`,
+        `Depo Provera T8 delivery for case ${data.caseNumber} was not completed. ${data.message || data.error || "Check endpoint configuration"}.`,
+      )}\n\n${i18n(lang, "HTTP", "HTTP")}: ${data.statusCode || "N/A"}\n${i18n(lang, "Respuesta del cliente", "Client response")}: ${data.clientResponse || "N/A"}\n${i18n(lang, "Guardado en Salesforce", "Saved in Salesforce")}: ${sfText}`,
     };
   }
 
