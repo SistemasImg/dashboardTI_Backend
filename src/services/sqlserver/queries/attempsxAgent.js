@@ -1,12 +1,14 @@
 /**
- * Build query to get agents attempts for a specific date
- * @param {String} date - Date in format YYYY-MM-DD (optional, defaults to today)
+ * Build query to get agents attempts for a date range
+ * @param {String} startDate - Start date in format YYYY-MM-DD (optional, defaults to today)
+ * @param {String} endDate - End date in format YYYY-MM-DD (optional, defaults to today)
  * @returns {String} SQL query string
  */
-function buildAgentsAttemptsQuery(date = null) {
-  // If no date provided, use today's date
-  const dateFilter = date ? `'${date}'` : "CONVERT(DATE, GETDATE())";
-  
+function buildAgentsAttemptsQuery(startDate = null, endDate = null) {
+  // If no dates provided, use today's date for both
+  const start = startDate ? `'${startDate}'` : "CONVERT(DATE, GETDATE())";
+  const end = endDate ? `'${endDate}'` : "CONVERT(DATE, GETDATE())";
+
   return `
 SELECT 
     CONVERT(DATE, TIMESTAMP) AS [DATE], 
@@ -31,7 +33,7 @@ SELECT
 	REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(ANI, '+1', ''), '(', ''), ')', ''), '-', ''), ' ', ''), ':', '') AS [PHONE NUMBER],
 	COUNT(ANI) AS ATTEMPTS
 FROM imgdb.INTAKE.Call_Records_five9
-WHERE CONVERT(DATE, TIMESTAMP) = CONVERT(DATE, ${dateFilter})
+WHERE CONVERT(DATE, TIMESTAMP) BETWEEN CONVERT(DATE, ${start}) AND CONVERT(DATE, ${end})
 AND (DISPOSITION IS NULL OR DISPOSITION NOT IN ('Inbound Queue Timeout Drop', 'Lead To Be Called', 'Agent Not Available','Inbound After Hours Drop',
 'Outbound Pre-Routing Drop','Answering Machine Msg Played','Outbound Auto Dial'))
 GROUP BY CONVERT(DATE, TIMESTAMP), DATEPART(HOUR, TIMESTAMP), [AGENT NAME], REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(ANI, '+1', ''), '(', ''), ')', ''), '-', ''), ' ', ''), ':', '')

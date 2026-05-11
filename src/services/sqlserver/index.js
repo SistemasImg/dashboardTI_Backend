@@ -34,14 +34,19 @@ async function getAttemptsTotal() {
 }
 
 /**
- * Get agents attempts for a specific date
- * @param {String} date - Date in format YYYY-MM-DD (optional, defaults to today)
+ * Get agents attempts for a date range
+ * @param {String} startDate - Start date in format YYYY-MM-DD (optional, defaults to today)
+ * @param {String} endDate - End date in format YYYY-MM-DD (optional, defaults to today)
  * @returns {Array} Array of agents attempts records
  */
-async function getAgentsAttempts(date = null) {
+async function getAgentsAttempts(startDate = null, endDate = null) {
   try {
+    const dateLabel =
+      startDate && endDate && startDate !== endDate
+        ? `from ${startDate} to ${endDate}`
+        : startDate || "today";
     logger.info(
-      `📡 Connecting to SQL Server for agents attempts${date ? " for date: " + date : "..."}`,
+      `📡 Connecting to SQL Server for agents attempts (${dateLabel})...`,
     );
 
     const pool = await sqlServerPool.getPool();
@@ -50,7 +55,7 @@ async function getAgentsAttempts(date = null) {
 
     const { recordsets } = await pool
       .request()
-      .query(buildAgentsAttemptsQuery(date));
+      .query(buildAgentsAttemptsQuery(startDate, endDate));
 
     const rows = recordsets[0] || [];
 

@@ -23,6 +23,20 @@ function createEmptyHourlyAttempts() {
   }, {});
 }
 
+function toDateLabel(value) {
+  if (!value) return "No date";
+
+  if (value instanceof Date && !Number.isNaN(value.getTime())) {
+    return value.toISOString().slice(0, 10);
+  }
+
+  if (typeof value === "string") {
+    return value.slice(0, 10);
+  }
+
+  return String(value);
+}
+
 function getPrintableCellValue(cellValue) {
   if (cellValue == null) {
     return "";
@@ -107,10 +121,10 @@ function buildCallCenterSummaryMatrix(records) {
 }
 
 /**
- * Build a detail matrix by Agent, Phone Number, Case Number, Supplier and Type for a given call center.
+ * Build a detail matrix by Date, Agent, Phone Number, Case Number, Supplier and Type for a given call center.
  * @param {Array} records - Raw records from database
- * @param {String} callCenterFilter - Call center to filter by
- * @returns {Array} One row per agent+phone+case+supplier+type combination
+ * @param {String} callCenterFilter - Call center to filter by (null = all)
+ * @returns {Array} One row per date+agent+phone+case+supplier+type combination
  */
 function buildAgentsAttemptsMatrix(records, callCenterFilter = null) {
   const grouped = new Map();
@@ -132,16 +146,18 @@ function buildAgentsAttemptsMatrix(records, callCenterFilter = null) {
       return;
     }
 
+    const date = toDateLabel(record.DATE);
     const agentName = record["AGENT NAME"] || "No agent";
     const phoneNumber = record["PHONE NUMBER"] || "No number";
     const caseNumber = record.CASE_NUMBER || "No case";
     const supplier = record.SUPPLIER || "No supplier";
     const type = record.TYPE || "No type";
     const attempts = Number(record.ATTEMPTS) || 0;
-    const key = `${agentName}__${phoneNumber}__${caseNumber}__${supplier}__${type}`;
+    const key = `${date}__${agentName}__${phoneNumber}__${caseNumber}__${supplier}__${type}`;
 
     if (!grouped.has(key)) {
       grouped.set(key, {
+        date,
         agentName,
         phoneNumber,
         caseNumber,
@@ -163,6 +179,92 @@ function buildAgentsAttemptsMatrix(records, callCenterFilter = null) {
       ),
     }))
     .sort((a, b) => {
+      if (a.date !== b.date) {
+        return a.date.localeCompare(b.date);
+      }
+      if (a.agentName !== b.agentName) {
+        return a.agentName.localeCompare(b.agentName);
+      }
+      if (a.phoneNumber !== b.phoneNumber) {
+        return a.phoneNumber.localeCompare(b.phoneNumber, undefined, {
+          numeric: true,
+          sensitivity: "base",
+        });
+      }
+      if (a.caseNumber !== b.caseNumber) {
+        return a.caseNumber.localeCompare(b.caseNumber, undefined, {
+          numeric: true,
+          sensitivity: "base",
+        });
+      }
+      if (a.supplier !== b.supplier) {
+        return a.supplier.localeCompare(b.supplier);
+      }
+      return a.type.localeCompare(b.type);
+    });
+}
+
+/**
+ * Build a combined matrix with Date, Call Center, Agent, Phone Number, Case Number, Supplier and Type.
+ * Used for the "All" sheet that contains all data from all call centers.
+ * @param {Array} records - Raw records from database
+ * @returns {Array} One row per date+callcenter+agent+phone+case+supplier+type combination
+ */
+function buildAllAttemptsMatrix(records) {
+  const grouped = new Map();
+
+  records.forEach((record) => {
+    const hour = Number(record.HOUR);
+
+    if (
+      !Number.isInteger(hour) ||
+      hour < REPORT_START_HOUR ||
+      hour > REPORT_END_HOUR
+    ) {
+      return;
+    }
+
+    const date = toDateLabel(record.DATE);
+    const callCenter = record["CALL CENTER"] || "No call center";
+    const agentName = record["AGENT NAME"] || "No agent";
+    const phoneNumber = record["PHONE NUMBER"] || "No number";
+    const caseNumber = record.CASE_NUMBER || "No case";
+    const supplier = record.SUPPLIER || "No supplier";
+    const type = record.TYPE || "No type";
+    const attempts = Number(record.ATTEMPTS) || 0;
+    const key = `${date}__${callCenter}__${agentName}__${phoneNumber}__${caseNumber}__${supplier}__${type}`;
+
+    if (!grouped.has(key)) {
+      grouped.set(key, {
+        date,
+        callCenter,
+        agentName,
+        phoneNumber,
+        caseNumber,
+        supplier,
+        type,
+        hourlyAttempts: createEmptyHourlyAttempts(),
+      });
+    }
+
+    grouped.get(key).hourlyAttempts[hour] += attempts;
+  });
+
+  return Array.from(grouped.values())
+    .map((row) => ({
+      ...row,
+      totalAttempts: REPORT_HOURS.reduce(
+        (sum, hour) => sum + row.hourlyAttempts[hour],
+        0,
+      ),
+    }))
+    .sort((a, b) => {
+      if (a.date !== b.date) {
+        return a.date.localeCompare(b.date);
+      }
+      if (a.callCenter !== b.callCenter) {
+        return a.callCenter.localeCompare(b.callCenter);
+      }
       if (a.agentName !== b.agentName) {
         return a.agentName.localeCompare(b.agentName);
       }
@@ -325,6 +427,7 @@ const SUMMARY_COLUMNS = [
 ];
 
 const DETAIL_COLUMNS = [
+  { header: "Date", key: "date", width: 12 },
   { header: "Agent", key: "agent_name", width: 22 },
   { header: "Phone Number", key: "phone_number", width: 15 },
   { header: "Case Number", key: "case_number", width: 14 },
@@ -334,6 +437,17 @@ const DETAIL_COLUMNS = [
   ...HOUR_COLUMNS,
 ];
 
+const ALL_DETAILS_COLUMNS = [
+  { header: "Date", key: "date", width: 12 },
+  { header: "Call Center", key: "call_center", width: 16 },
+  { header: "Agent", key: "agent_name", width: 22 },
+  { header: "Phone Number", key: "phone_number", width: 15 },
+  { header: "Case Number", key: "case_number", width: 14 },
+  { header: "Supplier", key: "supplier", width: 22 },
+  { header: "Type", key: "type", width: 16 },
+  { header: "Total", key: "total", width: 8 },
+  ...HOUR_COLUMNS,
+];
 /**
  * Generate Excel report for agents attempts (multi-sheet)
  * Sheet 1: summary by call center (attempts per hour)
@@ -390,6 +504,7 @@ exports.generateAgentsAttemptsExcel = async (records, date) => {
         DETAIL_COLUMNS,
         detailData,
         (row) => ({
+          date: row.date ?? "",
           agent_name: row.agentName ?? "",
           phone_number: row.phoneNumber ?? "",
           case_number: row.caseNumber ?? "",
@@ -397,7 +512,33 @@ exports.generateAgentsAttemptsExcel = async (records, date) => {
           type: row.type ?? "",
           total: row.totalAttempts,
         }),
-        6,
+        7,
+        true,
+      );
+    }
+
+    // ── Sheet: All (combined from all call centers) ────────────────────────────
+    const allData = buildAllAttemptsMatrix(records);
+
+    if (allData.length > 0) {
+      const allSheet = workbook.addWorksheet("All");
+
+      populateMatrixSheet(
+        allSheet,
+        `All Call Centers - Attempts by Agent and Hour - ${date}`,
+        ALL_DETAILS_COLUMNS,
+        allData,
+        (row) => ({
+          date: row.date ?? "",
+          call_center: row.callCenter ?? "",
+          agent_name: row.agentName ?? "",
+          phone_number: row.phoneNumber ?? "",
+          case_number: row.caseNumber ?? "",
+          supplier: row.supplier ?? "",
+          type: row.type ?? "",
+          total: row.totalAttempts,
+        }),
+        8,
         true,
       );
     }
