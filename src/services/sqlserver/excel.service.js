@@ -37,6 +37,74 @@ function toDateLabel(value) {
   return String(value);
 }
 
+function toLongSpanishDate(value) {
+  const shortDate = toDateLabel(value);
+  const [year, month, day] = shortDate.split("-").map(Number);
+
+  if (
+    !Number.isInteger(year) ||
+    !Number.isInteger(month) ||
+    !Number.isInteger(day)
+  ) {
+    return shortDate;
+  }
+
+  const monthNames = [
+    "enero",
+    "febrero",
+    "marzo",
+    "abril",
+    "mayo",
+    "junio",
+    "julio",
+    "agosto",
+    "septiembre",
+    "octubre",
+    "noviembre",
+    "diciembre",
+  ];
+
+  const monthName = monthNames[month - 1];
+  if (!monthName) {
+    return shortDate;
+  }
+
+  return `${day} de ${monthName} ${year}`;
+}
+
+function toSpanishWeekdayLongDate(value) {
+  const shortDate = toDateLabel(value);
+  const [year, month, day] = shortDate.split("-").map(Number);
+
+  if (
+    !Number.isInteger(year) ||
+    !Number.isInteger(month) ||
+    !Number.isInteger(day)
+  ) {
+    return shortDate;
+  }
+
+  const utcDate = new Date(Date.UTC(year, month - 1, day));
+  if (Number.isNaN(utcDate.getTime())) {
+    return shortDate;
+  }
+
+  const weekdayNames = [
+    "domingo",
+    "lunes",
+    "martes",
+    "miercoles",
+    "jueves",
+    "viernes",
+    "sabado",
+  ];
+
+  const weekdayName = weekdayNames[utcDate.getUTCDay()] || "";
+  const longDate = toLongSpanishDate(shortDate);
+
+  return weekdayName ? `${weekdayName} ${longDate}` : longDate;
+}
+
 function getPrintableCellValue(cellValue) {
   if (cellValue == null) {
     return "";
@@ -205,86 +273,154 @@ function buildAgentsAttemptsMatrix(records, callCenterFilter = null) {
 }
 
 /**
- * Build a combined matrix with Date, Call Center, Agent, Phone Number, Case Number, Supplier and Type.
+ * Build a combined matrix for the "All" sheet grouped by Number + Case + Substatus + Supplier + Type.
  * Used for the "All" sheet that contains all data from all call centers.
  * @param {Array} records - Raw records from database
- * @returns {Array} One row per date+callcenter+agent+phone+case+supplier+type combination
+ * @returns {Object} { rows, dateKeys }
  */
 function buildAllAttemptsMatrix(records) {
   const grouped = new Map();
+  const dateSet = new Set();
 
   records.forEach((record) => {
-    const hour = Number(record.HOUR);
-
-    if (
-      !Number.isInteger(hour) ||
-      hour < REPORT_START_HOUR ||
-      hour > REPORT_END_HOUR
-    ) {
-      return;
-    }
-
     const date = toDateLabel(record.DATE);
-    const callCenter = record["CALL CENTER"] || "No call center";
-    const agentName = record["AGENT NAME"] || "No agent";
     const phoneNumber = record["PHONE NUMBER"] || "No number";
     const caseNumber = record.CASE_NUMBER || "No case";
+    const substatus = record.SUBSTATUS || "No substatus";
     const supplier = record.SUPPLIER || "No supplier";
     const type = record.TYPE || "No type";
     const attempts = Number(record.ATTEMPTS) || 0;
-    const key = `${date}__${callCenter}__${agentName}__${phoneNumber}__${caseNumber}__${supplier}__${type}`;
+    const key = `${phoneNumber}__${caseNumber}__${substatus}__${supplier}__${type}`;
+
+    dateSet.add(date);
 
     if (!grouped.has(key)) {
       grouped.set(key, {
-        date,
-        callCenter,
-        agentName,
         phoneNumber,
         caseNumber,
+        substatus,
         supplier,
         type,
-        hourlyAttempts: createEmptyHourlyAttempts(),
+        totalAttempts: 0,
+        attemptsByDate: {},
       });
     }
 
-    grouped.get(key).hourlyAttempts[hour] += attempts;
+    const row = grouped.get(key);
+    row.totalAttempts += attempts;
+    row.attemptsByDate[date] = (row.attemptsByDate[date] || 0) + attempts;
   });
 
-  return Array.from(grouped.values())
-    .map((row) => ({
-      ...row,
-      totalAttempts: REPORT_HOURS.reduce(
-        (sum, hour) => sum + row.hourlyAttempts[hour],
-        0,
-      ),
-    }))
-    .sort((a, b) => {
-      if (a.date !== b.date) {
-        return a.date.localeCompare(b.date);
-      }
-      if (a.callCenter !== b.callCenter) {
-        return a.callCenter.localeCompare(b.callCenter);
-      }
-      if (a.agentName !== b.agentName) {
-        return a.agentName.localeCompare(b.agentName);
-      }
-      if (a.phoneNumber !== b.phoneNumber) {
-        return a.phoneNumber.localeCompare(b.phoneNumber, undefined, {
-          numeric: true,
-          sensitivity: "base",
-        });
-      }
-      if (a.caseNumber !== b.caseNumber) {
-        return a.caseNumber.localeCompare(b.caseNumber, undefined, {
-          numeric: true,
-          sensitivity: "base",
-        });
-      }
-      if (a.supplier !== b.supplier) {
-        return a.supplier.localeCompare(b.supplier);
-      }
-      return a.type.localeCompare(b.type);
+  const rows = Array.from(grouped.values()).sort((a, b) => {
+    if (a.phoneNumber !== b.phoneNumber) {
+      return a.phoneNumber.localeCompare(b.phoneNumber, undefined, {
+        numeric: true,
+        sensitivity: "base",
+      });
+    }
+    if (a.caseNumber !== b.caseNumber) {
+      return a.caseNumber.localeCompare(b.caseNumber, undefined, {
+        numeric: true,
+        sensitivity: "base",
+      });
+    }
+    if (a.substatus !== b.substatus) {
+      return a.substatus.localeCompare(b.substatus);
+    }
+    if (a.supplier !== b.supplier) {
+      return a.supplier.localeCompare(b.supplier);
+    }
+    return a.type.localeCompare(b.type);
+  });
+
+  const dateKeys = Array.from(dateSet.values()).sort((a, b) =>
+    a.localeCompare(b),
+  );
+
+  return { rows, dateKeys };
+}
+
+function populateAllDailySheet(worksheet, title, matrixRows, dateKeys) {
+  const dateColumns = dateKeys.map((dateKey) => ({
+    header: toSpanishWeekdayLongDate(dateKey),
+    key: `date_${dateKey.replaceAll(/\D/g, "")}`,
+    width: 20,
+    dateKey,
+  }));
+
+  const columnDefs = [
+    { header: "Phone Number", key: "phone_number", width: 15 },
+    { header: "Case Number", key: "case_number", width: 14 },
+    { header: "Substatus", key: "substatus", width: 20 },
+    { header: "Supplier", key: "supplier", width: 22 },
+    { header: "Type", key: "type", width: 16 },
+    ...dateColumns.map(({ header, key, width }) => ({ header, key, width })),
+    { header: "Total Attempts", key: "total_attempts", width: 14 },
+  ];
+
+  const totalAttempts = matrixRows.reduce(
+    (sum, row) => sum + Number(row.totalAttempts || 0),
+    0,
+  );
+
+  worksheet.columns = columnDefs.map(({ key, width }) => ({ key, width }));
+  addTitleBlock(worksheet, title, columnDefs.length, totalAttempts);
+
+  const headerRow = addHeaderRow(
+    worksheet,
+    columnDefs.map((col) => col.header),
+  );
+
+  matrixRows.forEach((row, index) => {
+    const rowValues = {
+      phone_number: row.phoneNumber ?? "",
+      case_number: row.caseNumber ?? "",
+      substatus: row.substatus ?? "",
+      supplier: row.supplier ?? "",
+      type: row.type ?? "",
+      total_attempts: row.totalAttempts ?? 0,
+    };
+
+    dateColumns.forEach((col) => {
+      rowValues[col.key] = Number(row.attemptsByDate?.[col.dateKey] || 0);
     });
+
+    const worksheetRow = worksheet.addRow(rowValues);
+
+    if (index % 2 === 0) {
+      worksheetRow.fill = {
+        type: "pattern",
+        pattern: "solid",
+        fgColor: { argb: "FFF7F9FC" },
+      };
+    }
+  });
+
+  const totalsByDate = dateColumns.reduce((acc, col) => {
+    acc[col.key] = matrixRows.reduce(
+      (sum, row) => sum + Number(row.attemptsByDate?.[col.dateKey] || 0),
+      0,
+    );
+    return acc;
+  }, {});
+
+  const totalRow = worksheet.addRow({
+    phone_number: "TOTAL",
+    ...totalsByDate,
+    total_attempts: totalAttempts,
+  });
+  totalRow.font = { bold: true, color: { argb: "FF1F1F1F" } };
+  totalRow.fill = {
+    type: "pattern",
+    pattern: "solid",
+    fgColor: { argb: "FFE2F0D9" },
+  };
+
+  worksheet.views = [{ state: "frozen", ySplit: 4, xSplit: 5 }];
+  worksheet.autoFilter = {
+    from: { row: headerRow.number, column: 1 },
+    to: { row: headerRow.number, column: columnDefs.length },
+  };
 }
 
 /**
@@ -437,17 +573,6 @@ const DETAIL_COLUMNS = [
   ...HOUR_COLUMNS,
 ];
 
-const ALL_DETAILS_COLUMNS = [
-  { header: "Date", key: "date", width: 12 },
-  { header: "Call Center", key: "call_center", width: 16 },
-  { header: "Agent", key: "agent_name", width: 22 },
-  { header: "Phone Number", key: "phone_number", width: 15 },
-  { header: "Case Number", key: "case_number", width: 14 },
-  { header: "Supplier", key: "supplier", width: 22 },
-  { header: "Type", key: "type", width: 16 },
-  { header: "Total", key: "total", width: 8 },
-  ...HOUR_COLUMNS,
-];
 /**
  * Generate Excel report for agents attempts (multi-sheet)
  * Sheet 1: summary by call center (attempts per hour)
@@ -520,26 +645,13 @@ exports.generateAgentsAttemptsExcel = async (records, date) => {
     // ── Sheet: All (combined from all call centers) ────────────────────────────
     const allData = buildAllAttemptsMatrix(records);
 
-    if (allData.length > 0) {
+    if (allData.rows.length > 0) {
       const allSheet = workbook.addWorksheet("All");
-
-      populateMatrixSheet(
+      populateAllDailySheet(
         allSheet,
-        `All Call Centers - Attempts by Agent and Hour - ${date}`,
-        ALL_DETAILS_COLUMNS,
-        allData,
-        (row) => ({
-          date: row.date ?? "",
-          call_center: row.callCenter ?? "",
-          agent_name: row.agentName ?? "",
-          phone_number: row.phoneNumber ?? "",
-          case_number: row.caseNumber ?? "",
-          supplier: row.supplier ?? "",
-          type: row.type ?? "",
-          total: row.totalAttempts,
-        }),
-        8,
-        true,
+        `All Call Centers - Attempts by Date - ${date}`,
+        allData.rows,
+        allData.dateKeys,
       );
     }
 

@@ -89,9 +89,20 @@ async function getAgentsAttempts(startDate = null, endDate = null) {
       };
     });
 
+    const filteredRows = enrichedRows.filter((row) =>
+      String(row.CASE_NUMBER || "").trim(),
+    );
+
+    const removedRows = enrichedRows.length - filteredRows.length;
+    if (removedRows > 0) {
+      logger.info(
+        `Filtered ${removedRows} agents-attempts rows without CASE_NUMBER (invalid or unmapped phone).`,
+      );
+    }
+
     logger.info("✅ Agents attempts query executed successfully");
 
-    return enrichedRows;
+    return filteredRows;
   } catch (error) {
     logger.error("❌ SQL Server agents attempts query failed", {
       message: error.message,
