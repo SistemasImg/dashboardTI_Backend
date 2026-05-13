@@ -12,6 +12,7 @@ const sendApiRecords = require("./sendApiRecords");
 const MediaFiles = require("./mediaFile");
 const CallCenter = require("./callCenter");
 const ChatSession = require("./chatSession.model");
+const CaseComment = require("./caseComment");
 
 // ============================
 // ROLES ↔ USERS
@@ -87,4 +88,5 @@ module.exports = {
   sendApiRecords,
   MediaFiles,
   CallCenter,
+  CaseComment,
 };
