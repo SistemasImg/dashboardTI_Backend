@@ -13,6 +13,8 @@ const MediaFiles = require("./mediaFile");
 const CallCenter = require("./callCenter");
 const ChatSession = require("./chatSession.model");
 const CaseComment = require("./caseComment");
+const TranscriptionJob = require("./transcriptionJob");
+const TranscriptionSegment = require("./transcriptionSegment");
 
 // ============================
 // ROLES ↔ USERS
@@ -74,6 +76,19 @@ User.hasMany(CaseAssignment, {
   as: "createdAssignments",
 });
 
+// ============================
+// TRANSCRIPTION JOBS ↔ SEGMENTS
+// ============================
+TranscriptionSegment.belongsTo(TranscriptionJob, {
+  foreignKey: "job_id",
+  as: "job",
+});
+
+TranscriptionJob.hasMany(TranscriptionSegment, {
+  foreignKey: "job_id",
+  as: "segments",
+});
+
 module.exports = {
   User,
   Role,
@@ -89,4 +104,6 @@ module.exports = {
   MediaFiles,
   CallCenter,
   CaseComment,
+  TranscriptionJob,
+  TranscriptionSegment,
 };

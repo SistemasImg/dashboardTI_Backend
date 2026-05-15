@@ -53,6 +53,7 @@ app.use("/sqlserver", require("./routes/sqlserver/insertApi.routes"));
 app.use("/sqlserver", require("./routes/sqlserver/queries.routes"));
 app.use("/meta", require("./routes/meta.routes"));
 app.use("/public-leads", require("./routes/publicLead.routes"));
+app.use("/transcriptions", require("./routes/transcription.routes"));
 
 // ------------------------------
 // HEALTH CHECK (Render / Monitoring)

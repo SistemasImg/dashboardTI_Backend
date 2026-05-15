@@ -522,4 +522,5 @@ async function streamRecordingsZip({
 module.exports = {
   streamSingleRecordingProxy,
   streamRecordingsZip,
+  fetchRecordingStream,
 };
