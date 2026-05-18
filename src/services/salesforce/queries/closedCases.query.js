@@ -16,6 +16,82 @@ function buildClosedDateRange(date) {
   };
 }
 
+function buildSalesforceDayRange(date) {
+  const timezone = process.env.SALESFORCE_TIMEZONE || "America/Los_Angeles";
+  const input = String(date || "").trim();
+  const [year, month, day] = input.split("-").map(Number);
+
+  if (!year || !month || !day) {
+    throw Object.assign(new Error("date is required in YYYY-MM-DD format"), {
+      statusCode: 400,
+    });
+  }
+
+  const formatUtcInstantInTimeZone = (utcInstant) => {
+    const parts = new Intl.DateTimeFormat("en-US", {
+      timeZone: timezone,
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+      hourCycle: "h23",
+    }).formatToParts(utcInstant);
+
+    const partMap = Object.fromEntries(
+      parts
+        .filter((part) => part.type !== "literal")
+        .map((part) => [part.type, part.value]),
+    );
+
+    return {
+      year: Number(partMap.year),
+      month: Number(partMap.month),
+      day: Number(partMap.day),
+      hour: Number(partMap.hour),
+      minute: Number(partMap.minute),
+      second: Number(partMap.second),
+    };
+  };
+
+  const getUtcOffsetMinutes = (utcInstant) => {
+    const local = formatUtcInstantInTimeZone(utcInstant);
+    const localAsUtc = Date.UTC(
+      local.year,
+      local.month - 1,
+      local.day,
+      local.hour,
+      local.minute,
+      local.second,
+    );
+
+    return Math.round((localAsUtc - utcInstant.getTime()) / 60000);
+  };
+
+  const getDayStartUtc = (targetYear, targetMonth, targetDay) => {
+    const approxUtcMidday = new Date(
+      Date.UTC(targetYear, targetMonth - 1, targetDay, 12, 0, 0),
+    );
+    const offsetMinutes = getUtcOffsetMinutes(approxUtcMidday);
+
+    return new Date(
+      Date.UTC(targetYear, targetMonth - 1, targetDay, 0, 0, 0) -
+        offsetMinutes * 60000,
+    );
+  };
+
+  const start = getDayStartUtc(year, month, day);
+  const nextDate = new Date(Date.UTC(year, month - 1, day + 1, 12, 0, 0));
+  const nextParts = formatUtcInstantInTimeZone(nextDate);
+  const end = getDayStartUtc(nextParts.year, nextParts.month, nextParts.day);
+
+  return {
+    start: start.toISOString().replace(".000", ""),
+    end: end.toISOString().replace(".000", ""),
+  };
+}
+
 function escapeSoqlString(value) {
   return String(value).replaceAll("'", String.raw`\'`);
 }
@@ -95,7 +171,7 @@ ${typeFilter}
  * @param {string} date - ISO date string (YYYY-MM-DD)
  */
 function buildSignedCasesBySentDateQuery(date, caseType) {
-  const { start, end } = buildClosedDateRange(date);
+  const { start, end } = buildSalesforceDayRange(date);
   const typeFilter = buildOptionalCaseTypeFilter(caseType);
 
   return `
@@ -108,10 +184,10 @@ SELECT
   Phone_Numbercontact__c,
   Substatus__c,
   Type,
-  Tier__c
+  Tier__c,
+  Sent_Date2__c
 FROM Case
-WHERE Status = 'Sent'
-  AND Sent_Date2__c >= ${start}
+WHERE Sent_Date2__c >= ${start}
   AND Sent_Date2__c < ${end}
 ${typeFilter}
 

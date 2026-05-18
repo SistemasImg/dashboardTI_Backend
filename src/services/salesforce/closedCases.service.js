@@ -64,7 +64,6 @@ async function getClosedCasesReport(date, reportType, caseType) {
       buildSignedCasesBySentDateQuery(date, caseType),
     );
   }
-
   const userRecords = await runSoqlQuery(sf, buildUsersQuery());
 
   // Build owner id → name map
