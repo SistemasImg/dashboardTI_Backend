@@ -160,11 +160,14 @@ async function searchVicidialLeadByPhone(phone) {
   const enrichedRecords = await Promise.all(
     merged.map((item) => enrichLeadWithRecordings(item)),
   );
+  const filteredRecords = enrichedRecords.filter(
+    (item) => Array.isArray(item.recordings) && item.recordings.length > 0,
+  );
 
   return {
     phone: phoneDigits,
-    total: enrichedRecords.length,
-    records: enrichedRecords,
+    total: filteredRecords.length,
+    records: filteredRecords,
   };
 }
 

@@ -13,6 +13,7 @@ const MediaFiles = require("./mediaFile");
 const CallCenter = require("./callCenter");
 const ChatSession = require("./chatSession.model");
 const CaseComment = require("./caseComment");
+const ClosedCaseWorkStatus = require("./closedCaseWorkStatus");
 const TranscriptionJob = require("./transcriptionJob");
 const TranscriptionSegment = require("./transcriptionSegment");
 
@@ -104,6 +105,7 @@ module.exports = {
   MediaFiles,
   CallCenter,
   CaseComment,
+  ClosedCaseWorkStatus,
   TranscriptionJob,
   TranscriptionSegment,
 };

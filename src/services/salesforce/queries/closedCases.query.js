@@ -16,14 +16,26 @@ function buildClosedDateRange(date) {
   };
 }
 
+function escapeSoqlString(value) {
+  return String(value).replaceAll("'", String.raw`\'`);
+}
+
+function buildOptionalCaseTypeFilter(caseType) {
+  const normalized = String(caseType || "").trim();
+  if (!normalized) return "";
+
+  return `\n  AND Type = '${escapeSoqlString(normalized)}'`;
+}
+
 /**
  * Builds a SOQL query for Disqualified cases.
  * Status = 'Closed', Substatus__c = 'Disqualified'
  * Includes Reason_for_DQ__c
  * @param {string} date - ISO date string (YYYY-MM-DD)
  */
-function buildDisqualifiedCasesQuery(date) {
+function buildDisqualifiedCasesQuery(date, caseType) {
   const { start, end } = buildClosedDateRange(date);
+  const typeFilter = buildOptionalCaseTypeFilter(caseType);
 
   return `
 SELECT
@@ -42,6 +54,7 @@ WHERE Status = 'Closed'
   AND Substatus__c = 'Disqualified'
   AND ClosedDate >= ${start}
   AND ClosedDate < ${end}
+${typeFilter}
 `;
 }
 
@@ -51,8 +64,9 @@ WHERE Status = 'Closed'
  * Includes Reason_for_Doesn_t_meet_criteria__c
  * @param {string} date - ISO date string (YYYY-MM-DD)
  */
-function buildRejectedCasesQuery(date) {
+function buildRejectedCasesQuery(date, caseType) {
   const { start, end } = buildClosedDateRange(date);
+  const typeFilter = buildOptionalCaseTypeFilter(caseType);
 
   return `
 SELECT
@@ -71,6 +85,7 @@ WHERE Status = 'Closed'
   AND Substatus__c = 'Reject'
   AND ClosedDate >= ${start}
   AND ClosedDate < ${end}
+${typeFilter}
 `;
 }
 
@@ -79,8 +94,9 @@ WHERE Status = 'Closed'
  * Status = 'Sent', Substatus__c = 'Signed'
  * @param {string} date - ISO date string (YYYY-MM-DD)
  */
-function buildSignedCasesBySentDateQuery(date) {
-  const { start, end } = buildClosedDateRange(date);
+function buildSignedCasesBySentDateQuery(date, caseType) {
+  const { start } = buildClosedDateRange(date);
+  const typeFilter = buildOptionalCaseTypeFilter(caseType);
 
   return `
 SELECT
@@ -96,6 +112,7 @@ SELECT
 FROM Case
 WHERE Status = 'Sent'
   AND Sent_Date2__c >= ${start}
+${typeFilter}
 `;
 }
 
@@ -106,8 +123,9 @@ WHERE Status = 'Sent'
  * Note: Only used if Start_Date__c field exists in Salesforce.
  * @param {string} date - ISO date string (YYYY-MM-DD)
  */
-function buildSignedCasesByStartDateQuery(date) {
-  const { start, end } = buildClosedDateRange(date);
+function buildSignedCasesByStartDateQuery(date, caseType) {
+  const { start } = buildClosedDateRange(date);
+  const typeFilter = buildOptionalCaseTypeFilter(caseType);
 
   return `
 SELECT
@@ -123,6 +141,7 @@ SELECT
 FROM Case
 WHERE Status = 'Sent'
   AND Start_Date__c >= ${start}
+${typeFilter}
 `;
 }
 

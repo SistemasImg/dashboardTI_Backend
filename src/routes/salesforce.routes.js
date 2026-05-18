@@ -20,6 +20,12 @@ const {
   deleteComment,
 } = require("../controllers/salesforce/closedCasesComment.controller");
 const closedCaseCommentSchema = require("../schemas/closedCaseComment.schema");
+const closedCasesMarkWorkedSchema = require("../schemas/closedCasesMarkWorked.schema");
+const closedCasesMarkWorkedByFilterSchema = require("../schemas/closedCasesMarkWorkedByFilter.schema");
+const {
+  markClosedCasesWorkedController,
+  markClosedCasesWorkedByFilterController,
+} = require("../controllers/salesforce/closedCasesWorkStatus.controller");
 
 // All protected
 router.use(authMiddleware);
@@ -40,5 +46,15 @@ router.post(
   upsertComment,
 );
 router.delete("/closed-cases/comment/:caseNumber", deleteComment);
+router.post(
+  "/closed-cases/mark-worked",
+  validate(closedCasesMarkWorkedSchema),
+  markClosedCasesWorkedController,
+);
+router.post(
+  "/closed-cases/mark-worked-by-filter",
+  validate(closedCasesMarkWorkedByFilterSchema),
+  markClosedCasesWorkedByFilterController,
+);
 
 module.exports = router;

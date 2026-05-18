@@ -72,6 +72,14 @@ function formatSecondsAsMinutes(seconds) {
   ).padStart(2, "0")}`;
 }
 
+function formatTotalMinutes(seconds) {
+  if (typeof seconds !== "number" || !Number.isFinite(seconds)) {
+    return "0.00";
+  }
+
+  return (seconds / 60).toFixed(2);
+}
+
 function getVicidialLeadStatus(lead) {
   if (!lead) return null;
   if (Array.isArray(lead.columns) && lead.columns[2]) return lead.columns[2];
@@ -118,6 +126,7 @@ function buildCaseRowsWithVicidial(
         recordingAgent: null,
         recordingStatus: null,
         recordingDurationMinutes: null,
+        recordingDurationSeconds: null,
         recordingDate: null,
         recordingAudioUrl: null,
       },
@@ -141,6 +150,7 @@ function buildCaseRowsWithVicidial(
         recordingAgent: leadAgent,
         recordingStatus: leadStatus,
         recordingDurationMinutes: null,
+        recordingDurationSeconds: null,
         recordingDate: leadDate,
         recordingAudioUrl: null,
       });
@@ -167,6 +177,7 @@ function buildCaseRowsWithVicidial(
         recordingAgent: null,
         recordingStatus: leadStatus,
         recordingDurationMinutes: null,
+        recordingDurationSeconds: null,
         recordingDate: null,
         recordingAudioUrl: null,
       });
@@ -180,6 +191,8 @@ function buildCaseRowsWithVicidial(
         recordingAgent: recording.agent || recording.tsr || null,
         recordingStatus: recording.status || leadStatus,
         recordingDurationMinutes: formatSecondsAsMinutes(recording.seconds),
+        recordingDurationSeconds:
+          typeof recording.seconds === "number" ? recording.seconds : null,
         recordingDate: recording.dateTime || null,
         recordingAudioUrl: recording.location || null,
       });
@@ -199,6 +212,7 @@ function buildCaseRowsWithVicidial(
           recordingAgent: null,
           recordingStatus: null,
           recordingDurationMinutes: null,
+          recordingDurationSeconds: null,
           recordingDate: null,
           recordingAudioUrl: null,
         },
@@ -223,6 +237,24 @@ function buildWorkbookGroups(cases, reportType, reportDate, vicidialPhoneMap) {
       };
     })
     .filter((group) => group.rows.length > 0);
+}
+
+function getTotalRecordingSeconds(groups) {
+  return groups.reduce(
+    (total, group) =>
+      total +
+      group.rows.reduce((groupTotal, row) => {
+        if (
+          typeof row.recordingDurationSeconds === "number" &&
+          Number.isFinite(row.recordingDurationSeconds)
+        ) {
+          return groupTotal + row.recordingDurationSeconds;
+        }
+
+        return groupTotal;
+      }, 0),
+    0,
+  );
 }
 
 async function fetchVicidialByPhone(cases) {
@@ -351,7 +383,7 @@ function safeFileNamePart(value, fallback) {
   return raw.replaceAll(/[^a-zA-Z0-9_-]/g, "_");
 }
 
-async function streamClosedCasesVicidialExcel({ date, type, res }) {
+async function streamClosedCasesVicidialExcel({ date, type, caseType, res }) {
   const reportType = String(type || "").toLowerCase();
 
   if (!VALID_TYPES.has(reportType)) {
@@ -364,10 +396,10 @@ async function streamClosedCasesVicidialExcel({ date, type, res }) {
   }
 
   logger.info(
-    `ClosedCasesExcelService → start export | date=${date} type=${reportType}`,
+    `ClosedCasesExcelService → start export | date=${date} type=${reportType} caseType=${caseType || "(none)"}`,
   );
 
-  const report = await getClosedCasesReport(date, reportType);
+  const report = await getClosedCasesReport(date, reportType, caseType);
   const vicidialPhoneMap = await getVicidialPhoneMapForReport(
     report.cases,
     reportType,
@@ -397,6 +429,15 @@ async function streamClosedCasesVicidialExcel({ date, type, res }) {
     const endRow = currentRow - 1;
     mergeCaseColumnsForGroup(worksheet, startRow, endRow);
   });
+
+  const totalRecordingSeconds = getTotalRecordingSeconds(groups);
+  const totalRow = worksheet.addRow({
+    recordingStatus: "Total Recording Minutes",
+    recordingDurationMinutes: formatTotalMinutes(totalRecordingSeconds),
+  });
+  totalRow.font = { bold: true };
+  totalRow.getCell(16).alignment = { horizontal: "right", vertical: "middle" };
+  totalRow.getCell(17).alignment = { horizontal: "center", vertical: "middle" };
 
   const filename = `${safeFileNamePart(reportType, "closed_cases")}_${safeFileNamePart(date, "date")}_vicidial.xlsx`;
 

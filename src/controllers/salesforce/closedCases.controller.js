@@ -4,13 +4,13 @@ const {
 const logger = require("../../utils/logger");
 
 /**
- * GET /salesforce/closed-cases?date=YYYY-MM-DD&type=disqualified|rejected|signed
+ * GET /salesforce/closed-cases?date=YYYY-MM-DD&type=disqualified|rejected|signed&caseType=...
  */
 async function getClosedCases(req, res, next) {
   logger.info("ClosedCasesController → getClosedCases() called");
 
   try {
-    const { date, type } = req.query;
+    const { date, type, caseType } = req.query;
 
     if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) {
       return res
@@ -25,7 +25,16 @@ async function getClosedCases(req, res, next) {
       });
     }
 
-    const result = await getClosedCasesReport(date, type.toLowerCase());
+    const normalizedCaseType =
+      typeof caseType === "string" && caseType.trim().length > 0
+        ? caseType.trim()
+        : undefined;
+
+    const result = await getClosedCasesReport(
+      date,
+      type.toLowerCase(),
+      normalizedCaseType,
+    );
 
     logger.success(
       `ClosedCasesController → getClosedCases() | total=${result.total}`,

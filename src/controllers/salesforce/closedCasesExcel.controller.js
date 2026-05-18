@@ -9,7 +9,7 @@ async function getClosedCasesVicidialExcel(req, res, next) {
   );
 
   try {
-    const { date, type } = req.query;
+    const { date, type, typeFilter, caseType } = req.query;
 
     if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) {
       return res
@@ -24,9 +24,22 @@ async function getClosedCasesVicidialExcel(req, res, next) {
       });
     }
 
+    const rawCaseType =
+      typeof typeFilter === "string" && typeFilter.trim().length > 0
+        ? typeFilter
+        : caseType;
+
+    const normalizedCaseType =
+      typeof rawCaseType === "string" &&
+      rawCaseType.trim().length > 0 &&
+      rawCaseType.trim().toLowerCase() !== "all"
+        ? rawCaseType.trim()
+        : undefined;
+
     await streamClosedCasesVicidialExcel({
       date,
       type: String(type).toLowerCase(),
+      caseType: normalizedCaseType,
       res,
     });
 
