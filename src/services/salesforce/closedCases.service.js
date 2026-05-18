@@ -6,7 +6,6 @@ const {
   buildDisqualifiedCasesQuery,
   buildRejectedCasesQuery,
   buildSignedCasesBySentDateQuery,
-  buildSignedCasesByStartDateQuery,
 } = require("./queries/closedCases.query");
 const {
   mapDisqualifiedCase,
@@ -58,35 +57,12 @@ async function getClosedCasesReport(date, reportType, caseType) {
       buildRejectedCasesQuery(date, caseType),
     );
   } else {
-    // For signed: run both date field queries in parallel and deduplicate
+    // For signed: use Sent_Date2__c only
     mapFn = mapSignedCase;
-    const [recordsBySentDate, recordsByStartDate] = await Promise.all([
-      runSoqlQuery(sf, buildSignedCasesBySentDateQuery(date, caseType)).catch(
-        (err) => {
-          logger.warn(
-            `Signed query by Sent_Date2__c failed: ${err.message}, continuing with Start_Date__c only`,
-          );
-          return [];
-        },
-      ),
-      runSoqlQuery(sf, buildSignedCasesByStartDateQuery(date, caseType)).catch(
-        (err) => {
-          logger.warn(
-            `Signed query by Start_Date__c failed: ${err.message}, continuing with Sent_Date2__c only`,
-          );
-          return [];
-        },
-      ),
-    ]);
-
-    // Deduplicate by caseNumber (use Map to keep first occurrence)
-    const dedupeMap = new Map();
-    [...recordsBySentDate, ...recordsByStartDate].forEach((record) => {
-      if (!dedupeMap.has(record.CaseNumber)) {
-        dedupeMap.set(record.CaseNumber, record);
-      }
-    });
-    caseRecords = Array.from(dedupeMap.values());
+    caseRecords = await runSoqlQuery(
+      sf,
+      buildSignedCasesBySentDateQuery(date, caseType),
+    );
   }
 
   const userRecords = await runSoqlQuery(sf, buildUsersQuery());

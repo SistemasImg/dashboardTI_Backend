@@ -91,11 +91,11 @@ ${typeFilter}
 
 /**
  * Builds a SOQL query for Signed cases via Sent_Date2__c.
- * Status = 'Sent', Substatus__c = 'Signed'
+ * Status = 'Sent'
  * @param {string} date - ISO date string (YYYY-MM-DD)
  */
 function buildSignedCasesBySentDateQuery(date, caseType) {
-  const { start } = buildClosedDateRange(date);
+  const { start, end } = buildClosedDateRange(date);
   const typeFilter = buildOptionalCaseTypeFilter(caseType);
 
   return `
@@ -112,36 +112,9 @@ SELECT
 FROM Case
 WHERE Status = 'Sent'
   AND Sent_Date2__c >= ${start}
+  AND Sent_Date2__c < ${end}
 ${typeFilter}
-`;
-}
 
-//   AND Substatus__c = 'Signed'
-/**
- * Builds a SOQL query for Signed cases via Start_Date__c.
- * Status = 'Sent', Substatus__c = 'Signed'
- * Note: Only used if Start_Date__c field exists in Salesforce.
- * @param {string} date - ISO date string (YYYY-MM-DD)
- */
-function buildSignedCasesByStartDateQuery(date, caseType) {
-  const { start } = buildClosedDateRange(date);
-  const typeFilter = buildOptionalCaseTypeFilter(caseType);
-
-  return `
-SELECT
-  Supplier_Segment__c,
-  CaseNumber,
-  OwnerId,
-  Origin,
-  FullName__c,
-  Phone_Numbercontact__c,
-  Substatus__c,
-  Type,
-  Tier__c
-FROM Case
-WHERE Status = 'Sent'
-  AND Start_Date__c >= ${start}
-${typeFilter}
 `;
 }
 
@@ -149,5 +122,4 @@ module.exports = {
   buildDisqualifiedCasesQuery,
   buildRejectedCasesQuery,
   buildSignedCasesBySentDateQuery,
-  buildSignedCasesByStartDateQuery,
 };
