@@ -1,14 +1,14 @@
 const axios = require("axios");
 const logger = require("../../utils/logger");
+const vicidialConfig = require("../../config/vicidial");
 const {
   parseVicidialLeadSearch,
   parseVicidialLeadRecordings,
   normalizeDigits,
 } = require("../../utils/vicidialLeadSearchParser");
 
-const SEARCH_URL = "https://img.integradial.us/admin/admin_search_lead.php";
-const LEAD_DETAIL_URL =
-  "https://img.integradial.us/admin/admin_modify_lead.php";
+const SEARCH_URL = `${vicidialConfig.ADMIN_BASE_URL}/admin_search_lead.php`;
+const LEAD_DETAIL_URL = `${vicidialConfig.ADMIN_BASE_URL}/admin_modify_lead.php`;
 
 function getVicidialHeaders() {
   const username = process.env.VICIDIAL_USER;
@@ -19,8 +19,8 @@ function getVicidialHeaders() {
   return {
     Authorization: `Basic ${token}`,
     "User-Agent": "Mozilla/5.0",
-    Referer: "https://img.integradial.us/admin/",
-    Origin: "https://img.integradial.us",
+    Referer: `${vicidialConfig.ADMIN_BASE_URL}/`,
+    Origin: vicidialConfig.ORIGIN,
   };
 }
 

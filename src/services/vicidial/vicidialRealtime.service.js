@@ -1,5 +1,6 @@
 const axios = require("axios");
 const logger = require("../../utils/logger");
+const vicidialConfig = require("../../config/vicidial");
 const { parseRealtimeTable } = require("../../utils/vicidialRealtimeParser");
 
 const getRealtimeFromVicidial = async () => {
@@ -12,17 +13,17 @@ const getRealtimeFromVicidial = async () => {
     const token = Buffer.from(`${username}:${password}`).toString("base64");
 
     const response = await axios.post(
-      "https://img.integradial.us/admin/AST_timeonVDADall.php",
+      `${vicidialConfig.ADMIN_BASE_URL}/AST_timeonVDADall.php`,
       new URLSearchParams({
-        // 🔥 body vacío pero requerido
+        // body vacío pero requerido
       }),
       {
         headers: {
           Authorization: `Basic ${token}`,
           "Content-Type": "application/x-www-form-urlencoded",
           "User-Agent": "Mozilla/5.0",
-          Referer: "https://img.integradial.us/admin/realtime_report.php",
-          Origin: "https://img.integradial.us",
+          Referer: `${vicidialConfig.ADMIN_BASE_URL}/realtime_report.php`,
+          Origin: vicidialConfig.ORIGIN,
         },
       },
     );

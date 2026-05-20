@@ -167,7 +167,10 @@ function assertAllowedRecordingUrl(url) {
     });
   }
 
-  if (parsed.hostname !== "img.integradial.us") {
+  const {
+    ALLOWED_HOST: vicidialAllowedHost,
+  } = require("../../config/vicidial");
+  if (parsed.hostname !== vicidialAllowedHost) {
     throw Object.assign(
       new Error("recordingUrl host is not allowed for transcription"),
       {

@@ -106,7 +106,8 @@ function resolveLink(href) {
   if (!href) return null;
 
   try {
-    return new URL(href, "https://img.integradial.us/admin/").toString();
+    const { ADMIN_BASE_URL } = require("../config/vicidial");
+    return new URL(href, `${ADMIN_BASE_URL}/`).toString();
   } catch (error) {
     logger.warn(
       `VicidialLeadSearchParser → invalid location href: ${error.message}`,

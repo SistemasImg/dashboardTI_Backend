@@ -6,6 +6,7 @@ const path = require("node:path");
 const { pipeline } = require("node:stream/promises");
 const archiverModule = require("archiver");
 const logger = require("../../utils/logger");
+const vicidialConfig = require("../../config/vicidial");
 
 function createZipArchive() {
   if (typeof archiverModule === "function") {
@@ -25,7 +26,7 @@ function createZipArchive() {
   });
 }
 
-const ALLOWED_HOST = "img.integradial.us";
+const ALLOWED_HOST = vicidialConfig.ALLOWED_HOST;
 
 function getVicidialHeaders() {
   const username =
@@ -38,8 +39,8 @@ function getVicidialHeaders() {
   return {
     Authorization: `Basic ${token}`,
     "User-Agent": "Mozilla/5.0",
-    Referer: "https://img.integradial.us/admin/",
-    Origin: "https://img.integradial.us",
+    Referer: `${vicidialConfig.ADMIN_BASE_URL}/`,
+    Origin: vicidialConfig.ORIGIN,
   };
 }
 
