@@ -2,6 +2,7 @@ const cron = require("node-cron");
 const logger = require("../utils/logger");
 const { syncAttemptsDaily } = require("./syncAttempts.job");
 const { syncInfobitStatusesJob } = require("./syncInfobitStatus.job");
+const { syncInfobitInboundJob } = require("./syncInfobitInbound.job");
 const {
   runVicidialExceededTimeAlertJob,
 } = require("./vicidialExceededTimeAlert.job");
@@ -68,6 +69,21 @@ cron.schedule("*/5 * * * *", async () => {
   }
 });
 
+// Configure cron to run every 2 minutes
+cron.schedule("*/2 * * * *", async () => {
+  logger.info("Cron triggered: syncInfobitInboundJob");
+
+  try {
+    await syncInfobitInboundJob();
+    logger.info("Cron syncInfobitInboundJob completed");
+  } catch (error) {
+    logger.error("Cron syncInfobitInboundJob failed", {
+      message: error.message,
+      stack: error.stack,
+    });
+  }
+});
+
 if (isProduction) {
   // Configure cron to run every minute
   cron.schedule("* * * * *", async () => {
@@ -121,6 +137,17 @@ if (hasTranscriptionConfig()) {
     logger.info("✅ Initial Infobit sync completed");
   } catch (error) {
     logger.error("❌ Initial Infobit sync failed", error);
+  }
+})();
+
+(async () => {
+  logger.info("Initial syncInfobitInboundJob on server start");
+
+  try {
+    await syncInfobitInboundJob();
+    logger.info("Initial Infobit inbound sync completed");
+  } catch (error) {
+    logger.error("Initial Infobit inbound sync failed", error);
   }
 })();
 

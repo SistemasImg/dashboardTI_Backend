@@ -25,6 +25,11 @@ const MessageRecords = sequelize.define(
       type: DataTypes.STRING(100),
       allowNull: false,
     },
+    conversationId: {
+      type: DataTypes.STRING(100),
+      allowNull: true,
+      comment: "ID de la conversación en Infobip",
+    },
     messageId: {
       type: DataTypes.STRING(100),
       allowNull: false,

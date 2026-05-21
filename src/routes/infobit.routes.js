@@ -3,34 +3,39 @@ const router = express.Router();
 const authMiddleware = require("../middlewares/authMiddleware");
 
 const {
-  sendInfobitMessage,
-  sendInfobitBulkMessage,
-  logMessageRecords,
-  infobitStatusWebhook,
-  infobitInboundWebhook,
-  getInfobitMessageStatus,
+  sendInfobitConversationMessage,
   getInfobitConversations,
   getInfobitConversationHistory,
-  getInfobitInboundNotifications,
-  sendInfobitConversationMessage,
+  getInfobitInboundBackfill,
+  infobitEventsStream,
+  infobitInboundWebhook,
 } = require("../controllers/infobit.controller");
 
-// Public webhooks for Infobit callbacks
-router.post("/status", infobitStatusWebhook);
+// Public webhook - Infobip posts here when a customer reply arrives
 router.post("/inbound", infobitInboundWebhook);
 
-// Protected endpoints for frontend/internal usage
+// SSE stream auth supports query token for browser EventSource
+router.get("/events", infobitEventsStream);
+
+// Protected endpoints
 router.use(authMiddleware);
-router.post("/send", sendInfobitMessage);
-router.post("/send/bulk", sendInfobitBulkMessage);
-router.get("/log", logMessageRecords);
-router.get("/status/:messageId", getInfobitMessageStatus);
+
+// POST /infobit/conversations/:numberPhone/send - Send a message
+router.post("/conversations/:numberPhone/send", sendInfobitConversationMessage);
+
+// POST /infobit/conversations/send — Send same message to one or many numbers (numberPhones[])
+router.post("/conversations/send", sendInfobitConversationMessage);
+
+// GET /infobit/conversations - Summary list of all conversations
 router.get("/conversations", getInfobitConversations);
+
+// GET /infobit/conversations/:numberPhone/history - History for one specific number
 router.get(
   "/conversations/:numberPhone/history",
   getInfobitConversationHistory,
 );
-router.post("/conversations/:numberPhone/send", sendInfobitConversationMessage);
-router.get("/notifications/inbound", getInfobitInboundNotifications);
+
+// GET /infobit/inbound?sinceId=123&limit=200 — Backfill inbound notifications
+router.get("/inbound", getInfobitInboundBackfill);
 
 module.exports = router;
