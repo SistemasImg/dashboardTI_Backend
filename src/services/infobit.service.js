@@ -511,6 +511,104 @@ async function sendMessageViaCcaas(numberPhone, message, options = {}) {
   };
 }
 
+function mapInfobipProviderAuthError(error) {
+  if (!error?.isAxiosError) return null;
+
+  const status = error?.response?.status;
+  if (status !== 401 && status !== 403) return null;
+
+  const providerError = new Error(
+    status === 401
+      ? "Infobip authentication failed (invalid/expired API key or unauthorized resource)."
+      : "Infobip request was forbidden (check sender/channel permissions).",
+  );
+
+  providerError.status = 502;
+  providerError.details = {
+    provider: "INFOBIP",
+    endpoint: error.config?.url || null,
+    providerStatus: status,
+    providerCode: error.response?.data?.errorCode || null,
+    providerMessage: error.response?.data?.description || error.message,
+    providerAction: error.response?.data?.action || null,
+    providerResources: error.response?.data?.resources || null,
+  };
+
+  return providerError;
+}
+
+function buildCcaasResponse(ccaasResult) {
+  const ids = extractConversationAndMessageIds(ccaasResult?.response || {});
+  const resolvedMessageId = ids.messageId || ccaasResult?.response?.id || null;
+  const resolvedConversationId =
+    ids.conversationId || ccaasResult?.conversationId || null;
+
+  if (!resolvedMessageId) {
+    return null;
+  }
+
+  const ccaasMessageId = String(resolvedMessageId);
+  return {
+    bulkId: `ccaas-${ccaasMessageId}`,
+    messageId: ccaasMessageId,
+    destination: ccaasResult.response.to,
+    provider: "CCAAS",
+    conversationId: resolvedConversationId,
+    status: {
+      groupName: "SENT",
+      name: "SENT",
+      description: "Message sent via CCAAS",
+      groupId: 1,
+      id: 1,
+    },
+  };
+}
+
+async function trySendViaCcaas(normalizedPhone, message, options) {
+  try {
+    const ccaasResult = await sendMessageViaCcaas(
+      normalizedPhone,
+      message,
+      options,
+    );
+    return buildCcaasResponse(ccaasResult);
+  } catch (error) {
+    if (options.strictCcaas) {
+      throw error;
+    }
+
+    logger.warn("InfobitService → CCAAS send failed, fallback to SMS API", {
+      error: error.response?.data || error.message,
+    });
+    return null;
+  }
+}
+
+async function sendViaSmsApiFallback(normalizedPhone, message) {
+  const { data } = await axios.post(
+    `${infobipConfig.baseUrl}/sms/3/messages`,
+    {
+      messages: [
+        {
+          from: infobipConfig.sender,
+          destinations: [{ to: `+1${normalizedPhone}` }],
+          content: {
+            text: `${message}`,
+          },
+        },
+      ],
+    },
+    {
+      headers: INFOBIP_HEADERS,
+      httpsAgent,
+      timeout: SEND_TIMEOUT_MS,
+    },
+  );
+
+  const infoMessage = data.messages[0];
+  return { bulkId: data.bulkId, ...infoMessage, provider: "SMS_API" };
+}
+
 //CREATE MESSAGE INFOBIT
 async function InfobitService(payload, user, options = {}) {
   const { dbUser } = await resolveUserContext(user);
@@ -526,48 +624,11 @@ async function InfobitService(payload, user, options = {}) {
   }
 
   try {
-    let response;
-    let provider = "SMS_API";
-
-    try {
-      const ccaasResult = await sendMessageViaCcaas(normalizedPhone, message, {
-        conversationId,
-        agentId,
-        strictCcaas,
-      });
-      const ids = extractConversationAndMessageIds(ccaasResult?.response || {});
-      const resolvedMessageId =
-        ids.messageId || ccaasResult?.response?.id || null;
-      const resolvedConversationId =
-        ids.conversationId || ccaasResult?.conversationId || null;
-
-      if (resolvedMessageId) {
-        provider = "CCAAS";
-        const ccaasMessageId = String(resolvedMessageId);
-        response = {
-          bulkId: `ccaas-${ccaasMessageId}`,
-          messageId: ccaasMessageId,
-          destination: ccaasResult.response.to,
-          provider,
-          conversationId: resolvedConversationId,
-          status: {
-            groupName: "SENT",
-            name: "SENT",
-            description: "Message sent via CCAAS",
-            groupId: 1,
-            id: 1,
-          },
-        };
-      }
-    } catch (error) {
-      if (strictCcaas) {
-        throw error;
-      }
-
-      logger.warn("InfobitService → CCAAS send failed, fallback to SMS API", {
-        error: error.response?.data || error.message,
-      });
-    }
+    let response = await trySendViaCcaas(normalizedPhone, message, {
+      conversationId,
+      agentId,
+      strictCcaas,
+    });
 
     if (!response) {
       if (strictCcaas) {
@@ -578,31 +639,12 @@ async function InfobitService(payload, user, options = {}) {
         throw error;
       }
 
-      const { data } = await axios.post(
-        `${infobipConfig.baseUrl}/sms/3/messages`,
-        {
-          messages: [
-            {
-              from: infobipConfig.sender,
-              destinations: [{ to: `+1${normalizedPhone}` }],
-              content: {
-                text: `${message}`,
-              },
-            },
-          ],
-        },
-        {
-          headers: INFOBIP_HEADERS,
-          httpsAgent,
-          timeout: SEND_TIMEOUT_MS,
-        },
-      );
-
-      const infoMessage = data.messages[0];
-      response = { bulkId: data.bulkId, ...infoMessage, provider };
+      response = await sendViaSmsApiFallback(normalizedPhone, message);
     }
 
-    logger.success("InfobitService → InfobitService() SUCCESS", { provider });
+    logger.success("InfobitService → InfobitService() SUCCESS", {
+      provider: response.provider,
+    });
     const persistedBulkId =
       response.bulkId || `fallback-${response.messageId || Date.now()}`;
     await MessageRecords.create({
@@ -631,33 +673,8 @@ async function InfobitService(payload, user, options = {}) {
       "InfobitService → error",
       error.response?.data || error.message,
     );
-    if (error?.isAxiosError && error?.response?.status === 401) {
-      const providerError = new Error(
-        "Infobip authentication failed (invalid/expired API key or unauthorized resource).",
-      );
-      providerError.status = 502;
-      providerError.details = {
-        provider: "INFOBIP",
-        providerStatus: 401,
-        providerCode: error.response?.data?.errorCode || null,
-        providerMessage: error.response?.data?.description || error.message,
-      };
-      throw providerError;
-    }
-
-    if (error?.isAxiosError && error?.response?.status === 403) {
-      const providerError = new Error(
-        "Infobip request was forbidden (check sender/channel permissions).",
-      );
-      providerError.status = 502;
-      providerError.details = {
-        provider: "INFOBIP",
-        providerStatus: 403,
-        providerCode: error.response?.data?.errorCode || null,
-        providerMessage: error.response?.data?.description || error.message,
-      };
-      throw providerError;
-    }
+    const providerError = mapInfobipProviderAuthError(error);
+    if (providerError) throw providerError;
 
     console.error(error);
     throw error;

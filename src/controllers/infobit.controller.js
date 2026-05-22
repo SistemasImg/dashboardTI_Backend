@@ -212,6 +212,7 @@ async function sendInfobitConversationMessage(req, res, next) {
       {
         stack: error.stack,
         origin: "controller",
+        details: error.details,
       },
     );
     next(error);
