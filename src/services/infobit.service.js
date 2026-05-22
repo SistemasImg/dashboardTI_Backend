@@ -631,6 +631,34 @@ async function InfobitService(payload, user, options = {}) {
       "InfobitService → error",
       error.response?.data || error.message,
     );
+    if (error?.isAxiosError && error?.response?.status === 401) {
+      const providerError = new Error(
+        "Infobip authentication failed (invalid/expired API key or unauthorized resource).",
+      );
+      providerError.status = 502;
+      providerError.details = {
+        provider: "INFOBIP",
+        providerStatus: 401,
+        providerCode: error.response?.data?.errorCode || null,
+        providerMessage: error.response?.data?.description || error.message,
+      };
+      throw providerError;
+    }
+
+    if (error?.isAxiosError && error?.response?.status === 403) {
+      const providerError = new Error(
+        "Infobip request was forbidden (check sender/channel permissions).",
+      );
+      providerError.status = 502;
+      providerError.details = {
+        provider: "INFOBIP",
+        providerStatus: 403,
+        providerCode: error.response?.data?.errorCode || null,
+        providerMessage: error.response?.data?.description || error.message,
+      };
+      throw providerError;
+    }
+
     console.error(error);
     throw error;
   }
