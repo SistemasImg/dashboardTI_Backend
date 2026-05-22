@@ -102,12 +102,27 @@ function numberAt(values, index, fallbackIndex = -1) {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
+function normalizeVicidialUrl(rawUrl, baseUrl) {
+  const vicidialConfig = require("../config/vicidial");
+  const parsed = new URL(rawUrl, `${baseUrl}/`);
+
+  if (parsed.hostname === vicidialConfig.ALLOWED_HOST) {
+    parsed.protocol = "https:";
+
+    if (parsed.port === "80" || parsed.port === "443") {
+      parsed.port = "";
+    }
+  }
+
+  return parsed.toString();
+}
+
 function resolveLink(href) {
   if (!href) return null;
 
   try {
-    const { ADMIN_BASE_URL } = require("../config/vicidial");
-    return new URL(href, `${ADMIN_BASE_URL}/`).toString();
+    const { ORIGIN } = require("../config/vicidial");
+    return normalizeVicidialUrl(href, ORIGIN);
   } catch (error) {
     logger.warn(
       `VicidialLeadSearchParser → invalid location href: ${error.message}`,

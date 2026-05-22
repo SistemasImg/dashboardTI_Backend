@@ -28,6 +28,20 @@ function createZipArchive() {
 
 const ALLOWED_HOST = vicidialConfig.ALLOWED_HOST;
 
+function normalizeVicidialUrl(urlString) {
+  const parsed = new URL(urlString);
+
+  if (parsed.hostname === ALLOWED_HOST) {
+    parsed.protocol = "https:";
+
+    if (parsed.port === "80" || parsed.port === "443") {
+      parsed.port = "";
+    }
+  }
+
+  return parsed;
+}
+
 function getVicidialHeaders() {
   const username =
     process.env.VICIDIAL_RECORDINGS_USER || process.env.VICIDIAL_USER;
@@ -78,7 +92,7 @@ function assertAllowedVicidialUrl(urlString) {
   let parsed;
 
   try {
-    parsed = new URL(urlString);
+    parsed = normalizeVicidialUrl(urlString);
   } catch (error) {
     logger.warn(
       `VicidialRecordingsDownloadService → invalid recording url: ${error.message}`,
@@ -141,61 +155,53 @@ async function streamToString(stream, maxBytes = 2 * 1024 * 1024) {
   return Buffer.concat(chunks).toString("utf8");
 }
 
+function looksAudioLike(value) {
+  const upper = value.toUpperCase();
+  return (
+    value.includes(".mp3") ||
+    value.includes(".wav") ||
+    value.includes(".ogg") ||
+    upper.includes("RECORDINGS") ||
+    upper.includes("MONITOR") ||
+    upper.includes("RECORDING")
+  );
+}
+
+function pushRegexMatches(text, candidates, pattern, valueIndex = 1) {
+  let match = pattern.exec(text);
+  while (match) {
+    candidates.push(match[valueIndex]);
+    match = pattern.exec(text);
+  }
+}
+
 function extractAudioUrlFromHtml(html, baseUrl) {
   const text = decodeHtmlEntities(html);
   const candidates = [];
 
   const quotedPattern = /(?:href|src)\s*=\s*["']([^"']+)["']/gi;
-  let match = quotedPattern.exec(text);
-  while (match) {
-    candidates.push(match[1]);
-    match = quotedPattern.exec(text);
-  }
+  pushRegexMatches(text, candidates, quotedPattern);
 
   const directAudioPattern =
     /https?:\/\/[^\s"'<>]+\.(?:mp3|wav|ogg)(?:\?[^\s"'<>]*)?/gi;
-  match = directAudioPattern.exec(text);
-  while (match) {
-    candidates.push(match[0]);
-    match = directAudioPattern.exec(text);
-  }
+  pushRegexMatches(text, candidates, directAudioPattern, 0);
 
   const recordingPathPattern = /\/[^\s"'<>]*RECORDINGS[^\s"'<>]*/gi;
-  match = recordingPathPattern.exec(text);
-  while (match) {
-    candidates.push(match[0]);
-    match = recordingPathPattern.exec(text);
-  }
+  pushRegexMatches(text, candidates, recordingPathPattern, 0);
 
   const jsOpenPattern = /window\.open\(\s*["']([^"']+)["']/gi;
-  match = jsOpenPattern.exec(text);
-  while (match) {
-    candidates.push(match[1]);
-    match = jsOpenPattern.exec(text);
-  }
+  pushRegexMatches(text, candidates, jsOpenPattern);
 
   const locationAssignPattern =
     /(?:location|document\.location|window\.location|top\.location)\s*=\s*["']([^"']+)["']/gi;
-  match = locationAssignPattern.exec(text);
-  while (match) {
-    candidates.push(match[1]);
-    match = locationAssignPattern.exec(text);
-  }
+  pushRegexMatches(text, candidates, locationAssignPattern);
 
   const looseQuotedPattern = /["']([^"']+)["']/g;
-  match = looseQuotedPattern.exec(text);
+  let match = looseQuotedPattern.exec(text);
   while (match) {
     const value = match[1] || "";
-    const upper = value.toUpperCase();
-    const seemsAudioLike =
-      value.includes(".mp3") ||
-      value.includes(".wav") ||
-      value.includes(".ogg") ||
-      upper.includes("RECORDINGS") ||
-      upper.includes("MONITOR") ||
-      upper.includes("RECORDING");
 
-    if (seemsAudioLike) {
+    if (looksAudioLike(value)) {
       candidates.push(value);
     }
 
@@ -224,6 +230,61 @@ function extractAudioUrlFromHtml(html, baseUrl) {
   return null;
 }
 
+function createUnexpectedVicidialResponseError(status, contentType, prefix) {
+  return Object.assign(
+    new Error(`${prefix} (status=${status}, content-type=${contentType})`),
+    { statusCode: status >= 400 ? status : 502 },
+  );
+}
+
+async function resolveAudioUrlFromHtmlResponse(response, baseUrl) {
+  const html = await streamToString(response.data);
+  const audioUrl = extractAudioUrlFromHtml(html, baseUrl);
+
+  if (audioUrl) {
+    logger.info(
+      `VicidialRecordingsDownloadService → resolved HTML recording page to audio URL: ${audioUrl} (status=${Number(response.status) || 0})`,
+    );
+    return audioUrl;
+  }
+
+  const htmlSummary = summarizeHtml(html);
+  const isLikelyLogin = /login|username|password|VD_login/i.test(html);
+  const isPermissionDenied =
+    /do not have permissions to access recordings/i.test(html);
+  logger.warn(
+    `VicidialRecordingsDownloadService → HTML did not expose direct audio URL. loginLike=${isLikelyLogin}. summary="${htmlSummary}"`,
+  );
+
+  if (isPermissionDenied) {
+    throw createPermissionDeniedError();
+  }
+
+  throw Object.assign(
+    new Error("Unable to extract audio URL from Vicidial HTML response"),
+    { statusCode: 502 },
+  );
+}
+
+async function ensureAudioResponse(response, errorPrefix) {
+  const status = Number(response.status) || 0;
+  const contentType =
+    response.headers["content-type"] || "application/octet-stream";
+
+  if (status < 400 && isDownloadableAudio(contentType)) {
+    return {
+      stream: response.data,
+      contentType,
+    };
+  }
+
+  if (isHtmlResponse(contentType)) {
+    return null;
+  }
+
+  throw createUnexpectedVicidialResponseError(status, contentType, errorPrefix);
+}
+
 async function fetchRawRecording(url, responseType = "stream") {
   return axios.get(url, {
     headers: {
@@ -234,7 +295,7 @@ async function fetchRawRecording(url, responseType = "stream") {
     responseType,
     timeout: 60000,
     maxRedirects: 5,
-    validateStatus: (status) => status >= 200 && status < 300,
+    validateStatus: (status) => status >= 200 && status < 500,
   });
 }
 
@@ -260,54 +321,32 @@ function getUniqueFileName(fileName, usedNames) {
 
 async function fetchRecordingStream(url) {
   const firstResponse = await fetchRawRecording(url, "stream");
-  const firstContentType =
-    firstResponse.headers["content-type"] || "application/octet-stream";
-
-  if (isDownloadableAudio(firstContentType)) {
-    return {
-      stream: firstResponse.data,
-      contentType: firstContentType,
-    };
-  }
-
-  if (!isHtmlResponse(firstContentType)) {
-    throw Object.assign(
-      new Error(`Unexpected content-type for recording: ${firstContentType}`),
-      { statusCode: 502 },
-    );
-  }
-
-  const html = await streamToString(firstResponse.data);
-  const audioUrl = extractAudioUrlFromHtml(html, url);
-
-  if (!audioUrl) {
-    const htmlSummary = summarizeHtml(html);
-    const isLikelyLogin = /login|username|password|VD_login/i.test(html);
-    const isPermissionDenied =
-      /do not have permissions to access recordings/i.test(html);
-    logger.warn(
-      `VicidialRecordingsDownloadService → HTML did not expose direct audio URL. loginLike=${isLikelyLogin}. summary="${htmlSummary}"`,
-    );
-
-    if (isPermissionDenied) {
-      throw createPermissionDeniedError();
-    }
-
-    throw Object.assign(
-      new Error("Unable to extract audio URL from Vicidial HTML response"),
-      { statusCode: 502 },
-    );
-  }
-
-  logger.info(
-    `VicidialRecordingsDownloadService → resolved HTML recording page to audio URL: ${audioUrl}`,
+  const directAudio = await ensureAudioResponse(
+    firstResponse,
+    "Unexpected Vicidial response for recording",
   );
 
-  const secondResponse = await fetchRawRecording(audioUrl, "stream");
-  const secondContentType =
-    secondResponse.headers["content-type"] || "application/octet-stream";
+  if (directAudio) {
+    return directAudio;
+  }
 
-  if (isHtmlResponse(secondContentType)) {
+  const audioUrl = await resolveAudioUrlFromHtmlResponse(firstResponse, url);
+
+  const secondResponse = await fetchRawRecording(audioUrl, "stream");
+  const secondAudio = await ensureAudioResponse(
+    secondResponse,
+    "Unexpected content-type for recording",
+  );
+
+  if (secondAudio) {
+    return secondAudio;
+  }
+
+  if (
+    isHtmlResponse(
+      secondResponse.headers["content-type"] || "application/octet-stream",
+    )
+  ) {
     const html = await streamToString(secondResponse.data);
     if (/do not have permissions to access recordings/i.test(html)) {
       throw createPermissionDeniedError();
@@ -315,23 +354,16 @@ async function fetchRecordingStream(url) {
 
     throw Object.assign(
       new Error(
-        "Vicidial returned HTML instead of audio for the resolved recording URL",
+        `Vicidial returned HTML instead of audio for the resolved recording URL (status=${Number(secondResponse.status) || 0})`,
       ),
-      { statusCode: 502 },
+      {
+        statusCode:
+          (Number(secondResponse.status) || 0) >= 400
+            ? Number(secondResponse.status) || 0
+            : 502,
+      },
     );
   }
-
-  if (!isDownloadableAudio(secondContentType)) {
-    throw Object.assign(
-      new Error(`Unexpected content-type for recording: ${secondContentType}`),
-      { statusCode: 502 },
-    );
-  }
-
-  return {
-    stream: secondResponse.data,
-    contentType: secondContentType,
-  };
 }
 
 async function downloadRecordingToTempFile({ url, fileName, tempDir }) {

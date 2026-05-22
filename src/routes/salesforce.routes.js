@@ -38,7 +38,14 @@ router.post(
 );
 
 // GET /salesforce/closed-cases?date=YYYY-MM-DD&type=disqualified|rejected|signed
+const {
+  bulkDownloadClosedCasesRecordings,
+} = require("../controllers/salesforce/closedCases.controller");
 router.get("/closed-cases", getClosedCases);
+router.get(
+  "/closed-cases/recordings-bulk-download",
+  bulkDownloadClosedCasesRecordings,
+);
 router.get("/closed-cases/excel", getClosedCasesVicidialExcel);
 router.post(
   "/closed-cases/comment",
