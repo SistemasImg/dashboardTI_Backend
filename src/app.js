@@ -71,9 +71,15 @@ app.get("/health", (req, res) => {
 // ------------------------------
 app.use((err, req, res, next) => {
   console.error("🔥 Internal Error:", err.message);
-  res.status(err.status || 500).json({
+  const payload = {
     message: err.message || "Internal server error",
-  });
+  };
+
+  if (err.details) {
+    payload.details = err.details;
+  }
+
+  res.status(err.status || 500).json(payload);
 });
 
 module.exports = app;

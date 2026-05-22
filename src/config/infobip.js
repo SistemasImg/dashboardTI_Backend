@@ -1,9 +1,14 @@
-module.exports = {
-  baseUrl: process.env.INFOBIP_BASE_URL,
-  apiKey: process.env.INFOBIP_API_KEY || "",
-  sender: process.env.INFOBIP_SENDER || "",
-  ccaasAgentId: process.env.INFOBIP_CCAAS_AGENT_ID || "",
+function sanitizeEnvValue(value) {
+  const normalized = String(value || "").trim();
+  return normalized.replace(/^['"]+|['"]+$/g, "");
+}
 
-  phoneLine: process.env.INFOBIP_CALL_PHONE || "",
-  bookingUrl: process.env.INFOBIP_BOOKING_URL || "",
+module.exports = {
+  baseUrl: sanitizeEnvValue(process.env.INFOBIP_BASE_URL).replace(/\/$/, ""),
+  apiKey: sanitizeEnvValue(process.env.INFOBIP_API_KEY),
+  sender: sanitizeEnvValue(process.env.INFOBIP_SENDER),
+  ccaasAgentId: sanitizeEnvValue(process.env.INFOBIP_CCAAS_AGENT_ID),
+
+  phoneLine: sanitizeEnvValue(process.env.INFOBIP_CALL_PHONE),
+  bookingUrl: sanitizeEnvValue(process.env.INFOBIP_BOOKING_URL),
 };
