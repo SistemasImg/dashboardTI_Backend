@@ -1,0 +1,388 @@
+const logger = require("../utils/logger");
+const {
+  syncVendorsAndEvaluateRules,
+  listVendors,
+  getVendorInsightsById,
+  setVendorCategory,
+  assignVendorToTort,
+  updateVendorTopRewards,
+} = require("../services/vendor/vendor.service");
+const {
+  evaluateCategoryRules,
+} = require("../services/vendor/vendor.categoryRules.service");
+const {
+  getVendorMonitoringAlerts,
+  subscribeVendorMonitoringAlerts,
+  getVendorMonitoringSummary,
+} = require("../services/vendor/vendor.alerts.service");
+const {
+  getVendorAnalyticsSummary,
+  getVendorAnalyticsTrends,
+  getVendorAnalyticsVendors,
+  getVendorAnalyticsTypes,
+  getVendorAnalyticsCategoryHistory,
+} = require("../services/vendor/vendor.analytics.service");
+
+async function syncVendors(req, res, next) {
+  logger.info("VendorController → syncVendors() called");
+
+  try {
+    const result = await syncVendorsAndEvaluateRules({
+      failOnRulesError: false,
+    });
+
+    logger.success(
+      `VendorController → syncVendors() success | synced: ${result.synced} | rulesEvaluated: ${result.rules?.evaluated || 0} | rulesChanged: ${result.rules?.changed || 0}`,
+    );
+
+    return res.status(200).json(result);
+  } catch (error) {
+    logger.error(`VendorController → syncVendors() error: ${error.message}`, {
+      stack: error.stack,
+      origin: "controller",
+    });
+
+    next(error);
+  }
+}
+
+async function getVendors(req, res, next) {
+  logger.info("VendorController → getVendors() called");
+
+  try {
+    const result = await listVendors(req.query);
+
+    logger.success(
+      `VendorController → getVendors() success | total: ${result.summary.total}`,
+    );
+
+    return res.status(200).json(result);
+  } catch (error) {
+    logger.error(`VendorController → getVendors() error: ${error.message}`, {
+      stack: error.stack,
+      origin: "controller",
+    });
+    next(error);
+  }
+}
+
+async function getVendorInsights(req, res, next) {
+  logger.info("VendorController → getVendorInsights() called");
+
+  try {
+    const vendorId = Number(req.params.vendorId);
+    const result = await getVendorInsightsById(vendorId);
+
+    logger.success(
+      `VendorController → getVendorInsights() success | vendorId: ${vendorId}`,
+    );
+
+    return res.status(200).json(result);
+  } catch (error) {
+    logger.error(
+      `VendorController → getVendorInsights() error: ${error.message}`,
+      {
+        stack: error.stack,
+        origin: "controller",
+      },
+    );
+    next(error);
+  }
+}
+
+async function updateVendorCategory(req, res, next) {
+  logger.info("VendorController → updateVendorCategory() called");
+
+  try {
+    const vendorId = Number(req.params.vendorId);
+    const result = await setVendorCategory(vendorId, req.body.category);
+
+    logger.success(
+      `VendorController → updateVendorCategory() success | vendorId: ${vendorId}`,
+    );
+
+    return res.status(200).json(result);
+  } catch (error) {
+    logger.error(
+      `VendorController → updateVendorCategory() error: ${error.message}`,
+      {
+        stack: error.stack,
+        origin: "controller",
+      },
+    );
+    next(error);
+  }
+}
+
+async function upsertVendorTort(req, res, next) {
+  logger.info("VendorController → upsertVendorTort() called");
+
+  try {
+    const vendorId = Number(req.params.vendorId);
+    const result = await assignVendorToTort({
+      vendorId,
+      productId: req.body.productId,
+      status: req.body.status,
+      notes: req.body.notes,
+      assignedBy: req.user?.id || null,
+    });
+
+    logger.success(
+      `VendorController → upsertVendorTort() success | vendorId: ${vendorId} | productId: ${req.body.productId}`,
+    );
+
+    return res.status(200).json(result);
+  } catch (error) {
+    logger.error(
+      `VendorController → upsertVendorTort() error: ${error.message}`,
+      {
+        stack: error.stack,
+        origin: "controller",
+      },
+    );
+    next(error);
+  }
+}
+
+async function updateVendorRewards(req, res, next) {
+  logger.info("VendorController → updateVendorRewards() called");
+
+  try {
+    const vendorId = Number(req.params.vendorId);
+    const result = await updateVendorTopRewards(vendorId, {
+      bonusAccess: req.body.bonusAccess,
+      net7: req.body.net7,
+      replacementFlexibility: req.body.replacementFlexibility,
+    });
+
+    logger.success(
+      `VendorController → updateVendorRewards() success | vendorId: ${vendorId}`,
+    );
+
+    return res.status(200).json(result);
+  } catch (error) {
+    logger.error(
+      `VendorController → updateVendorRewards() error: ${error.message}`,
+      {
+        stack: error.stack,
+        origin: "controller",
+      },
+    );
+    next(error);
+  }
+}
+
+async function runVendorCategoryRules(req, res, next) {
+  logger.info("VendorController → runVendorCategoryRules() called");
+
+  try {
+    const result = await evaluateCategoryRules();
+
+    logger.success(
+      `VendorController → runVendorCategoryRules() success | evaluated: ${result.evaluated} | changed: ${result.changed}`,
+    );
+
+    return res.status(200).json(result);
+  } catch (error) {
+    logger.error(
+      `VendorController → runVendorCategoryRules() error: ${error.message}`,
+      {
+        stack: error.stack,
+        origin: "controller",
+      },
+    );
+    next(error);
+  }
+}
+
+async function getVendorMonitoringSnapshot(req, res, next) {
+  logger.info("VendorController → getVendorMonitoringSnapshot() called");
+
+  try {
+    const limit = Number(req.query.limit || 20);
+    const result = await getVendorMonitoringSummary({ limit });
+    return res.status(200).json(result);
+  } catch (error) {
+    logger.error(
+      `VendorController → getVendorMonitoringSnapshot() error: ${error.message}`,
+      {
+        stack: error.stack,
+        origin: "controller",
+      },
+    );
+    next(error);
+  }
+}
+
+async function getVendorMonitoringAlertsFeed(req, res, next) {
+  logger.info("VendorController → getVendorMonitoringAlertsFeed() called");
+
+  try {
+    const sinceId = Number(req.query.sinceId || 0);
+    const limit = Number(req.query.limit || 50);
+    const result = getVendorMonitoringAlerts({ sinceId, limit });
+    return res.status(200).json(result);
+  } catch (error) {
+    logger.error(
+      `VendorController → getVendorMonitoringAlertsFeed() error: ${error.message}`,
+      {
+        stack: error.stack,
+        origin: "controller",
+      },
+    );
+    next(error);
+  }
+}
+
+function streamVendorMonitoringEvents(req, res, next) {
+  logger.info("VendorController → streamVendorMonitoringEvents() called");
+
+  try {
+    res.setHeader("Content-Type", "text/event-stream");
+    res.setHeader("Cache-Control", "no-cache");
+    res.setHeader("Connection", "keep-alive");
+    res.flushHeaders?.();
+
+    const { notifications } = getVendorMonitoringAlerts({ limit: 25 });
+    for (const event of notifications) {
+      res.write(`id: ${event.id}\n`);
+      res.write(`event: ${event.type}\n`);
+      res.write(`data: ${JSON.stringify(event)}\n\n`);
+    }
+
+    const onAlert = (event) => {
+      res.write(`id: ${event.id}\n`);
+      res.write(`event: ${event.type}\n`);
+      res.write(`data: ${JSON.stringify(event)}\n\n`);
+    };
+
+    const unsubscribe = subscribeVendorMonitoringAlerts(onAlert);
+
+    const heartbeat = setInterval(() => {
+      res.write(`event: ping\ndata: ${JSON.stringify({ ts: Date.now() })}\n\n`);
+    }, 25000);
+
+    req.on("close", () => {
+      clearInterval(heartbeat);
+      unsubscribe();
+      res.end();
+    });
+  } catch (error) {
+    logger.error(
+      `VendorController → streamVendorMonitoringEvents() error: ${error.message}`,
+      {
+        stack: error.stack,
+        origin: "controller",
+      },
+    );
+    next(error);
+  }
+}
+
+async function getVendorsAnalyticsSummary(req, res, next) {
+  logger.info("VendorController → getVendorsAnalyticsSummary() called");
+
+  try {
+    const result = await getVendorAnalyticsSummary(req.query);
+    return res.status(200).json(result);
+  } catch (error) {
+    logger.error(
+      `VendorController → getVendorsAnalyticsSummary() error: ${error.message}`,
+      {
+        stack: error.stack,
+        origin: "controller",
+      },
+    );
+    next(error);
+  }
+}
+
+async function getVendorsAnalyticsTrends(req, res, next) {
+  logger.info("VendorController → getVendorsAnalyticsTrends() called");
+
+  try {
+    const result = await getVendorAnalyticsTrends(req.query);
+    return res.status(200).json(result);
+  } catch (error) {
+    logger.error(
+      `VendorController → getVendorsAnalyticsTrends() error: ${error.message}`,
+      {
+        stack: error.stack,
+        origin: "controller",
+      },
+    );
+    next(error);
+  }
+}
+
+async function getVendorsAnalyticsVendors(req, res, next) {
+  logger.info("VendorController → getVendorsAnalyticsVendors() called");
+
+  try {
+    const result = await getVendorAnalyticsVendors(req.query);
+    return res.status(200).json(result);
+  } catch (error) {
+    logger.error(
+      `VendorController → getVendorsAnalyticsVendors() error: ${error.message}`,
+      {
+        stack: error.stack,
+        origin: "controller",
+      },
+    );
+    next(error);
+  }
+}
+
+async function getVendorsAnalyticsTypes(req, res, next) {
+  logger.info("VendorController → getVendorsAnalyticsTypes() called");
+
+  try {
+    const result = await getVendorAnalyticsTypes(req.query);
+    return res.status(200).json(result);
+  } catch (error) {
+    logger.error(
+      `VendorController → getVendorsAnalyticsTypes() error: ${error.message}`,
+      {
+        stack: error.stack,
+        origin: "controller",
+      },
+    );
+    next(error);
+  }
+}
+
+async function getVendorsAnalyticsCategoryHistory(req, res, next) {
+  logger.info("VendorController → getVendorsAnalyticsCategoryHistory() called");
+
+  try {
+    const result = await getVendorAnalyticsCategoryHistory(req.query);
+    return res.status(200).json(result);
+  } catch (error) {
+    logger.error(
+      `VendorController → getVendorsAnalyticsCategoryHistory() error: ${error.message}`,
+      {
+        stack: error.stack,
+        origin: "controller",
+      },
+    );
+    next(error);
+  }
+}
+
+module.exports = {
+  syncVendors,
+  getVendors,
+  getVendorInsights,
+  updateVendorCategory,
+  upsertVendorTort,
+  updateVendorRewards,
+  runVendorCategoryRules,
+  getVendorMonitoringSnapshot,
+  getVendorMonitoringAlertsFeed,
+  streamVendorMonitoringEvents,
+  getVendorsAnalyticsSummary,
+  getVendorsAnalyticsTrends,
+  getVendorsAnalyticsVendors,
+  getVendorsAnalyticsTypes,
+  getVendorsAnalyticsCategoryHistory,
+};

@@ -16,6 +16,12 @@ const CaseComment = require("./caseComment");
 const ClosedCaseWorkStatus = require("./closedCaseWorkStatus");
 const TranscriptionJob = require("./transcriptionJob");
 const TranscriptionSegment = require("./transcriptionSegment");
+const VendorProfile = require("./vendorProfile");
+const VendorTortAssignment = require("./vendorTortAssignment");
+const VendorCaseSnapshot = require("./vendorCaseSnapshot");
+const VendorWeeklyGoal = require("./vendorWeeklyGoal");
+const VendorCategoryLog = require("./vendorCategoryLog");
+const VendorTopReward = require("./vendorTopReward");
 
 // ============================
 // ROLES ↔ USERS
@@ -90,6 +96,99 @@ TranscriptionJob.hasMany(TranscriptionSegment, {
   as: "segments",
 });
 
+VendorTortAssignment.belongsTo(VendorProfile, {
+  foreignKey: "vendor_id",
+  as: "vendor",
+});
+
+VendorProfile.hasMany(VendorTortAssignment, {
+  foreignKey: "vendor_id",
+  as: "tortAssignments",
+});
+
+VendorTortAssignment.belongsTo(Product, {
+  foreignKey: "product_id",
+  as: "product",
+});
+
+Product.hasMany(VendorTortAssignment, {
+  foreignKey: "product_id",
+  as: "vendorAssignments",
+});
+
+VendorTortAssignment.belongsTo(User, {
+  foreignKey: "assigned_by",
+  as: "assignedBy",
+});
+
+User.hasMany(VendorTortAssignment, {
+  foreignKey: "assigned_by",
+  as: "vendorTortAssignmentsCreated",
+});
+
+VendorCaseSnapshot.belongsTo(VendorProfile, {
+  foreignKey: "vendor_id",
+  as: "vendor",
+  constraints: false,
+});
+
+VendorProfile.hasMany(VendorCaseSnapshot, {
+  foreignKey: "vendor_id",
+  as: "caseSnapshots",
+  constraints: false,
+});
+
+// ============================
+// VENDOR WEEKLY GOALS
+// ============================
+VendorWeeklyGoal.belongsTo(VendorProfile, {
+  foreignKey: "vendor_id",
+  as: "vendor",
+  constraints: false,
+});
+
+VendorProfile.hasMany(VendorWeeklyGoal, {
+  foreignKey: "vendor_id",
+  as: "weeklyGoals",
+  constraints: false,
+});
+
+VendorWeeklyGoal.belongsTo(Product, {
+  foreignKey: "product_id",
+  as: "product",
+  constraints: false,
+});
+
+// ============================
+// VENDOR CATEGORY LOGS
+// ============================
+VendorCategoryLog.belongsTo(VendorProfile, {
+  foreignKey: "vendor_id",
+  as: "vendor",
+  constraints: false,
+});
+
+VendorProfile.hasMany(VendorCategoryLog, {
+  foreignKey: "vendor_id",
+  as: "categoryLogs",
+  constraints: false,
+});
+
+// ============================
+// VENDOR TOP REWARDS
+// ============================
+VendorTopReward.belongsTo(VendorProfile, {
+  foreignKey: "vendor_id",
+  as: "vendor",
+  constraints: false,
+});
+
+VendorProfile.hasOne(VendorTopReward, {
+  foreignKey: "vendor_id",
+  as: "topReward",
+  constraints: false,
+});
+
 module.exports = {
   User,
   Role,
@@ -108,4 +207,10 @@ module.exports = {
   ClosedCaseWorkStatus,
   TranscriptionJob,
   TranscriptionSegment,
+  VendorProfile,
+  VendorTortAssignment,
+  VendorCaseSnapshot,
+  VendorWeeklyGoal,
+  VendorCategoryLog,
+  VendorTopReward,
 };

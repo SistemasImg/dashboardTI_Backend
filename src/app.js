@@ -40,6 +40,7 @@ app.use("/assign", require("./routes/caseAssignments.routes"));
 app.use("/state", require("./routes/state.routes"));
 app.use("/api", require("./routes/apiSend.routes"));
 app.use("/owner", require("./routes/owner.routes"));
+app.use("/vendors", require("./routes/vendor.routes"));
 app.use("/infobit", require("./routes/infobit.routes"));
 app.use("/mediaFiles", require("./routes/mediaFile.routes"));
 app.use("/summary", require("./routes/summary.routes"));

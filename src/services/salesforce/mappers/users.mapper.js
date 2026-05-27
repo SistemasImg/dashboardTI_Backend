@@ -11,6 +11,27 @@ function mapUsersName(user) {
   return { id: user.Id, name: user.Name };
 }
 
+function mapSupplierAccount(user) {
+  if (!user) return null;
+
+  const supplierName = user.Contact?.Name?.trim();
+  const accountName = user.Contact?.Parent_Account__r?.Name?.trim();
+
+  if (!supplierName || !accountName) return null;
+
+  return {
+    id: user.Id,
+    username: user.Username || null,
+    account: accountName,
+    supplier: supplierName,
+    country: user.Contact?.Country__c || null,
+    supplierSegment: user.Contact?.Supplier_segment__c || null,
+    active: Boolean(user.IsActive),
+    approvalAfter: user.Contact?.Approval_After__c || null,
+  };
+}
+
 module.exports = {
   mapUsersName,
+  mapSupplierAccount,
 };

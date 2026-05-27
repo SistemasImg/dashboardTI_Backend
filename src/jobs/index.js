@@ -9,7 +9,10 @@ const {
 const {
   runTranscriptionStatusPollJob,
 } = require("./transcriptionStatusPoll.job");
+const { runVendorSyncJob } = require("./vendorSync.job");
 const isProduction = process.env.NODE_ENV === "production";
+const vendorSyncCronExpression =
+  process.env.VENDOR_SYNC_CRON_EXPRESSION || "*/30 * * * *";
 
 function buildTranscriptionCronExpression() {
   const rawValue = Number(
@@ -84,6 +87,24 @@ cron.schedule("*/2 * * * *", async () => {
   }
 });
 
+// Configure cron for vendor sync and category monitoring
+cron.schedule(vendorSyncCronExpression, async () => {
+  logger.info("Cron triggered: runVendorSyncJob");
+
+  try {
+    await runVendorSyncJob();
+    logger.info("Cron runVendorSyncJob completed");
+  } catch (error) {
+    logger.error("Cron runVendorSyncJob failed", {
+      message: error.message,
+      stack: error.stack,
+    });
+  }
+});
+logger.info(
+  `Vendor monitoring job enabled with cron: ${vendorSyncCronExpression}`,
+);
+
 if (isProduction) {
   // Configure cron to run every minute
   cron.schedule("* * * * *", async () => {
@@ -148,6 +169,17 @@ if (hasTranscriptionConfig()) {
     logger.info("Initial Infobit inbound sync completed");
   } catch (error) {
     logger.error("Initial Infobit inbound sync failed", error);
+  }
+})();
+
+(async () => {
+  logger.info("Initial runVendorSyncJob on server start");
+
+  try {
+    await runVendorSyncJob();
+    logger.info("Initial vendor sync completed");
+  } catch (error) {
+    logger.error("Initial vendor sync failed", error);
   }
 })();
 
