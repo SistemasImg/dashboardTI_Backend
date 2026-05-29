@@ -990,10 +990,26 @@ async function setVendorCategory(vendorId, category) {
     throw error;
   }
 
+  const previousCategory =
+    profile.category_source === CATEGORY_SOURCE.MANUAL &&
+    profile.manual_category
+      ? profile.manual_category
+      : profile.computed_category;
+
   await profile.update({
     category_source: CATEGORY_SOURCE.MANUAL,
     manual_category: category,
   });
+
+  if (previousCategory !== category) {
+    await VendorCategoryLog.create({
+      vendor_id: profile.id,
+      from_category: previousCategory || null,
+      to_category: category,
+      reason: "Manual category update",
+      triggered_by: "manual",
+    });
+  }
 
   return toPublicVendor(profile);
 }

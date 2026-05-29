@@ -63,6 +63,9 @@ const {
 } = require("../../services/vicidial/vicidialLeadSearch.service");
 const { normalizeDigits } = require("../../utils/vicidialLeadSearchParser");
 
+const VICIDIAL_CONCURRENCY = 2;
+const VICIDIAL_BULK_TIMEOUT_MS = 60000;
+
 function getMinimumRecordingSeconds(reportType) {
   if (reportType === "signed") return 120;
   if (reportType === "disqualified") return 60;
@@ -72,6 +75,28 @@ function getMinimumRecordingSeconds(reportType) {
 function normalizePhone(value) {
   const digits = normalizeDigits(value);
   return digits || null;
+}
+
+async function mapWithConcurrency(items, limit, handler) {
+  const safeLimit = Math.max(1, Number(limit) || 1);
+  const results = new Array(items.length);
+  let cursor = 0;
+
+  async function worker() {
+    while (cursor < items.length) {
+      const index = cursor;
+      cursor += 1;
+      results[index] = await handler(items[index], index);
+    }
+  }
+
+  const workers = Array.from(
+    { length: Math.min(safeLimit, items.length) },
+    () => worker(),
+  );
+
+  await Promise.all(workers);
+  return results;
 }
 
 function getBulkDownloadFilters(query) {
@@ -114,6 +139,32 @@ function buildRecordingFileName(closedCase, date, recording) {
   );
 }
 
+async function getVicidialPhoneMapForBulkDownload(cases) {
+  const phones = Array.from(
+    new Set(
+      cases.map((item) => normalizePhone(item.phoneNumber)).filter(Boolean),
+    ),
+  );
+  const phoneMap = new Map();
+
+  await mapWithConcurrency(phones, VICIDIAL_CONCURRENCY, async (phone) => {
+    try {
+      const payload = await searchVicidialLeadByPhone(phone, {
+        resolveRecordingLocations: false,
+        timeoutMs: VICIDIAL_BULK_TIMEOUT_MS,
+      });
+      phoneMap.set(phone, payload);
+    } catch (error) {
+      logger.warn(
+        `ClosedCasesController → Vicidial lookup failed for ${phone}: ${error.message}`,
+      );
+      phoneMap.set(phone, null);
+    }
+  });
+
+  return phoneMap;
+}
+
 function getQualifiedLeadRecordings(closedCase, lead, date) {
   if (!Array.isArray(lead.recordings)) {
     return [];
@@ -138,19 +189,20 @@ function getQualifiedLeadRecordings(closedCase, lead, date) {
     .map((recording) => ({
       url: recording.location,
       fileName: buildRecordingFileName(closedCase, date, recording),
+      sourceFileName: recording.fileName || null,
       durationSeconds: recording.seconds || 0,
     }));
 }
 
-async function collectRecordingsForCase(closedCase, date) {
+async function collectRecordingsForCase(closedCase, date, vicidialPhoneMap) {
   const phone = normalizePhone(closedCase.phoneNumber);
   if (!phone) {
     return [];
   }
 
   try {
-    const vicidialResult = await searchVicidialLeadByPhone(phone);
-    if (!Array.isArray(vicidialResult.records)) {
+    const vicidialResult = vicidialPhoneMap.get(phone);
+    if (!vicidialResult || !Array.isArray(vicidialResult.records)) {
       return [];
     }
 
@@ -185,9 +237,11 @@ async function bulkDownloadClosedCasesRecordings(req, res, next) {
       `ClosedCasesController → bulk download candidate cases=${allCases.length}`,
     );
 
+    const vicidialPhoneMap = await getVicidialPhoneMapForBulkDownload(allCases);
+
     const recordingsByCase = await Promise.all(
       allCases.map((closedCase) =>
-        collectRecordingsForCase(closedCase, filters.date),
+        collectRecordingsForCase(closedCase, filters.date, vicidialPhoneMap),
       ),
     );
     const recordings = recordingsByCase.flat();

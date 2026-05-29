@@ -107,6 +107,10 @@ function normalizeVicidialUrl(rawUrl, baseUrl) {
   const parsed = new URL(rawUrl, `${baseUrl}/`);
 
   if (parsed.hostname === vicidialConfig.ALLOWED_HOST) {
+    if (parsed.pathname === "/recording_log_redirect.php") {
+      parsed.pathname = "/admin/recording_log_redirect.php";
+    }
+
     parsed.protocol = "https:";
 
     if (parsed.port === "80" || parsed.port === "443") {
@@ -121,14 +125,20 @@ function resolveLink(href) {
   if (!href) return null;
 
   try {
-    const { ORIGIN } = require("../config/vicidial");
-    return normalizeVicidialUrl(href, ORIGIN);
+    const { ADMIN_BASE_URL } = require("../config/vicidial");
+    return normalizeVicidialUrl(href, ADMIN_BASE_URL);
   } catch (error) {
     logger.warn(
       `VicidialLeadSearchParser → invalid location href: ${error.message}`,
     );
     return href;
   }
+}
+
+function resolveRecordingLocation(locationHref, locationText) {
+  const resolvedHref = resolveLink(locationHref);
+  const resolvedText = resolveLink(locationText);
+  return resolvedHref || resolvedText || null;
 }
 
 function parseVicidialLeadRecordings(html) {
@@ -201,6 +211,8 @@ function parseVicidialLeadRecordings(html) {
 
       const locationCell = cells.eq(idxLocation >= 0 ? idxLocation : 6);
       const locationHref = locationCell.find("a[href]").attr("href") || null;
+      const locationText = valueAt(values, idxLocation, 6);
+      const fileName = valueAt(values, idxFileName, 5);
 
       recordings.push({
         rowNumber: valueAt(values, idxRowNumber, 0),
@@ -208,8 +220,8 @@ function parseVicidialLeadRecordings(html) {
         dateTime: valueAt(values, idxDateTime, 2),
         seconds: numberAt(values, idxSeconds, 3),
         recId: valueAt(values, idxRecId, 4),
-        fileName: valueAt(values, idxFileName, 5),
-        location: resolveLink(locationHref) || valueAt(values, idxLocation, 6),
+        fileName,
+        location: resolveRecordingLocation(locationHref, locationText),
         tsr: valueAt(values, idxTsr, 7),
         agent: valueAt(values, idxAgent, -1),
         status: valueAt(values, idxStatus, -1),

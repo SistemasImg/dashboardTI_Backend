@@ -6,9 +6,43 @@ const {
   parseVicidialLeadRecordings,
   normalizeDigits,
 } = require("../../utils/vicidialLeadSearchParser");
+const {
+  resolveRecordingAccessUrl,
+} = require("./vicidialRecordingsDownload.service");
 
 const SEARCH_URL = `${vicidialConfig.ADMIN_BASE_URL}/admin_search_lead.php`;
 const LEAD_DETAIL_URL = `${vicidialConfig.ADMIN_BASE_URL}/admin_modify_lead.php`;
+
+function classifyRecordingResolutionError(error) {
+  const message = String(error?.message || "");
+
+  if (message.includes("URL host is not allowed")) {
+    return "host_not_allowed";
+  }
+
+  if (
+    message.includes("Unable to extract audio URL from Vicidial HTML response")
+  ) {
+    return "html_without_audio_url";
+  }
+
+  if (message.includes("Invalid url")) {
+    return "invalid_url";
+  }
+
+  return "unexpected";
+}
+
+function registerResolutionIssue(stats, reason) {
+  stats.total += 1;
+  stats.byReason[reason] = (stats.byReason[reason] || 0) + 1;
+}
+
+function formatResolutionIssueSummary(stats) {
+  return Object.entries(stats.byReason)
+    .map(([reason, total]) => `${reason}=${total}`)
+    .join(", ");
+}
 
 function getVicidialHeaders() {
   const username = process.env.VICIDIAL_USER;
@@ -38,22 +72,24 @@ function buildSearchPayload(phone) {
   };
 }
 
-async function requestVicidialLeadSearch(phone) {
+async function requestVicidialLeadSearch(phone, options = {}) {
   const params = buildSearchPayload(phone);
   const headers = getVicidialHeaders();
+  const timeout =
+    Number(options.timeoutMs) > 0 ? Number(options.timeoutMs) : 30000;
 
   const [getResult, postResult] = await Promise.allSettled([
     axios.get(SEARCH_URL, {
       headers,
       params,
-      timeout: 30000,
+      timeout,
     }),
     axios.post(SEARCH_URL, new URLSearchParams(params), {
       headers: {
         ...headers,
         "Content-Type": "application/x-www-form-urlencoded",
       },
-      timeout: 30000,
+      timeout,
     }),
   ]);
 
@@ -77,21 +113,52 @@ async function requestVicidialLeadSearch(phone) {
   return htmlCandidates;
 }
 
-async function requestVicidialLeadDetail(leadId) {
+async function requestVicidialLeadDetail(leadId, options = {}) {
   const headers = getVicidialHeaders();
+  const timeout =
+    Number(options.timeoutMs) > 0 ? Number(options.timeoutMs) : 30000;
 
   const response = await axios.get(LEAD_DETAIL_URL, {
     headers,
     params: {
       lead_id: leadId,
     },
-    timeout: 30000,
+    timeout,
   });
 
   return response.data;
 }
 
-async function enrichLeadWithRecordings(record) {
+async function resolveRecordingLocation(recording, resolutionStats) {
+  if (!recording?.location) {
+    return recording;
+  }
+
+  try {
+    const resolvedLocation = await resolveRecordingAccessUrl(
+      recording.location,
+      { suppressWarnings: true },
+    );
+    return {
+      ...recording,
+      location: resolvedLocation,
+    };
+  } catch (error) {
+    const reason = classifyRecordingResolutionError(error);
+
+    if (reason === "unexpected") {
+      logger.warn(
+        `VicidialLeadSearchService → unable to resolve direct recording URL for recId ${recording.recId || "unknown"}: ${error.message}`,
+      );
+    } else {
+      registerResolutionIssue(resolutionStats, reason);
+    }
+
+    return recording;
+  }
+}
+
+async function enrichLeadWithRecordings(record, resolutionStats, options = {}) {
   if (!record?.leadId) {
     return {
       ...record,
@@ -103,8 +170,17 @@ async function enrichLeadWithRecordings(record) {
   }
 
   try {
-    const detailHtml = await requestVicidialLeadDetail(record.leadId);
-    const recordings = parseVicidialLeadRecordings(detailHtml);
+    const detailHtml = await requestVicidialLeadDetail(record.leadId, options);
+    const parsedRecordings = parseVicidialLeadRecordings(detailHtml);
+    const shouldResolveRecordingLocations =
+      options.resolveRecordingLocations !== false;
+    const recordings = shouldResolveRecordingLocations
+      ? await Promise.all(
+          parsedRecordings.map((item) =>
+            resolveRecordingLocation(item, resolutionStats),
+          ),
+        )
+      : parsedRecordings;
     const latestRecording = recordings[0] || null;
 
     return {
@@ -129,7 +205,7 @@ async function enrichLeadWithRecordings(record) {
   }
 }
 
-async function searchVicidialLeadByPhone(phone) {
+async function searchVicidialLeadByPhone(phone, options = {}) {
   const phoneDigits = normalizeDigits(phone);
 
   if (!phoneDigits) {
@@ -138,7 +214,7 @@ async function searchVicidialLeadByPhone(phone) {
 
   logger.info(`VicidialLeadSearchService → search by phone: ${phoneDigits}`);
 
-  const htmlResponses = await requestVicidialLeadSearch(phoneDigits);
+  const htmlResponses = await requestVicidialLeadSearch(phoneDigits, options);
 
   const merged = [];
   const seen = new Set();
@@ -157,12 +233,28 @@ async function searchVicidialLeadByPhone(phone) {
     `VicidialLeadSearchService → found ${merged.length} possible matches for ${phoneDigits}`,
   );
 
+  const resolutionStats = {
+    total: 0,
+    byReason: {},
+  };
+
   const enrichedRecords = await Promise.all(
-    merged.map((item) => enrichLeadWithRecordings(item)),
+    merged.map((item) =>
+      enrichLeadWithRecordings(item, resolutionStats, options),
+    ),
   );
   const filteredRecords = enrichedRecords.filter(
     (item) => Array.isArray(item.recordings) && item.recordings.length > 0,
   );
+
+  if (
+    options.resolveRecordingLocations !== false &&
+    resolutionStats.total > 0
+  ) {
+    logger.info(
+      `VicidialLeadSearchService → kept original recording URLs for ${resolutionStats.total} recordings (${formatResolutionIssueSummary(resolutionStats)})`,
+    );
+  }
 
   return {
     phone: phoneDigits,

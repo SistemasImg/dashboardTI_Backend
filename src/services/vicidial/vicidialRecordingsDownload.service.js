@@ -28,10 +28,29 @@ function createZipArchive() {
 
 const ALLOWED_HOST = vicidialConfig.ALLOWED_HOST;
 
-function normalizeVicidialUrl(urlString) {
+function isRecordingAssetPath(pathname) {
+  return (
+    pathname.startsWith("/RECORDINGS/") || pathname.startsWith("/MONITOR/")
+  );
+}
+
+function normalizeVicidialUrl(urlString, options = {}) {
   const parsed = new URL(urlString);
 
   if (parsed.hostname === ALLOWED_HOST) {
+    if (parsed.pathname === "/recording_log_redirect.php") {
+      parsed.pathname = "/admin/recording_log_redirect.php";
+    }
+
+    parsed.protocol = "https:";
+
+    if (parsed.port === "80" || parsed.port === "443") {
+      parsed.port = "";
+    }
+  } else if (
+    options.allowRecordingAssetHosts &&
+    isRecordingAssetPath(parsed.pathname)
+  ) {
     parsed.protocol = "https:";
 
     if (parsed.port === "80" || parsed.port === "443") {
@@ -88,19 +107,29 @@ function summarizeHtml(value, maxLength = 240) {
   return `${normalized.slice(0, maxLength)}...`;
 }
 
-function assertAllowedVicidialUrl(urlString) {
+function assertAllowedVicidialUrl(urlString, options = {}) {
   let parsed;
 
   try {
-    parsed = normalizeVicidialUrl(urlString);
+    parsed = normalizeVicidialUrl(urlString, options);
   } catch (error) {
-    logger.warn(
-      `VicidialRecordingsDownloadService → invalid recording url: ${error.message}`,
-    );
+    if (!options.suppressWarnings) {
+      logger.warn(
+        `VicidialRecordingsDownloadService → invalid recording url: ${error.message}`,
+      );
+    }
     throw Object.assign(new Error("Invalid url"), { statusCode: 400 });
   }
 
-  if (parsed.protocol !== "https:" || parsed.hostname !== ALLOWED_HOST) {
+  const allowsRecordingAssetHost =
+    options.allowRecordingAssetHosts &&
+    parsed.protocol === "https:" &&
+    isRecordingAssetPath(parsed.pathname);
+
+  if (
+    parsed.protocol !== "https:" ||
+    (parsed.hostname !== ALLOWED_HOST && !allowsRecordingAssetHost)
+  ) {
     throw Object.assign(new Error("URL host is not allowed"), {
       statusCode: 400,
     });
@@ -109,10 +138,52 @@ function assertAllowedVicidialUrl(urlString) {
   return parsed.toString();
 }
 
+function getResponseFinalUrl(response, fallbackUrl, options = {}) {
+  const responseUrl = response?.request?.res?.responseUrl;
+
+  if (!responseUrl) {
+    return assertAllowedVicidialUrl(fallbackUrl, options);
+  }
+
+  return assertAllowedVicidialUrl(responseUrl, options);
+}
+
 function sanitizeFileName(value) {
   const raw = String(value || "recording").trim();
   const safe = raw.replaceAll(/[\\/:*?"<>|]/g, "_").replaceAll(/\s+/g, "_");
   return safe || "recording";
+}
+
+function removeAudioExtension(fileName) {
+  return String(fileName || "").replace(/\.(mp3|wav|ogg)$/i, "");
+}
+
+function buildDirectRecordingUrlCandidates(fileName) {
+  const baseName = removeAudioExtension(fileName).trim();
+  if (!baseName) {
+    return [];
+  }
+
+  const candidateNames = new Set([baseName]);
+
+  if (/-all$/i.test(baseName)) {
+    candidateNames.add(baseName.replace(/-all$/i, ""));
+  } else {
+    candidateNames.add(`${baseName}-all`);
+  }
+
+  const candidates = [];
+
+  candidateNames.forEach((item) => {
+    candidates.push(
+      `${vicidialConfig.ORIGIN}/RECORDINGS/${item}.wav`,
+      `${vicidialConfig.ORIGIN}/RECORDINGS/${item}.mp3`,
+      `${vicidialConfig.ORIGIN}/RECORDINGS/FTP/${item}.wav`,
+      `${vicidialConfig.ORIGIN}/RECORDINGS/FTP/${item}.mp3`,
+    );
+  });
+
+  return [...new Set(candidates)];
 }
 
 function ensureAudioExtension(fileName, contentType) {
@@ -213,13 +284,10 @@ function extractAudioUrlFromHtml(html, baseUrl) {
 
     try {
       const resolved = new URL(raw, baseUrl).toString();
-      const parsed = new URL(resolved);
-      const isAllowedHost =
-        parsed.protocol === "https:" && parsed.hostname === ALLOWED_HOST;
-
-      if (isAllowedHost) {
-        return resolved;
-      }
+      return assertAllowedVicidialUrl(resolved, {
+        suppressWarnings: true,
+        allowRecordingAssetHosts: true,
+      });
     } catch (error) {
       logger.warn(
         `VicidialRecordingsDownloadService → invalid extracted audio URL: ${error.message}`,
@@ -237,7 +305,11 @@ function createUnexpectedVicidialResponseError(status, contentType, prefix) {
   );
 }
 
-async function resolveAudioUrlFromHtmlResponse(response, baseUrl) {
+async function resolveAudioUrlFromHtmlResponse(
+  response,
+  baseUrl,
+  options = {},
+) {
   const html = await streamToString(response.data);
   const audioUrl = extractAudioUrlFromHtml(html, baseUrl);
 
@@ -252,9 +324,11 @@ async function resolveAudioUrlFromHtmlResponse(response, baseUrl) {
   const isLikelyLogin = /login|username|password|VD_login/i.test(html);
   const isPermissionDenied =
     /do not have permissions to access recordings/i.test(html);
-  logger.warn(
-    `VicidialRecordingsDownloadService → HTML did not expose direct audio URL. loginLike=${isLikelyLogin}. summary="${htmlSummary}"`,
-  );
+  if (!options.suppressWarnings) {
+    logger.warn(
+      `VicidialRecordingsDownloadService → HTML did not expose direct audio URL. loginLike=${isLikelyLogin}. summary="${htmlSummary}"`,
+    );
+  }
 
   if (isPermissionDenied) {
     throw createPermissionDeniedError();
@@ -264,6 +338,29 @@ async function resolveAudioUrlFromHtmlResponse(response, baseUrl) {
     new Error("Unable to extract audio URL from Vicidial HTML response"),
     { statusCode: 502 },
   );
+}
+
+async function resolveRecordingAccessUrl(url, options = {}) {
+  const safeUrl = assertAllowedVicidialUrl(url, options);
+  const { response, finalUrl } = await fetchVicidialResponse(
+    safeUrl,
+    "stream",
+    options,
+  );
+  const directAudio = await ensureAudioResponse(
+    response,
+    "Unexpected Vicidial response for recording",
+  );
+
+  if (directAudio) {
+    if (typeof directAudio.stream?.destroy === "function") {
+      directAudio.stream.destroy();
+    }
+
+    return finalUrl;
+  }
+
+  return resolveAudioUrlFromHtmlResponse(response, finalUrl, options);
 }
 
 async function ensureAudioResponse(response, errorPrefix) {
@@ -289,13 +386,52 @@ async function fetchRawRecording(url, responseType = "stream") {
   return axios.get(url, {
     headers: {
       ...getVicidialHeaders(),
-      Referer: url,
       Accept: "audio/*,*/*;q=0.9",
     },
     responseType,
     timeout: 60000,
-    maxRedirects: 5,
+    maxRedirects: 0,
     validateStatus: (status) => status >= 200 && status < 500,
+  });
+}
+
+function getVicidialRedirectTarget(response, currentUrl, options = {}) {
+  const rawLocation = response?.headers?.location;
+
+  if (!rawLocation) {
+    return null;
+  }
+
+  const resolvedUrl = new URL(rawLocation, currentUrl).toString();
+  return assertAllowedVicidialUrl(resolvedUrl, {
+    ...options,
+    allowRecordingAssetHosts: true,
+  });
+}
+
+async function fetchVicidialResponse(
+  url,
+  responseType = "stream",
+  options = {},
+) {
+  let currentUrl = assertAllowedVicidialUrl(url, options);
+
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    const response = await fetchRawRecording(currentUrl, responseType);
+    const status = Number(response.status) || 0;
+
+    if (status < 300 || status >= 400 || !response?.headers?.location) {
+      return {
+        response,
+        finalUrl: currentUrl,
+      };
+    }
+
+    currentUrl = getVicidialRedirectTarget(response, currentUrl, options);
+  }
+
+  throw Object.assign(new Error("Too many Vicidial redirects for recording"), {
+    statusCode: 502,
   });
 }
 
@@ -320,7 +456,8 @@ function getUniqueFileName(fileName, usedNames) {
 }
 
 async function fetchRecordingStream(url) {
-  const firstResponse = await fetchRawRecording(url, "stream");
+  const { response: firstResponse, finalUrl: firstUrl } =
+    await fetchVicidialResponse(url, "stream");
   const directAudio = await ensureAudioResponse(
     firstResponse,
     "Unexpected Vicidial response for recording",
@@ -330,9 +467,15 @@ async function fetchRecordingStream(url) {
     return directAudio;
   }
 
-  const audioUrl = await resolveAudioUrlFromHtmlResponse(firstResponse, url);
+  const audioUrl = await resolveAudioUrlFromHtmlResponse(
+    firstResponse,
+    firstUrl,
+  );
 
-  const secondResponse = await fetchRawRecording(audioUrl, "stream");
+  const { response: secondResponse } = await fetchVicidialResponse(
+    audioUrl,
+    "stream",
+  );
   const secondAudio = await ensureAudioResponse(
     secondResponse,
     "Unexpected content-type for recording",
@@ -366,8 +509,36 @@ async function fetchRecordingStream(url) {
   }
 }
 
-async function downloadRecordingToTempFile({ url, fileName, tempDir }) {
-  const { stream, contentType } = await fetchRecordingStream(url);
+async function downloadRecordingToTempFile({
+  url,
+  fileName,
+  sourceFileName,
+  tempDir,
+}) {
+  let stream;
+  let contentType;
+  let lastError;
+  const candidateUrls = [
+    url,
+    ...buildDirectRecordingUrlCandidates(sourceFileName || fileName).filter(
+      (candidate) => candidate !== url,
+    ),
+  ];
+
+  for (const candidateUrl of candidateUrls) {
+    try {
+      const result = await fetchRecordingStream(candidateUrl);
+      stream = result.stream;
+      contentType = result.contentType;
+      break;
+    } catch (error) {
+      lastError = error;
+    }
+  }
+
+  if (!stream) {
+    throw lastError;
+  }
 
   const finalName = ensureAudioExtension(fileName, contentType);
   const filePath = path.join(tempDir, finalName);
@@ -479,6 +650,7 @@ async function streamRecordingsZip({
         const file = await downloadRecordingToTempFile({
           url: safeUrl,
           fileName: uniqueName,
+          sourceFileName: item.sourceFileName,
           tempDir,
         });
 
@@ -556,4 +728,5 @@ module.exports = {
   streamSingleRecordingProxy,
   streamRecordingsZip,
   fetchRecordingStream,
+  resolveRecordingAccessUrl,
 };
