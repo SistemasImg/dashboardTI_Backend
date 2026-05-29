@@ -1,5 +1,5 @@
 const logger = require("../../utils/logger");
-const jwt = require("jsonwebtoken");
+const { verifyAccessToken } = require("../../utils/verifyAccessToken");
 const { DateTime } = require("luxon");
 const { User } = require("../../models");
 const {
@@ -53,7 +53,7 @@ async function getRideshareReport(token) {
     let decoded = null;
     let userId = null;
     if (token) {
-      decoded = jwt.verify(token, process.env.JWT_SECRET);
+      decoded = verifyAccessToken(token);
       userId = decoded.id;
     }
 

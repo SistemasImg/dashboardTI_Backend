@@ -1,5 +1,6 @@
 const express = require("express");
 const app = express();
+const { appVersion } = require("./config/appVersion.config");
 
 app.set("trust proxy", 1);
 
@@ -25,6 +26,12 @@ app.use("/auth/login", loginLimiter);
 // ------------------------------
 app.use(express.json({ limit: "200kb" }));
 app.use(express.urlencoded({ extended: true }));
+
+// Expose backend build version to every response so clients can detect deploy changes.
+app.use((req, res, next) => {
+  res.setHeader("X-App-Version", appVersion);
+  next();
+});
 
 // ------------------------------
 // 5. ROUTES
@@ -56,12 +63,28 @@ app.use("/meta", require("./routes/meta.routes"));
 app.use("/public-leads", require("./routes/publicLead.routes"));
 app.use("/transcriptions", require("./routes/transcription.routes"));
 
+app.get("/version", (req, res) => {
+  res.setHeader(
+    "Cache-Control",
+    "no-store, no-cache, must-revalidate, proxy-revalidate",
+  );
+  res.setHeader("Pragma", "no-cache");
+  res.setHeader("Expires", "0");
+
+  res.status(200).json({
+    version: appVersion,
+    timestamp: new Date().toISOString(),
+  });
+});
+
 // ------------------------------
 // HEALTH CHECK (Render / Monitoring)
 // ------------------------------
 app.get("/health", (req, res) => {
+  res.setHeader("Cache-Control", "no-store");
   res.status(200).json({
     status: "ok",
+    version: appVersion,
     uptime: process.uptime(),
     timestamp: new Date().toISOString(),
   });

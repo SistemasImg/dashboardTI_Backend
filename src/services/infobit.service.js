@@ -1,7 +1,7 @@
 const axios = require("axios");
 const https = require("node:https");
 const logger = require("../utils/logger");
-const jwt = require("jsonwebtoken");
+const { verifyAccessToken } = require("../utils/verifyAccessToken");
 const { MessageRecords, User } = require("../models");
 const { Op } = require("sequelize");
 const infobipConfig = require("../config/infobip");
@@ -65,7 +65,7 @@ function buildPhoneVariants(phone) {
 }
 
 async function resolveUserContext(user) {
-  const decoded = jwt.verify(user, process.env.JWT_SECRET);
+  const decoded = verifyAccessToken(user);
   const userId = decoded.id;
   const dbUser = await User.findByPk(userId, { raw: true });
 

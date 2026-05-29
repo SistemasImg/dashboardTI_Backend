@@ -1,8 +1,8 @@
 const logger = require("../utils/logger");
 const apiSendConfig = require("../config/apiSend.config");
 const axios = require("axios");
-const https = require("https");
-const jwt = require("jsonwebtoken");
+const https = require("node:https");
+const { verifyAccessToken } = require("../utils/verifyAccessToken");
 const { sendApiRecords, User } = require("../models");
 
 // HTTPS agent
@@ -21,7 +21,7 @@ function getBasicAuthHeader() {
 
 exports.apiSendPost = async (data, token) => {
   logger.info("ApiSendService → apiSendPost() started");
-  const decoded = jwt.verify(token, process.env.JWT_SECRET);
+  const decoded = verifyAccessToken(token);
   const userId = decoded.id;
   const { dataValues } = await User.findByPk(userId);
 

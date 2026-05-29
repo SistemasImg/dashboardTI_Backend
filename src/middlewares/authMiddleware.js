@@ -1,23 +1,26 @@
-const jwt = require("jsonwebtoken");
+const { verifyAccessToken } = require("../utils/verifyAccessToken");
 require("dotenv").config();
 
 const authMiddleware = (req, res, next) => {
   const authHeader = req.headers.authorization;
 
-  if (!authHeader || !authHeader.startsWith("Bearer ")) {
+  if (!authHeader?.startsWith("Bearer ")) {
     return res.status(401).json({ message: "Token not provided" });
   }
 
   const token = authHeader.split(" ")[1];
 
   try {
-    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    const decoded = verifyAccessToken(token);
     req.user = decoded;
 
     next();
   } catch (err) {
-    const message =
-      err.name === "TokenExpiredError" ? "Token has expired" : "Invalid token";
+    const messageByErrorName = {
+      TokenExpiredError: "Token has expired",
+      TokenVersionMismatchError: "Session expired due to deployment update",
+    };
+    const message = messageByErrorName[err.name] || "Invalid token";
     return res.status(401).json({ message });
   }
 };

@@ -2,6 +2,7 @@ const logger = require("../utils/logger");
 const jwt = require("jsonwebtoken");
 const bcrypt = require("bcryptjs");
 const { User } = require("../models");
+const { appVersion } = require("../config/appVersion.config");
 
 require("dotenv").config();
 
@@ -27,7 +28,7 @@ exports.login = async (email, password) => {
   }
 
   const token = jwt.sign(
-    { id: user.id, role_id: user.role_id },
+    { id: user.id, role_id: user.role_id, app_version: appVersion },
     process.env.JWT_SECRET,
     { expiresIn: "8h" },
   );

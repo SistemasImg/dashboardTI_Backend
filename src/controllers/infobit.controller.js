@@ -1,5 +1,5 @@
 const logger = require("../utils/logger");
-const jwt = require("jsonwebtoken");
+const { verifyAccessToken } = require("../utils/verifyAccessToken");
 const {
   saveInboundMessages,
   getConversationHistoryByNumber,
@@ -21,7 +21,7 @@ function getAuthToken(req) {
 }
 
 function verifyJwtToken(token) {
-  return jwt.verify(token, process.env.JWT_SECRET);
+  return verifyAccessToken(token);
 }
 
 function canReceiveInboundEvent(clientUser, messageRow) {
@@ -230,8 +230,12 @@ async function infobitEventsStream(req, res, next) {
     let decoded;
     try {
       decoded = verifyJwtToken(token);
-    } catch {
-      return res.status(401).json({ error: "Invalid or expired token" });
+    } catch (error) {
+      const message =
+        error.name === "TokenVersionMismatchError"
+          ? "Session expired due to deployment update"
+          : "Invalid or expired token";
+      return res.status(401).json({ error: message });
     }
 
     res.setHeader("Content-Type", "text/event-stream");
