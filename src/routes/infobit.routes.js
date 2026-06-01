@@ -11,7 +11,8 @@ const {
   infobitInboundWebhook,
 } = require("../controllers/infobit.controller");
 
-// Public webhook - Infobip posts here when a customer reply arrives
+// Public webhook entrypoint.
+// Infobip sends inbound customer messages to POST /infobit/inbound.
 router.post("/inbound", infobitInboundWebhook);
 
 // SSE stream auth supports query token for browser EventSource

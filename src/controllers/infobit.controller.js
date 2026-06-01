@@ -85,6 +85,8 @@ function getBearerToken(req) {
   return authHeader.split(" ")[1];
 }
 
+// Normalizes different Infobip webhook payload shapes into a flat message array
+// consumed by saveInboundMessages().
 function extractWebhookResults(payload) {
   if (Array.isArray(payload?.results)) return payload.results;
   if (Array.isArray(payload?.messages)) return payload.messages;
@@ -294,7 +296,12 @@ async function infobitEventsStream(req, res, next) {
   }
 }
 
-// Save inbound messages received from Infobip webhook
+// Webhook handler for inbound messages sent by Infobip.
+// Flow:
+// 1) Receive POST /infobit/inbound payload from Infobip.
+// 2) Normalize payload shape with extractWebhookResults().
+// 3) Persist inbound rows with saveInboundMessages().
+// 4) Push real-time SSE notifications to connected clients.
 async function infobitInboundWebhook(req, res, next) {
   logger.info("InfobitController → inbound webhook");
 

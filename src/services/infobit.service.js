@@ -1043,7 +1043,10 @@ function normalizeInboundItem(rawItem = {}) {
   };
 }
 
-//METHOD TO SAVE INBOUND MESSAGES
+// Persists inbound messages into MessageRecords.
+// Main caller: infobitInboundWebhook() in infobit.controller.js.
+// It only stores inbound rows linked to at least one previous outbound message
+// to keep the chat feed scoped to conversations started from this API.
 async function saveInboundMessages(results) {
   if (!Array.isArray(results) || results.length === 0) {
     return [];
@@ -1672,6 +1675,9 @@ async function getConversationsSummary(user, limit = 100) {
     if (row.direction === "OUTBOUND") conv.outboundCount += 1;
   }
 
+  // This is a DB summary for GET /infobit/conversations.
+  // Inbound webhook detection does not happen here.
+  // Webhook detection happens in POST /infobit/inbound -> infobitInboundWebhook().
   const conversations = Array.from(grouped.values()).slice(0, limit);
   const agentIds = [
     ...new Set(conversations.map((item) => item.agentId).filter(Boolean)),
