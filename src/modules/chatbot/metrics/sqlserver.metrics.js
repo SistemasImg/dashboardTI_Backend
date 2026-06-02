@@ -358,6 +358,141 @@ exports.getCaseAttemptsByDate = async ({ dateKeyword, date }) => {
   };
 };
 
+async function getTotalAttemptsByPhonesFullHistory(phones) {
+  const uniquePhones = Array.from(new Set((phones || []).filter(Boolean)));
+  const totalsByPhone = new Map();
+
+  if (!uniquePhones.length) {
+    return totalsByPhone;
+  }
+
+  const phoneSet = new Set(uniquePhones);
+  const today = DateTime.now().toISODate();
+
+  const historyRows = await AttemptsDaily.findAll({
+    where: {
+      [Op.or]: uniquePhones.map((phone) => ({
+        phone: {
+          [Op.like]: `%${phone}`,
+        },
+      })),
+    },
+    raw: true,
+    attributes: ["phone", "call_date", "attempts"],
+  });
+
+  const historyTotals = new Map();
+  const historyTodayTotals = new Map();
+
+  historyRows.forEach((row) => {
+    const normalizedPhone = normalizePhone(row.phone);
+    if (!normalizedPhone || !phoneSet.has(normalizedPhone)) return;
+
+    const attempts = Number(row.attempts || 0);
+    historyTotals.set(
+      normalizedPhone,
+      (historyTotals.get(normalizedPhone) || 0) + attempts,
+    );
+
+    if (String(row.call_date) === today) {
+      historyTodayTotals.set(
+        normalizedPhone,
+        (historyTodayTotals.get(normalizedPhone) || 0) + attempts,
+      );
+    }
+  });
+
+  const realtimeTodayTotals = new Map();
+  try {
+    const sqlRows = await Promise.resolve(
+      sqlServerService.getAgentsAttempts(today),
+    );
+    sqlRows.forEach((row) => {
+      const normalizedPhone = normalizePhone(row["PHONE NUMBER"]);
+      if (!normalizedPhone || !phoneSet.has(normalizedPhone)) return;
+
+      realtimeTodayTotals.set(
+        normalizedPhone,
+        (realtimeTodayTotals.get(normalizedPhone) || 0) +
+          Number(row.ATTEMPTS || 0),
+      );
+    });
+  } catch (error) {
+    logger.warn(
+      `Realtime SQL lookup failed for no-attempts validation: ${error.message}`,
+    );
+  }
+
+  uniquePhones.forEach((phone) => {
+    const historical = Number(historyTotals.get(phone) || 0);
+    const historicalToday = Number(historyTodayTotals.get(phone) || 0);
+    const realtimeToday = realtimeTodayTotals.has(phone)
+      ? Number(realtimeTodayTotals.get(phone) || 0)
+      : historicalToday;
+
+    totalsByPhone.set(
+      phone,
+      Math.max(historical - historicalToday + realtimeToday, 0),
+    );
+  });
+
+  return totalsByPhone;
+}
+
+exports.getCasesWithoutAttemptsByDate = async ({ dateKeyword, date }) => {
+  const targetDate = resolveTargetDate(dateKeyword, date);
+
+  logger.info(`Fetching cases without attempts for date: ${targetDate}`);
+
+  const sfResult = await sfMetrics.getCasesByDateRange(targetDate, targetDate);
+  const sfCases = sfResult?.records || [];
+
+  if (!sfCases.length) {
+    return {
+      date: targetDate,
+      totalCases: 0,
+      withoutAttemptsCount: 0,
+      records: [],
+    };
+  }
+
+  const phones = Array.from(
+    new Set(
+      sfCases
+        .map((caseItem) => normalizePhone(caseItem.Phone_Numbercontact__c))
+        .filter(Boolean),
+    ),
+  );
+
+  const attemptsByPhone = await getTotalAttemptsByPhonesFullHistory(phones);
+
+  const casesWithAttempts = sfCases.map((caseItem) => {
+    const normalizedPhone = normalizePhone(caseItem.Phone_Numbercontact__c);
+    const totalAttempts = normalizedPhone
+      ? Number(attemptsByPhone.get(normalizedPhone) || 0)
+      : 0;
+
+    return {
+      CaseNumber: caseItem.CaseNumber,
+      phone: normalizedPhone,
+      attempts: totalAttempts,
+      Status: caseItem.Status,
+      Substatus__c: caseItem.Substatus__c,
+      Owner: caseItem.Owner,
+      CreatedDate: caseItem.CreatedDate,
+    };
+  });
+
+  const records = casesWithAttempts.filter((row) => Number(row.attempts) === 0);
+
+  return {
+    date: targetDate,
+    totalCases: sfCases.length,
+    withoutAttemptsCount: records.length,
+    records,
+  };
+};
+
 exports.getTotalAttemptsByAgent = async (
   agentName,
   { dateKeyword, date } = {},

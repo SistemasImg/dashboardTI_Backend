@@ -488,7 +488,74 @@ function detectCaseAttemptsByDateIntent(message) {
     text.includes("cases of today") ||
     text.includes("each case");
 
-  if (!mentionsAttempts || !mentionsCaseScope) {
+  const mentionsCaseWord = text.includes("caso") || text.includes("cases");
+  const mentionsDateScope =
+    text.includes("hoy") ||
+    text.includes("today") ||
+    text.includes("ayer") ||
+    text.includes("yesterday") ||
+    /\b20\d{2}-\d{2}-\d{2}\b/.test(text);
+
+  const mentionsCaseIngress =
+    text.includes("ingres") ||
+    text.includes("entr") ||
+    text.includes("created") ||
+    text.includes("entered");
+
+  const hasCaseDateIntent =
+    mentionsCaseScope ||
+    (mentionsCaseWord && mentionsDateScope && mentionsCaseIngress);
+
+  if (!mentionsAttempts || !hasCaseDateIntent) {
+    return null;
+  }
+
+  const withoutAttemptsPattern =
+    /\b(?:sin\s+(?:attempts?|intentos?|llamadas(?:\s+registradas)?)|without\s+attempts?|no\s+attempts?|zero\s+attempts?)\b/i;
+  const withoutAttempts = Boolean(withoutAttemptsPattern.exec(text));
+
+  if (text.includes("hoy") || text.includes("today")) {
+    return { dateKeyword: "today", withoutAttempts };
+  }
+
+  if (text.includes("ayer") || text.includes("yesterday")) {
+    return { dateKeyword: "yesterday", withoutAttempts };
+  }
+
+  const isoDateMatch = text.match(/\b(20\d{2}-\d{2}-\d{2})\b/);
+  if (isoDateMatch) {
+    return { date: isoDateMatch[1], withoutAttempts };
+  }
+
+  return null;
+}
+
+function detectScheduledCallbacksIntent(message) {
+  const text = String(message || "").toLowerCase();
+  const mentionsCallback =
+    text.includes("callback") || text.includes("callbacks");
+
+  if (!mentionsCallback) {
+    return null;
+  }
+
+  // If user explicitly asks for cases callback, keep existing case-substatus flow.
+  if (text.includes("casos") || text.includes("cases")) {
+    return null;
+  }
+
+  const mentionsSchedule =
+    text.includes("program") ||
+    text.includes("agend") ||
+    text.includes("calendar") ||
+    text.includes("calendario");
+
+  if (
+    !mentionsSchedule &&
+    !/(hoy|today|ayer|yesterday|manana|mañana|tomorrow|20\d{2}-\d{2}-\d{2})/.test(
+      text,
+    )
+  ) {
     return null;
   }
 
@@ -500,12 +567,200 @@ function detectCaseAttemptsByDateIntent(message) {
     return { dateKeyword: "yesterday" };
   }
 
-  const isoDateMatch = text.match(/\b(20\d{2}-\d{2}-\d{2})\b/);
+  if (
+    text.includes("manana") ||
+    text.includes("mañana") ||
+    text.includes("tomorrow")
+  ) {
+    return { dateKeyword: "tomorrow" };
+  }
+
+  const isoDateMatch = /\b(20\d{2}-\d{2}-\d{2})\b/.exec(text);
   if (isoDateMatch) {
     return { date: isoDateMatch[1] };
   }
 
-  return null;
+  return { dateKeyword: "today" };
+}
+
+function detectSentCasesByAgentRankingIntent(message) {
+  const text = String(message || "").toLowerCase();
+  const mentionsSent = text.includes("sent");
+  const mentionsAgent =
+    text.includes("agente") ||
+    text.includes("agents") ||
+    text.includes("agent") ||
+    text.includes("owner") ||
+    text.includes("intaker") ||
+    text.includes("intake") ||
+    text.includes("bpo");
+
+  if (!mentionsSent || !mentionsAgent) {
+    return null;
+  }
+
+  const mentionsLowest =
+    text.includes("menos") ||
+    text.includes("lowest") ||
+    text.includes("least") ||
+    text.includes("menor");
+
+  const mentionsLastWeek =
+    text.includes("ultima semana") ||
+    text.includes("última semana") ||
+    text.includes("last week") ||
+    text.includes("last_week");
+
+  if (mentionsLastWeek) {
+    return {
+      sort: mentionsLowest ? "lowest" : "highest",
+      dateKeyword: "last_week",
+    };
+  }
+
+  if (text.includes("hoy") || text.includes("today")) {
+    return {
+      sort: mentionsLowest ? "lowest" : "highest",
+      dateKeyword: "today",
+    };
+  }
+
+  if (text.includes("ayer") || text.includes("yesterday")) {
+    return {
+      sort: mentionsLowest ? "lowest" : "highest",
+      dateKeyword: "yesterday",
+    };
+  }
+
+  const isoDateMatch = /\b(20\d{2}-\d{2}-\d{2})\b/.exec(text);
+  if (isoDateMatch) {
+    return {
+      sort: mentionsLowest ? "lowest" : "highest",
+      date: isoDateMatch[1],
+    };
+  }
+
+  return {
+    sort: mentionsLowest ? "lowest" : "highest",
+    dateKeyword: "today",
+  };
+}
+
+function detectFakeLeadDQByVendorIntent(message) {
+  const text = String(message || "").toLowerCase();
+  const mentionsFakeLead =
+    text.includes("fake lead") ||
+    (text.includes("fake") && text.includes("lead"));
+  const mentionsDQ =
+    text.includes("dq") ||
+    text.includes("disqual") ||
+    text.includes("descalific");
+  const mentionsVendor =
+    text.includes("vendor") ||
+    text.includes("owner") ||
+    text.includes("case owner") ||
+    text.includes("proveedor");
+
+  if (!mentionsFakeLead || (!mentionsDQ && !mentionsVendor)) {
+    return null;
+  }
+
+  if (
+    text.includes("ultima semana") ||
+    text.includes("última semana") ||
+    text.includes("last week") ||
+    text.includes("last_week")
+  ) {
+    return { dateKeyword: "last_week" };
+  }
+
+  if (text.includes("hoy") || text.includes("today")) {
+    return { dateKeyword: "today" };
+  }
+
+  if (text.includes("ayer") || text.includes("yesterday")) {
+    return { dateKeyword: "yesterday" };
+  }
+
+  const isoDateMatch = /\b(20\d{2}-\d{2}-\d{2})\b/.exec(text);
+  if (isoDateMatch) {
+    return { date: isoDateMatch[1] };
+  }
+
+  return { dateKeyword: "today" };
+}
+
+function detectCasesStillInCallbackIntent(message) {
+  const text = String(message || "").toLowerCase();
+  const mentionsCallback =
+    text.includes("callback") ||
+    text.includes("callbacks") ||
+    text.includes("cb");
+  const mentionsCases = text.includes("casos") || text.includes("cases");
+  const mentionsStillInCallback =
+    text.includes("siguen") ||
+    text.includes("still") ||
+    text.includes("continuan") ||
+    text.includes("continúan") ||
+    text.includes("en callback") ||
+    text.includes("en cb") ||
+    text.includes("in callback") ||
+    text.includes("in cb");
+
+  if (!mentionsCallback || (!mentionsCases && !mentionsStillInCallback)) {
+    return null;
+  }
+
+  if (
+    text.includes("ultimos 30 dias") ||
+    text.includes("últimos 30 días") ||
+    text.includes("last 30 days") ||
+    text.includes("last_30_days")
+  ) {
+    return { dateKeyword: "last_30_days" };
+  }
+
+  if (
+    text.includes("ultimos 7 dias") ||
+    text.includes("últimos 7 días") ||
+    text.includes("last 7 days") ||
+    text.includes("last_7_days")
+  ) {
+    return { dateKeyword: "last_7_days" };
+  }
+
+  if (
+    text.includes("ultima semana") ||
+    text.includes("última semana") ||
+    text.includes("last week") ||
+    text.includes("last_week")
+  ) {
+    return { dateKeyword: "last_week" };
+  }
+
+  if (
+    text.includes("ultimo mes") ||
+    text.includes("último mes") ||
+    text.includes("last month") ||
+    text.includes("last_month")
+  ) {
+    return { dateKeyword: "last_month" };
+  }
+
+  if (text.includes("hoy") || text.includes("today")) {
+    return { dateKeyword: "today" };
+  }
+
+  if (text.includes("ayer") || text.includes("yesterday")) {
+    return { dateKeyword: "yesterday" };
+  }
+
+  const isoDateMatch = /\b(20\d{2}-\d{2}-\d{2})\b/.exec(text);
+  if (isoDateMatch) {
+    return { date: isoDateMatch[1] };
+  }
+
+  return { dateKeyword: "today" };
 }
 
 function normalizeBusinessQuery(message) {
@@ -523,12 +778,13 @@ function normalizeBusinessQuery(message) {
     [/\bnnumero\b/gi, "numero"],
     [/\bcahtbot\b/gi, "chatbot"],
     [/\bsub\s*stat\b/gi, "substatus"],
+    [/\bcb\b/gi, "callback"],
     [/\bestatus\b/gi, "status"],
     [/\bquelity\b/gi, "quality"],
     [/\bhigh\s*quelity\b/gi, "high quality"],
     [/\bmedio\b/gi, "medium"],
     [/\bbajo\b/gi, "low quality"],
-    [/\bfirmad[oa]s?\b/gi, "sent"],
+    [/\bfirmad[oa]s?\b/gi, "signed"],
     [/\bt9\b/gi, "tier9"],
     [/\btier\s*(\d+)\b/gi, "tier$1"],
   ];
@@ -1139,43 +1395,180 @@ exports.processMessage = async (
     const directCaseAttemptsIntent = detectCaseAttemptsByDateIntent(
       normalizedUserMessage,
     );
+    const directScheduledCallbacksIntent = detectScheduledCallbacksIntent(
+      normalizedUserMessage,
+    );
+    const directSentAgentRankingIntent = detectSentCasesByAgentRankingIntent(
+      normalizedUserMessage,
+    );
+    const directFakeLeadDQByVendorIntent = detectFakeLeadDQByVendorIntent(
+      normalizedUserMessage,
+    );
+    const directCasesStillInCallbackIntent = detectCasesStillInCallbackIntent(
+      normalizedUserMessage,
+    );
 
     if (directCaseAttemptsIntent) {
-      const functionResult = await metrics.sql.getCaseAttemptsByDate(
-        directCaseAttemptsIntent,
-      );
+      const directFunctionName = directCaseAttemptsIntent.withoutAttempts
+        ? "getCasesWithoutAttemptsByDate"
+        : "getCaseAttemptsByDate";
+      const functionResult = directCaseAttemptsIntent.withoutAttempts
+        ? await metrics.sql.getCasesWithoutAttemptsByDate(
+            directCaseAttemptsIntent,
+          )
+        : await metrics.sql.getCaseAttemptsByDate(directCaseAttemptsIntent);
 
       const formattedResponse = await formatResult(
-        "getCaseAttemptsByDate",
+        directFunctionName,
         functionResult,
         userLang,
       );
 
-      let directMessage = formattedResponse.message;
-      try {
-        const humanMessages = [
-          { role: "system", content: systemPrompt },
-          { role: "system", content: RESPONSE_LAYOUT_PROMPT },
-          ...chatSessionService.buildMessagesForAI(sessionData.messages),
-          { role: "user", content: userMessage },
-          {
-            role: "function",
-            name: "getCaseAttemptsByDate",
-            content: formattedResponse.message,
-          },
-        ];
-        const humanResponse = await askModel(humanMessages);
-        const humanContent = humanResponse.choices?.[0]?.message?.content;
-        if (humanContent) directMessage = humanContent;
-      } catch (humanErr) {
-        logger.warn(
-          `[Humanize] Fallback to structured response: ${humanErr.message}`,
+      const directPayload = humanizePayload({
+        ...formattedResponse,
+        // Keep direct attempts-by-case-day paths deterministic to avoid
+        // contradictory paraphrases about attempts.
+        message: formattedResponse.message,
+      });
+
+      chatSessionService
+        .appendMessages(
+          userId,
+          [
+            { role: "user", content: userMessage },
+            { role: "assistant", content: directPayload.message || "" },
+          ],
+          sessionCache[cacheKey].last_filters,
+          functionResult,
+        )
+        .catch((err) =>
+          logger.error(
+            `[ChatSession] Failed to persist messages: ${err.message}`,
+          ),
         );
-      }
+
+      return directPayload;
+    }
+
+    if (directScheduledCallbacksIntent) {
+      const functionResult = await metrics.sf.getScheduledCallbacks(
+        directScheduledCallbacksIntent,
+      );
+
+      const formattedResponse = await formatResult(
+        "getScheduledCallbacks",
+        functionResult,
+        userLang,
+      );
 
       const directPayload = humanizePayload({
         ...formattedResponse,
-        message: directMessage,
+        message: formattedResponse.message,
+      });
+
+      chatSessionService
+        .appendMessages(
+          userId,
+          [
+            { role: "user", content: userMessage },
+            { role: "assistant", content: directPayload.message || "" },
+          ],
+          sessionCache[cacheKey].last_filters,
+          functionResult,
+        )
+        .catch((err) =>
+          logger.error(
+            `[ChatSession] Failed to persist messages: ${err.message}`,
+          ),
+        );
+
+      return directPayload;
+    }
+
+    if (directSentAgentRankingIntent) {
+      const functionResult = await metrics.sf.getSentCasesByAgentRanking(
+        directSentAgentRankingIntent,
+      );
+
+      const formattedResponse = await formatResult(
+        "getSentCasesByAgentRanking",
+        functionResult,
+        userLang,
+      );
+
+      const directPayload = humanizePayload({
+        ...formattedResponse,
+        message: formattedResponse.message,
+      });
+
+      chatSessionService
+        .appendMessages(
+          userId,
+          [
+            { role: "user", content: userMessage },
+            { role: "assistant", content: directPayload.message || "" },
+          ],
+          sessionCache[cacheKey].last_filters,
+          functionResult,
+        )
+        .catch((err) =>
+          logger.error(
+            `[ChatSession] Failed to persist messages: ${err.message}`,
+          ),
+        );
+
+      return directPayload;
+    }
+
+    if (directFakeLeadDQByVendorIntent) {
+      const functionResult = await metrics.sf.getFakeLeadDQByVendorRanking(
+        directFakeLeadDQByVendorIntent,
+      );
+
+      const formattedResponse = await formatResult(
+        "getFakeLeadDQByVendorRanking",
+        functionResult,
+        userLang,
+      );
+
+      const directPayload = humanizePayload({
+        ...formattedResponse,
+        message: formattedResponse.message,
+      });
+
+      chatSessionService
+        .appendMessages(
+          userId,
+          [
+            { role: "user", content: userMessage },
+            { role: "assistant", content: directPayload.message || "" },
+          ],
+          sessionCache[cacheKey].last_filters,
+          functionResult,
+        )
+        .catch((err) =>
+          logger.error(
+            `[ChatSession] Failed to persist messages: ${err.message}`,
+          ),
+        );
+
+      return directPayload;
+    }
+
+    if (directCasesStillInCallbackIntent) {
+      const functionResult = await metrics.sf.getCasesStillInCallback(
+        directCasesStillInCallbackIntent,
+      );
+
+      const formattedResponse = await formatResult(
+        "getCasesStillInCallback",
+        functionResult,
+        userLang,
+      );
+
+      const directPayload = humanizePayload({
+        ...formattedResponse,
+        message: formattedResponse.message,
       });
 
       chatSessionService
@@ -1395,6 +1788,40 @@ exports.processMessage = async (
               args.dateKeyword,
               args.date,
             );
+            break;
+
+          case "getScheduledCallbacks":
+            functionResult = await metrics.sf.getScheduledCallbacks({
+              dateKeyword: args.dateKeyword,
+              date: args.date,
+            });
+            break;
+
+          case "getSentCasesByAgentRanking":
+            functionResult = await metrics.sf.getSentCasesByAgentRanking({
+              sort: args.sort,
+              dateKeyword: args.dateKeyword,
+              date: args.date,
+              period: args.period,
+              limit: args.limit,
+            });
+            break;
+
+          case "getFakeLeadDQByVendorRanking":
+            functionResult = await metrics.sf.getFakeLeadDQByVendorRanking({
+              dateKeyword: args.dateKeyword,
+              date: args.date,
+              period: args.period,
+              limit: args.limit,
+            });
+            break;
+
+          case "getCasesStillInCallback":
+            functionResult = await metrics.sf.getCasesStillInCallback({
+              dateKeyword: args.dateKeyword,
+              date: args.date,
+              period: args.period,
+            });
             break;
 
           case "getCasesByType": {
@@ -1915,6 +2342,13 @@ exports.processMessage = async (
             });
             break;
 
+          case "getCasesWithoutAttemptsByDate":
+            functionResult = await metrics.sql.getCasesWithoutAttemptsByDate({
+              dateKeyword: args.dateKeyword,
+              date: args.date,
+            });
+            break;
+
           case "getAssignedAgentByCaseNumber":
             args.caseNumber =
               args.caseNumber ||
@@ -2000,7 +2434,13 @@ exports.processMessage = async (
       // like claiming no attempts "today" while listing attempts for today's date.
       if (
         functionName === "getAttemptsByCaseNumber" ||
-        functionName === "getAttemptsByPhone"
+        functionName === "getAttemptsByPhone" ||
+        functionName === "getCaseAttemptsByDate" ||
+        functionName === "getCasesWithoutAttemptsByDate" ||
+        functionName === "getScheduledCallbacks" ||
+        functionName === "getSentCasesByAgentRanking" ||
+        functionName === "getFakeLeadDQByVendorRanking" ||
+        functionName === "getCasesStillInCallback"
       ) {
         finalMessage = formattedResponse.message;
       }
@@ -2366,6 +2806,15 @@ exports.processMessage = async (
           ),
         };
 
+      case "SF_CALLBACKS_QUERY_FAILED":
+        return {
+          message: i18n(
+            userLang,
+            "No pude leer los callbacks del calendario con esta cuenta. Revisa permisos de Event/Calendar compartido.",
+            "I could not read calendar callbacks with this account. Please verify Event/shared calendar permissions.",
+          ),
+        };
+
       case "INVALID_VENDOR_NAME":
         return {
           message: i18n(
@@ -2404,6 +2853,26 @@ async function formatResult(type, data, lang = "en") {
 
   if (type === "getCaseAttemptsByDate") {
     return await formatCaseAttemptsByDateResult(data, lang);
+  }
+
+  if (type === "getCasesWithoutAttemptsByDate") {
+    return await formatCasesWithoutAttemptsByDateResult(data, lang);
+  }
+
+  if (type === "getScheduledCallbacks") {
+    return formatScheduledCallbacksResult(data, lang);
+  }
+
+  if (type === "getSentCasesByAgentRanking") {
+    return formatSentCasesByAgentRankingResult(data, lang);
+  }
+
+  if (type === "getFakeLeadDQByVendorRanking") {
+    return formatFakeLeadDQByVendorRankingResult(data, lang);
+  }
+
+  if (type === "getCasesStillInCallback") {
+    return await formatCasesStillInCallbackResult(data, lang);
   }
 
   if (type === "getTotalAttemptsByAgent") {
@@ -2847,6 +3316,297 @@ async function formatCaseAttemptsByDateResult(data, lang = "en") {
 **${i18n(lang, "Lista de Attempts por Caso", "Case Attempts List")}:**
 ${lines}
 `,
+  };
+}
+
+async function formatCasesWithoutAttemptsByDateResult(data, lang = "en") {
+  const records = data?.records || [];
+
+  if (!records.length) {
+    return {
+      message: i18n(
+        lang,
+        `Revise los casos que ingresaron el ${data?.date || "periodo solicitado"} y todos ya tienen attempts registrados.`,
+        `I checked cases entered on ${data?.date || "the requested date"} and all of them already have attempts logged.`,
+      ),
+    };
+  }
+
+  const substatusCounts = records.reduce((acc, item) => {
+    const key = String(item.Substatus__c || "N/A").trim() || "N/A";
+    acc[key] = (acc[key] || 0) + 1;
+    return acc;
+  }, {});
+
+  const substatusLines = Object.entries(substatusCounts)
+    .sort((a, b) => b[1] - a[1])
+    .map(([substatus, count]) => `• ${substatus}: ${count}`)
+    .join("\n");
+
+  if (records.length > BULK_THRESHOLD) {
+    try {
+      const excelRows = records.map((item) => ({
+        CaseNumber: item.CaseNumber,
+        phone: item.phone,
+        attempts: 0,
+        Status: item.Status,
+        Substatus__c: item.Substatus__c,
+        Owner: item.Owner,
+        CreatedDate: item.CreatedDate,
+        date: data.date,
+      }));
+
+      const excelFile = await Promise.resolve(
+        excelService.generateAttemptsExcel(excelRows),
+      );
+
+      return {
+        message: `
+📅 **${i18n(lang, "Fecha", "Date")}:** ${data.date}
+• **${i18n(lang, "Casos evaluados", "Cases evaluated")}:** ${data.totalCases}
+• **${i18n(lang, "Casos sin attempts", "Cases without attempts")}:** ${data.withoutAttemptsCount}
+
+**${i18n(lang, "Conteo por substatus", "Count by substatus")}:**
+${substatusLines}
+
+${i18n(lang, "Como son varios, te genere un Excel con el detalle de los casos que realmente estan en 0 attempts.", "Since there are several, I generated an Excel file with the cases that are truly at 0 attempts.")}
+
+📥 **${i18n(lang, "Archivo", "File")}:** ${excelFile.fileName}
+`,
+        excelFile,
+      };
+    } catch (error) {
+      logger.error(`Error generating no-attempts Excel: ${error.message}`);
+    }
+  }
+
+  const lines = records
+    .slice(0, 30)
+    .map(
+      (item, idx) =>
+        `${idx + 1}. **${item.CaseNumber}** | ${i18n(lang, "telefono", "phone")}: ${item.phone || "N/A"} | ${i18n(lang, "estado", "status")}: ${item.Status || "N/A"}`,
+    )
+    .join("\n");
+
+  return {
+    message: `
+📅 **${i18n(lang, "Fecha", "Date")}:** ${data.date}
+• **${i18n(lang, "Casos evaluados", "Cases evaluated")}:** ${data.totalCases}
+• **${i18n(lang, "Casos sin attempts", "Cases without attempts")}:** ${data.withoutAttemptsCount}
+
+**${i18n(lang, "Conteo por substatus", "Count by substatus")}:**
+${substatusLines}
+
+**${i18n(lang, "Casos que siguen sin attempts", "Cases still without attempts")}:**
+${lines}
+`,
+  };
+}
+
+function formatScheduledCallbacksResult(data, lang = "en") {
+  const records = data?.records || [];
+
+  if (!records.length) {
+    return {
+      message: i18n(
+        lang,
+        `No encontré callbacks programados para ${data?.date || "la fecha solicitada"}.`,
+        `I did not find scheduled callbacks for ${data?.date || "the requested date"}.`,
+      ),
+    };
+  }
+
+  const lines = records
+    .slice(0, 60)
+    .map((item, idx) => {
+      const start = formatDate(item.StartDateTime, true).split(" ")[1] || "N/A";
+      const end = formatDate(item.EndDateTime, true).split(" ")[1] || "N/A";
+      const owner = item.Owner?.Name || "N/A";
+      const caseInfo = item.caseInfo
+        ? ` | ${i18n(lang, "Caso", "Case")}: ${item.caseInfo.caseNumber}`
+        : "";
+      return `${idx + 1}. ${start} - ${end} | ${owner}${caseInfo}`;
+    })
+    .join("\n");
+
+  return {
+    message: `
+📅 **${i18n(lang, "Fecha", "Date")}:** ${data.date}
+• **${i18n(lang, "Callbacks programados", "Scheduled callbacks")}:** ${data.total}
+
+**${i18n(lang, "Hora y agente", "Time and agent")}:**
+${lines}
+`,
+  };
+}
+
+function formatSentCasesByAgentRankingResult(data, lang = "en") {
+  const records = data?.records || [];
+
+  if (!records.length) {
+    return {
+      message: i18n(
+        lang,
+        `No encontré agentes con casos Sent para ${data?.scopeLabel || "la fecha solicitada"}.`,
+        `I did not find agents with Sent cases for ${data?.scopeLabel || "the requested date"}.`,
+      ),
+    };
+  }
+
+  let scopeText =
+    data.scopeLabel || i18n(lang, "la fecha solicitada", "the requested date");
+  if (data.scopeLabel === "today") {
+    scopeText = i18n(lang, "hoy", "today");
+  } else if (data.scopeLabel === "yesterday") {
+    scopeText = i18n(lang, "ayer", "yesterday");
+  } else if (data.scopeLabel === "last_week") {
+    scopeText = i18n(lang, "la ultima semana", "the last week");
+  }
+
+  const title =
+    data.sort === "lowest"
+      ? i18n(
+          lang,
+          "Agentes con menos casos Sent",
+          "Agents with fewer Sent cases",
+        )
+      : i18n(lang, "Agentes con más casos Sent", "Agents with more Sent cases");
+
+  const lines = records
+    .slice(0, 20)
+    .map((item, idx) => {
+      const caseLabel = item.caseNumber
+        ? ` | ${i18n(lang, "Caso", "Case")}: ${item.caseNumber}`
+        : "";
+
+      return `${idx + 1}. **${item.agentName || "N/A"}** | ${i18n(lang, "casos Sent", "Sent cases")}: ${item.totalSent}${caseLabel}`;
+    })
+    .join("\n");
+
+  return {
+    message: `
+👤 **${title}**
+• **${i18n(lang, "Fecha", "Date")}:** ${scopeText}
+• **${i18n(lang, "Agentes listados", "Agents listed")}:** ${data.totalAgents}
+• **${i18n(lang, "Casos Sent totales", "Total Sent cases")}:** ${data.totalSent}
+
+**${i18n(lang, "Ranking", "Ranking")}:**
+${lines}
+`,
+  };
+}
+
+function formatFakeLeadDQByVendorRankingResult(data, lang = "en") {
+  const records = data?.records || [];
+
+  if (!records.length) {
+    return {
+      message: i18n(
+        lang,
+        `No encontré casos DQ por Fake Lead para ${data?.scopeLabel || "la fecha solicitada"}.`,
+        `I did not find DQ Fake Lead cases for ${data?.scopeLabel || "the requested date"}.`,
+      ),
+    };
+  }
+
+  let scopeText =
+    data.scopeLabel || i18n(lang, "la fecha solicitada", "the requested date");
+  if (data.scopeLabel === "today") {
+    scopeText = i18n(lang, "hoy", "today");
+  } else if (data.scopeLabel === "yesterday") {
+    scopeText = i18n(lang, "ayer", "yesterday");
+  } else if (data.scopeLabel === "last_week") {
+    scopeText = i18n(lang, "la ultima semana", "the last week");
+  }
+
+  const lines = records
+    .slice(0, 20)
+    .map((item, idx) => {
+      const cases = (item.caseNumbers || []).filter(Boolean).join(", ");
+      const casesLabel = cases
+        ? ` | ${i18n(lang, "Casos", "Cases")}: ${cases}`
+        : "";
+
+      return `${idx + 1}. **${item.vendorName || "N/A"}** | ${i18n(lang, "Fake Leads DQ", "DQ Fake Leads")}: ${item.totalFakeLead}${casesLabel}`;
+    })
+    .join("\n");
+
+  return {
+    message: `
+🚩 **${i18n(lang, "Casos DQ por Fake Lead por vendor", "DQ Fake Lead cases by vendor")}**
+• **${i18n(lang, "Fecha", "Date")}:** ${scopeText}
+• **${i18n(lang, "Vendors listados", "Vendors listed")}:** ${data.totalVendors}
+• **${i18n(lang, "Total Fake Lead DQ", "Total DQ Fake Leads")}:** ${data.totalFakeLead}
+
+**${i18n(lang, "Ranking", "Ranking")}:**
+${lines}
+`,
+  };
+}
+
+async function formatCasesStillInCallbackResult(data, lang = "en") {
+  const records = data?.records || [];
+
+  let scopeText =
+    data?.scopeLabel || i18n(lang, "la fecha solicitada", "the requested date");
+  if (data?.scopeLabel === "today") {
+    scopeText = i18n(lang, "hoy", "today");
+  } else if (data?.scopeLabel === "yesterday") {
+    scopeText = i18n(lang, "ayer", "yesterday");
+  } else if (data?.scopeLabel === "last_week") {
+    scopeText = i18n(lang, "la ultima semana", "the last week");
+  } else if (data?.scopeLabel === "last_7_days") {
+    scopeText = i18n(lang, "los ultimos 7 dias", "the last 7 days");
+  } else if (data?.scopeLabel === "last_30_days") {
+    scopeText = i18n(lang, "los ultimos 30 dias", "the last 30 days");
+  } else if (data?.scopeLabel === "last_month") {
+    scopeText = i18n(lang, "el ultimo mes", "the last month");
+  }
+
+  if (!records.length) {
+    return {
+      message: i18n(
+        lang,
+        `No encontré casos que sigan en Callback para ${scopeText}.`,
+        `I did not find cases still in Callback for ${scopeText}.`,
+      ),
+    };
+  }
+
+  const header = `📞 **${i18n(lang, "Casos que siguen en Callback", "Cases still in Callback")}**\n• **${i18n(lang, "Rango", "Scope")}:** ${scopeText}\n• **${i18n(lang, "Cantidad", "Total")}:** ${data.total}`;
+
+  // More than 10 → Excel
+  if (records.length > 10) {
+    try {
+      const excelFile = await Promise.resolve(
+        excelService.generateCallbackCasesExcel(records),
+      );
+
+      return {
+        message: `${header}\n\n${i18n(
+          lang,
+          "Son bastantes registros, te armé un Excel con el detalle completo para que los puedas revisar.",
+          "There are many records, so I prepared an Excel file with full details for your review.",
+        )}\n\n📥 **${i18n(lang, "Archivo", "File")}:** ${excelFile.fileName}`,
+        excelFile,
+      };
+    } catch (error) {
+      logger.error(`Error generating callback Excel: ${error.message}`);
+    }
+  }
+
+  // Up to 10 → inline rich list
+  const lines = records
+    .map((item, idx) => {
+      const reason = item.Reason_for_Callback__c || "N/A";
+      const intaker = item.BPO_Intaker__c || "N/A";
+      const owner = item.Owner?.Name || "N/A";
+      return `${idx + 1}. **${item.CaseNumber || "?"}** | Owner: ${owner} | Intaker: ${intaker} | Motivo: ${reason}`;
+    })
+    .join("\n");
+
+  return {
+    message: `${header}\n\n**${i18n(lang, "Detalle", "Detail")}:**\n${lines}\n`,
   };
 }
 

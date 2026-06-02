@@ -157,6 +157,108 @@ exports.askModel = async (messages) => {
           },
         },
         {
+          name: "getScheduledCallbacks",
+          description:
+            "Get scheduled callbacks from Salesforce Calendar (Event) for a day. Use when user asks for CB/callbacks agendados o programados por fecha (hoy, ayer, mañana o fecha exacta). Returns hour range and who will take it (Owner).",
+          parameters: {
+            type: "object",
+            properties: {
+              dateKeyword: {
+                type: "string",
+                enum: ["today", "yesterday", "tomorrow"],
+              },
+              date: {
+                type: "string",
+                description: "Specific date in YYYY-MM-DD format",
+              },
+            },
+          },
+        },
+        {
+          name: "getSentCasesByAgentRanking",
+          description:
+            "Get agents ranked by number of Sent cases for a date scope using BPO_Intaker__c as the agent field. Use when the user asks for agents with more or fewer Sent cases today, yesterday, or last week. Supports highest or lowest ranking. This is for Status='Sent', not signed substatus queries.",
+          parameters: {
+            type: "object",
+            properties: {
+              sort: {
+                type: "string",
+                enum: ["highest", "lowest"],
+                description:
+                  "highest for more Sent cases, lowest for fewer Sent cases",
+              },
+              dateKeyword: {
+                type: "string",
+                enum: ["today", "yesterday", "last_week"],
+              },
+              date: {
+                type: "string",
+                description: "Specific date in YYYY-MM-DD format",
+              },
+              limit: {
+                type: "integer",
+                description: "Top N agents, default 10",
+              },
+            },
+          },
+        },
+        {
+          name: "getFakeLeadDQByVendorRanking",
+          description:
+            "Get Disqualified Fake Lead cases ranked by case owner (vendor). Use when the user asks for fake leads DQ by vendor/case owner for today, yesterday, or last week. Returns totals and sample case numbers per vendor.",
+          parameters: {
+            type: "object",
+            properties: {
+              dateKeyword: {
+                type: "string",
+                enum: ["today", "yesterday", "last_week"],
+              },
+              date: {
+                type: "string",
+                description: "Specific date in YYYY-MM-DD format",
+              },
+              limit: {
+                type: "integer",
+                description: "Top N vendors, default 10",
+              },
+            },
+          },
+        },
+        {
+          name: "getCasesStillInCallback",
+          description:
+            "Get cases that are still in Callback substatus for a time scope (today, yesterday, last 7 days, last 30 days, last week, or last month). Returns total and case numbers.",
+          parameters: {
+            type: "object",
+            properties: {
+              dateKeyword: {
+                type: "string",
+                enum: [
+                  "today",
+                  "yesterday",
+                  "last_week",
+                  "last_7_days",
+                  "last_30_days",
+                  "last_month",
+                ],
+              },
+              period: {
+                type: "string",
+                enum: [
+                  "last_week",
+                  "last_7_days",
+                  "last_30_days",
+                  "last_month",
+                ],
+              },
+              date: {
+                type: "string",
+                description: "Specific date in YYYY-MM-DD format",
+              },
+            },
+          },
+        },
+        {
           name: "getCasesByType",
           description:
             "Get cases filtered by Type, optionally scoped to a date. If user says 'tort', use type='Tort'",

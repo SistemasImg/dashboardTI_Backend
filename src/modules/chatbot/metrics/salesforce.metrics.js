@@ -1,4 +1,5 @@
 const logger = require("../../../utils/logger");
+const { DateTime } = require("luxon");
 const { normalizeDateRange } = require("../../../utils/dateNormalizer");
 
 function buildDateFilter(dateKeyword, date) {
@@ -74,6 +75,229 @@ function resolveDateFieldForStatus(status) {
   return normalized === "sent" ? "Sent_Date2__c" : "CreatedDate";
 }
 
+function resolveCalendarTargetDate(dateKeyword, date) {
+  const keyword = String(dateKeyword || "")
+    .trim()
+    .toLowerCase();
+
+  if (keyword === "today" || keyword === "hoy") {
+    return DateTime.now().toISODate();
+  }
+
+  if (keyword === "yesterday" || keyword === "ayer") {
+    return DateTime.now().minus({ days: 1 }).toISODate();
+  }
+
+  if (keyword === "tomorrow" || keyword === "manana" || keyword === "mañana") {
+    return DateTime.now().plus({ days: 1 }).toISODate();
+  }
+
+  if (date) {
+    const parsed = DateTime.fromISO(String(date).trim());
+    if (!parsed.isValid) {
+      throw new Error("INVALID_DATE_FORMAT");
+    }
+
+    return parsed.toISODate();
+  }
+
+  return DateTime.now().toISODate();
+}
+
+function resolveSentRankingDateScope({ dateKeyword, date, period } = {}) {
+  const keyword = String(dateKeyword || "")
+    .trim()
+    .toLowerCase();
+
+  if (keyword === "today" || keyword === "hoy") {
+    return {
+      clause: "AND Sent_Date2__c = TODAY",
+      scope: "today",
+      label: "today",
+    };
+  }
+
+  if (keyword === "yesterday" || keyword === "ayer") {
+    return {
+      clause: "AND Sent_Date2__c = YESTERDAY",
+      scope: "yesterday",
+      label: "yesterday",
+    };
+  }
+
+  if (keyword === "last_week" || period === "last_week") {
+    return {
+      clause: "AND Sent_Date2__c = LAST_N_DAYS:7",
+      scope: "last_week",
+      label: "last_week",
+    };
+  }
+
+  if (date) {
+    const parsed = DateTime.fromISO(String(date).trim());
+    if (!parsed.isValid) {
+      throw new Error("INVALID_DATE_FORMAT");
+    }
+
+    const isoDate = parsed.toISODate();
+    return {
+      clause: `AND Sent_Date2__c = ${isoDate}`,
+      scope: isoDate,
+      label: isoDate,
+    };
+  }
+
+  return {
+    clause: "AND Sent_Date2__c = TODAY",
+    scope: "today",
+    label: "today",
+  };
+}
+
+function resolveFakeLeadRankingDateScope({ dateKeyword, date, period } = {}) {
+  const keyword = String(dateKeyword || "")
+    .trim()
+    .toLowerCase();
+
+  if (keyword === "today" || keyword === "hoy") {
+    return {
+      clause: "AND CreatedDate = TODAY",
+      scope: "today",
+      label: "today",
+    };
+  }
+
+  if (keyword === "yesterday" || keyword === "ayer") {
+    return {
+      clause: "AND CreatedDate = YESTERDAY",
+      scope: "yesterday",
+      label: "yesterday",
+    };
+  }
+
+  if (keyword === "last_week" || period === "last_week") {
+    return {
+      clause: "AND CreatedDate = LAST_N_DAYS:7",
+      scope: "last_week",
+      label: "last_week",
+    };
+  }
+
+  if (date) {
+    const parsed = DateTime.fromISO(String(date).trim());
+    if (!parsed.isValid) {
+      throw new Error("INVALID_DATE_FORMAT");
+    }
+
+    const isoDate = parsed.toISODate();
+    const { startUTC, endUTC } = normalizeDateRange(isoDate, isoDate);
+
+    return {
+      clause: `AND CreatedDate >= ${startUTC} AND CreatedDate < ${endUTC}`,
+      scope: isoDate,
+      label: isoDate,
+    };
+  }
+
+  return {
+    clause: "AND CreatedDate = TODAY",
+    scope: "today",
+    label: "today",
+  };
+}
+
+function resolveCallbackBacklogDateScope({ dateKeyword, date, period } = {}) {
+  const keyword = String(dateKeyword || "")
+    .trim()
+    .toLowerCase();
+  const normalizedPeriod = String(period || "")
+    .trim()
+    .toLowerCase();
+
+  if (keyword === "today" || keyword === "hoy") {
+    return {
+      clause: "AND CreatedDate = TODAY",
+      scope: "today",
+      label: "today",
+    };
+  }
+
+  if (keyword === "yesterday" || keyword === "ayer") {
+    return {
+      clause: "AND CreatedDate = YESTERDAY",
+      scope: "yesterday",
+      label: "yesterday",
+    };
+  }
+
+  if (
+    keyword === "last_week" ||
+    normalizedPeriod === "last_week" ||
+    normalizedPeriod === "ultima_semana" ||
+    normalizedPeriod === "última_semana"
+  ) {
+    return {
+      clause: "AND CreatedDate = LAST_N_DAYS:7",
+      scope: "last_week",
+      label: "last_week",
+    };
+  }
+
+  if (
+    keyword === "last_7_days" ||
+    normalizedPeriod === "last_7_days" ||
+    normalizedPeriod === "last7days"
+  ) {
+    return {
+      clause: "AND CreatedDate = LAST_N_DAYS:7",
+      scope: "last_7_days",
+      label: "last_7_days",
+    };
+  }
+
+  if (
+    keyword === "last_30_days" ||
+    normalizedPeriod === "last_30_days" ||
+    normalizedPeriod === "last30days"
+  ) {
+    return {
+      clause: "AND CreatedDate = LAST_N_DAYS:30",
+      scope: "last_30_days",
+      label: "last_30_days",
+    };
+  }
+
+  if (keyword === "last_month" || normalizedPeriod === "last_month") {
+    return {
+      clause: "AND CreatedDate = LAST_MONTH",
+      scope: "last_month",
+      label: "last_month",
+    };
+  }
+
+  if (date) {
+    const parsed = DateTime.fromISO(String(date).trim());
+    if (!parsed.isValid) {
+      throw new Error("INVALID_DATE_FORMAT");
+    }
+
+    const isoDate = parsed.toISODate();
+    const { startUTC, endUTC } = normalizeDateRange(isoDate, isoDate);
+
+    return {
+      clause: `AND CreatedDate >= ${startUTC} AND CreatedDate < ${endUTC}`,
+      scope: isoDate,
+      label: isoDate,
+    };
+  }
+
+  return {
+    clause: "AND CreatedDate = TODAY",
+    scope: "today",
+    label: "today",
+  };
+}
+
 function buildVendorDateFilter({
   dateKeyword,
   date,
@@ -116,6 +340,13 @@ function buildIdInClause(ids = []) {
   if (!uniqueIds.length) return "";
 
   return uniqueIds.map((id) => `'${escapeSoqlString(id)}'`).join(",");
+}
+
+function buildTextInClause(values = []) {
+  const uniqueValues = [...new Set((values || []).filter(Boolean))];
+  if (!uniqueValues.length) return "";
+
+  return uniqueValues.map((value) => `'${escapeSoqlString(value)}'`).join(",");
 }
 
 function getSalesforceErrorDetail(error) {
@@ -554,6 +785,326 @@ exports.getCasesBySubstatus = async (
     };
   } catch (error) {
     throw new Error("SF_SUBSTATUS_QUERY_FAILED");
+  }
+};
+
+exports.getCasesStillInCallback = async ({
+  dateKeyword = null,
+  date = null,
+  period = null,
+} = {}) => {
+  try {
+    const sf = await authenticateSalesforce();
+    const dateScope = resolveCallbackBacklogDateScope({
+      dateKeyword,
+      date,
+      period,
+    });
+
+    const soql = `
+      SELECT
+        Id,
+        CaseNumber,
+        Status,
+        Substatus__c,
+        Reason_for_Callback__c,
+        BPO_Intaker__c,
+        Intaker__r.Name,
+        Owner.Name,
+        CreatedDate
+      FROM Case
+      WHERE Substatus__c = 'Callback'
+      ${dateScope.clause}
+      ORDER BY CreatedDate DESC
+    `;
+
+    const result = await runSoqlQueryFull(sf, soql);
+    const records = (result.records || []).map((item) => ({
+      ...item,
+      BPO_Intaker__c: item.BPO_Intaker__c || item.Intaker__r?.Name || null,
+    }));
+
+    return {
+      scope: dateScope.scope,
+      scopeLabel: dateScope.label,
+      total: records.length,
+      caseNumbers: records.map((item) => item.CaseNumber).filter(Boolean),
+      records,
+    };
+  } catch (error) {
+    logger.error(
+      `getCasesStillInCallback failed: ${getSalesforceErrorDetail(error)}`,
+    );
+    throw new Error("SF_CALLBACK_BACKLOG_FAILED");
+  }
+};
+
+exports.getScheduledCallbacks = async ({
+  dateKeyword = null,
+  date = null,
+} = {}) => {
+  try {
+    const sf = await authenticateSalesforce();
+    const targetDate = resolveCalendarTargetDate(dateKeyword, date);
+
+    // Build the UTC range using the local timezone (America/Lima = UTC-5)
+    // so that midnight-to-midnight aligns with the agents' working day,
+    // not with UTC midnight (which would bleed into the previous/next day).
+    const LOCAL_TZ = "America/Lima";
+    const dayStart = DateTime.fromISO(targetDate, { zone: LOCAL_TZ }).startOf(
+      "day",
+    );
+    const dayEnd = dayStart.plus({ days: 1 });
+    const startUTC = dayStart.toUTC().toISO();
+    const endUTC = dayEnd.toUTC().toISO();
+
+    const soql = `
+      SELECT
+        Id,
+        StartDateTime,
+        EndDateTime,
+        Owner.Name,
+        Subject,
+        WhatId
+      FROM Event
+      WHERE StartDateTime >= ${startUTC}
+      AND StartDateTime < ${endUTC}
+      AND (
+        Subject LIKE '%allback%'
+        OR Subject LIKE '%Call to FU%'
+      )
+      ORDER BY StartDateTime ASC
+    `;
+
+    const result = await runSoqlQueryFull(sf, soql);
+    const events = result.records || [];
+
+    // Resolve CaseNumber for events linked to a Case (WhatId starts with '500')
+    const caseIds = [
+      ...new Set(
+        events
+          .map((e) => e.WhatId)
+          .filter((id) => id && String(id).startsWith("500")),
+      ),
+    ];
+
+    const caseNumberById = new Map();
+    if (caseIds.length) {
+      const idClause = buildIdInClause(caseIds);
+      const casesSoql = `
+        SELECT Id, CaseNumber
+        FROM Case
+        WHERE Id IN (${idClause})
+        AND Substatus__c = 'Callback'
+      `;
+      const casesResult = await runSoqlQueryFull(sf, casesSoql);
+      (casesResult.records || []).forEach((c) => {
+        caseNumberById.set(c.Id, { caseNumber: c.CaseNumber });
+      });
+    }
+
+    // Only keep events whose linked case currently has Substatus = Callback
+    const records = events
+      .filter((e) => e.WhatId && caseNumberById.has(e.WhatId))
+      .map((e) => ({
+        ...e,
+        caseInfo: caseNumberById.get(e.WhatId),
+      }));
+
+    return {
+      date: targetDate,
+      total: records.length,
+      records,
+    };
+  } catch (error) {
+    logger.error(
+      `Salesforce scheduled callbacks query error: ${getSalesforceErrorDetail(error)}`,
+    );
+    throw new Error("SF_CALLBACKS_QUERY_FAILED");
+  }
+};
+
+exports.getSentCasesByAgentRanking = async ({
+  sort = "highest",
+  dateKeyword = null,
+  date = null,
+  period = null,
+  limit = 10,
+} = {}) => {
+  try {
+    const sf = await authenticateSalesforce();
+    const dateScope = resolveSentRankingDateScope({
+      dateKeyword,
+      date,
+      period,
+    });
+
+    const sortMode = String(sort || "highest").toLowerCase();
+    const sortDirection = sortMode === "lowest" ? "ASC" : "DESC";
+    const safeLimit =
+      Number.isInteger(limit) && limit > 0 ? Math.min(limit, 50) : 10;
+
+    const soql = `
+      SELECT BPO_Intaker__c, COUNT(Id) totalSent
+      FROM Case
+      WHERE Status = 'Sent'
+      AND BPO_Intaker__c != null
+      ${dateScope.clause}
+      GROUP BY BPO_Intaker__c
+      ORDER BY COUNT(Id) ${sortDirection}
+      LIMIT ${safeLimit}
+    `;
+
+    const result = await runSoqlQueryFull(sf, soql);
+    const baseRecords = (result.records || []).map((row) => ({
+      agentName: String(row.BPO_Intaker__c || "").trim(),
+      totalSent: Number(row.totalSent || 0),
+    }));
+
+    const agentFilter = buildTextInClause(
+      baseRecords.map((item) => item.agentName),
+    );
+
+    const casesByAgent = new Map();
+    if (agentFilter) {
+      const casesSoql = `
+        SELECT CaseNumber, BPO_Intaker__c, CreatedDate
+        FROM Case
+        WHERE Status = 'Sent'
+        AND BPO_Intaker__c IN (${agentFilter})
+        ${dateScope.clause}
+        ORDER BY CreatedDate DESC
+      `;
+
+      const casesResult = await runSoqlQueryFull(sf, casesSoql);
+      (casesResult.records || []).forEach((row) => {
+        const agentName = String(row.BPO_Intaker__c || "").trim();
+        if (!agentName || casesByAgent.has(agentName)) return;
+
+        casesByAgent.set(agentName, row.CaseNumber || null);
+      });
+    }
+
+    const records = baseRecords.map((item) => ({
+      ...item,
+      agentName: item.agentName || "Unknown",
+      caseNumber: casesByAgent.get(item.agentName) || null,
+    }));
+
+    return {
+      sort: sortMode,
+      limit: safeLimit,
+      scope: dateScope.scope,
+      scopeLabel: dateScope.label,
+      totalAgents: records.length,
+      totalSent: records.reduce((sum, item) => sum + item.totalSent, 0),
+      records,
+    };
+  } catch (error) {
+    logger.error(
+      `getSentCasesByAgentRanking failed: ${getSalesforceErrorDetail(error)}`,
+    );
+    throw new Error("SF_SENT_AGENT_RANKING_FAILED");
+  }
+};
+
+exports.getFakeLeadDQByVendorRanking = async ({
+  dateKeyword = null,
+  date = null,
+  period = null,
+  limit = 10,
+} = {}) => {
+  try {
+    const sf = await authenticateSalesforce();
+    const dateScope = resolveFakeLeadRankingDateScope({
+      dateKeyword,
+      date,
+      period,
+    });
+
+    const safeLimit =
+      Number.isInteger(limit) && limit > 0 ? Math.min(limit, 50) : 10;
+
+    const soql = `
+      SELECT OwnerId, Owner.Name, COUNT(Id) totalFakeLead
+      FROM Case
+      WHERE Substatus__c = 'Disqualified'
+      AND Reason_for_DQ__c = 'Fake Lead'
+      AND OwnerId != null
+      ${dateScope.clause}
+      GROUP BY OwnerId, Owner.Name
+      ORDER BY COUNT(Id) DESC
+      LIMIT ${safeLimit}
+    `;
+
+    const result = await runSoqlQueryFull(sf, soql);
+    const baseRecords = (result.records || []).map((row) => ({
+      vendorId: row.OwnerId,
+      vendorName: row.Owner?.Name || "",
+      totalFakeLead: Number(row.totalFakeLead || 0),
+    }));
+
+    const vendorNamesById = await getVendorNamesById(
+      sf,
+      baseRecords.map((item) => item.vendorId),
+    );
+
+    const normalizedRecords = baseRecords.map((item) => ({
+      ...item,
+      vendorName:
+        item.vendorName || vendorNamesById.get(item.vendorId) || "Unknown",
+    }));
+
+    const ownerFilter = buildOwnerInClause(
+      normalizedRecords.map((item) => item.vendorId),
+    );
+
+    const casesByVendorId = new Map();
+    if (ownerFilter) {
+      const detailSoql = `
+        SELECT CaseNumber, OwnerId, CreatedDate
+        FROM Case
+        WHERE Substatus__c = 'Disqualified'
+        AND Reason_for_DQ__c = 'Fake Lead'
+        ${dateScope.clause}
+        ${ownerFilter}
+        ORDER BY CreatedDate DESC
+      `;
+
+      const detailResult = await runSoqlQueryFull(sf, detailSoql);
+      (detailResult.records || []).forEach((row) => {
+        const ownerId = row.OwnerId;
+        if (!ownerId) return;
+
+        if (!casesByVendorId.has(ownerId)) {
+          casesByVendorId.set(ownerId, []);
+        }
+
+        const list = casesByVendorId.get(ownerId);
+        if (list.length < 3 && row.CaseNumber) {
+          list.push(row.CaseNumber);
+        }
+      });
+    }
+
+    const records = normalizedRecords.map((item) => ({
+      ...item,
+      caseNumbers: casesByVendorId.get(item.vendorId) || [],
+    }));
+
+    return {
+      limit: safeLimit,
+      scope: dateScope.scope,
+      scopeLabel: dateScope.label,
+      totalVendors: records.length,
+      totalFakeLead: records.reduce((sum, item) => sum + item.totalFakeLead, 0),
+      records,
+    };
+  } catch (error) {
+    logger.error(
+      `getFakeLeadDQByVendorRanking failed: ${getSalesforceErrorDetail(error)}`,
+    );
+    throw new Error("SF_FAKE_LEAD_DQ_RANKING_FAILED");
   }
 };
 

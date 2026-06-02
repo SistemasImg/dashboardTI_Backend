@@ -209,6 +209,79 @@ exports.generateCasesExcel = async (cases) => {
   }
 };
 
+const CALLBACK_CASES_FILE_NAME = "callback_cases_report.xlsx";
+const CALLBACK_CASES_FILE_URL = `/api/chatbot/download-excel/${CALLBACK_CASES_FILE_NAME}`;
+
+/**
+ * Generate an Excel report for cases still in Callback.
+ * @param {Array} cases - Salesforce Case records with Reason_for_Callback__c, BPO_Intaker__c
+ * @returns {Object} { filePath, fileName, fileUrl }
+ */
+exports.generateCallbackCasesExcel = async (cases) => {
+  try {
+    const workbook = new ExcelJS.Workbook();
+    const worksheet = workbook.addWorksheet("Callback Cases");
+
+    const headers = [
+      "Case Number",
+      "Status",
+      "Substatus",
+      "Reason for Callback",
+      "BPO Intaker",
+      "Owner",
+      "Created Date",
+    ];
+
+    worksheet.columns = headers.map((h) => ({
+      header: h,
+      key: h.toLowerCase().replaceAll(" ", "_"),
+      width: 22,
+    }));
+
+    worksheet.getRow(1).font = { bold: true, color: { argb: "FFFFFFFF" } };
+    worksheet.getRow(1).fill = {
+      type: "pattern",
+      pattern: "solid",
+      fgColor: { argb: "FF4472C4" },
+    };
+
+    (cases || []).forEach((item) => {
+      worksheet.addRow({
+        case_number: item.CaseNumber || "N/A",
+        status: item.Status || "N/A",
+        substatus: item.Substatus__c || "N/A",
+        reason_for_callback: item.Reason_for_Callback__c || "N/A",
+        bpo_intaker: item.BPO_Intaker__c || "N/A",
+        owner: item.Owner?.Name || "N/A",
+        created_date: formatDate(item.CreatedDate),
+      });
+    });
+
+    worksheet.columns.forEach((column) => {
+      let maxLength = 0;
+      column.eachCell({ includeEmpty: true }, (cell) => {
+        const len = getCellTextLength(cell.value);
+        if (len > maxLength) maxLength = len;
+      });
+      column.width = Math.min(maxLength + 2, 50);
+    });
+
+    const filePath = path.join(DOWNLOADS_DIR, CALLBACK_CASES_FILE_NAME);
+    await workbook.xlsx.writeFile(filePath);
+
+    logger.info(`Callback cases Excel generated: ${CALLBACK_CASES_FILE_NAME}`);
+
+    return {
+      filePath,
+      fileName: CALLBACK_CASES_FILE_NAME,
+      fileUrl: CALLBACK_CASES_FILE_URL,
+    };
+  } catch (error) {
+    logger.error(`Error generating callback cases Excel: ${error.message}`);
+    throw error;
+  }
+};
+
 /**
  * Generate a single Excel report file for attempts.
  * @param {Array} attempts - Array of attempts objects
