@@ -31,7 +31,26 @@ function mapSupplierAccount(user) {
   };
 }
 
+function mapDashboardVendor(user) {
+  if (!user) return null;
+
+  const contactName = String(user.Contact?.Name || "").trim();
+  const vendorName = String(user.Contact?.Parent_Account__r?.Name || "").trim();
+
+  if (!contactName || !vendorName) return null;
+
+  return {
+    salesforceId: String(user.Id || "").trim(),
+    name: vendorName,
+    contactName,
+    email: user.Username || null,
+    country: user.Contact?.Country__c || null,
+    status: user.IsActive ? "active" : "inactive",
+  };
+}
+
 module.exports = {
   mapUsersName,
   mapSupplierAccount,
+  mapDashboardVendor,
 };

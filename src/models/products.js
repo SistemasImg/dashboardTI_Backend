@@ -13,6 +13,11 @@ const Product = sequelize.define(
       type: DataTypes.STRING(255),
       allowNull: false,
     },
+    tiers: {
+      type: DataTypes.JSON,
+      allowNull: true,
+      defaultValue: null,
+    },
     status: {
       type: DataTypes.TINYINT,
       allowNull: false,
@@ -34,7 +39,7 @@ const Product = sequelize.define(
     freezeTableName: true,
     createdAt: "created_at",
     updatedAt: "updated_at",
-  }
+  },
 );
 
 module.exports = Product;

@@ -17,6 +17,8 @@ const ClosedCaseWorkStatus = require("./closedCaseWorkStatus");
 const TranscriptionJob = require("./transcriptionJob");
 const TranscriptionSegment = require("./transcriptionSegment");
 const VendorProfile = require("./vendorProfile");
+const Vendor = require("./vendors");
+const VendorCountry = require("./vendorsCountry");
 const VendorTortAssignment = require("./vendorTortAssignment");
 const VendorCaseSnapshot = require("./vendorCaseSnapshot");
 const VendorWeeklyGoal = require("./vendorWeeklyGoal");
@@ -189,6 +191,18 @@ VendorProfile.hasOne(VendorTopReward, {
   constraints: false,
 });
 
+Vendor.belongsTo(VendorCountry, {
+  foreignKey: "country_id",
+  as: "countryInfo",
+  constraints: false,
+});
+
+VendorCountry.hasMany(Vendor, {
+  foreignKey: "country_id",
+  as: "vendors",
+  constraints: false,
+});
+
 module.exports = {
   User,
   Role,
@@ -208,6 +222,8 @@ module.exports = {
   TranscriptionJob,
   TranscriptionSegment,
   VendorProfile,
+  Vendor,
+  VendorCountry,
   VendorTortAssignment,
   VendorCaseSnapshot,
   VendorWeeklyGoal,

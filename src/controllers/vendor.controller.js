@@ -22,6 +22,14 @@ const {
   getVendorAnalyticsTypes,
   getVendorAnalyticsCategoryHistory,
 } = require("../services/vendor/vendor.analytics.service");
+const {
+  syncVendorsTableFromSalesforce,
+  listVendorsTable,
+  listVendorsCountries,
+  createVendorTableEntry,
+  toggleVendorTableStatus,
+  updateVendorsTableById,
+} = require("../services/vendor/vendors.service");
 
 async function syncVendors(req, res, next) {
   logger.info("VendorController → syncVendors() called");
@@ -369,6 +377,110 @@ async function getVendorsAnalyticsCategoryHistory(req, res, next) {
   }
 }
 
+async function syncVendorsTable(req, res, next) {
+  logger.info("VendorController → syncVendorsTable() called");
+
+  try {
+    const result = await syncVendorsTableFromSalesforce();
+    return res.status(200).json(result);
+  } catch (error) {
+    logger.error(
+      `VendorController → syncVendorsTable() error: ${error.message}`,
+      {
+        stack: error.stack,
+        origin: "controller",
+      },
+    );
+    next(error);
+  }
+}
+
+async function getVendorsTable(req, res, next) {
+  logger.info("VendorController → getVendorsTable() called");
+
+  try {
+    const result = await listVendorsTable();
+    return res.status(200).json(result);
+  } catch (error) {
+    logger.error(
+      `VendorController → getVendorsTable() error: ${error.message}`,
+      {
+        stack: error.stack,
+        origin: "controller",
+      },
+    );
+    next(error);
+  }
+}
+
+async function getVendorsCountries(req, res, next) {
+  logger.info("VendorController → getVendorsCountries() called");
+
+  try {
+    const result = await listVendorsCountries();
+    return res.status(200).json(result);
+  } catch (error) {
+    logger.error(
+      `VendorController → getVendorsCountries() error: ${error.message}`,
+      {
+        stack: error.stack,
+        origin: "controller",
+      },
+    );
+    next(error);
+  }
+}
+
+async function createVendorTable(req, res, next) {
+  logger.info("VendorController → createVendorTable() called");
+
+  try {
+    const result = await createVendorTableEntry(req.body);
+    return res.status(201).json(result);
+  } catch (error) {
+    logger.error(
+      `VendorController → createVendorTable() error: ${error.message}`,
+      { stack: error.stack, origin: "controller" },
+    );
+    next(error);
+  }
+}
+
+async function patchVendorTableStatus(req, res, next) {
+  logger.info("VendorController → patchVendorTableStatus() called");
+
+  try {
+    const vendorId = Number(req.params.vendorId);
+    const result = await toggleVendorTableStatus(vendorId, req.body.status);
+    return res.status(200).json(result);
+  } catch (error) {
+    logger.error(
+      `VendorController → patchVendorTableStatus() error: ${error.message}`,
+      { stack: error.stack, origin: "controller" },
+    );
+    next(error);
+  }
+}
+
+async function patchVendorTableById(req, res, next) {
+  logger.info("VendorController → patchVendorTableById() called");
+
+  try {
+    const vendorId = Number(req.params.vendorId);
+    const result = await updateVendorsTableById(vendorId, req.body);
+    return res.status(200).json(result);
+  } catch (error) {
+    logger.error(
+      `VendorController → patchVendorTableById() error: ${error.message}`,
+      {
+        stack: error.stack,
+        origin: "controller",
+      },
+    );
+    next(error);
+  }
+}
+
 module.exports = {
   syncVendors,
   getVendors,
@@ -385,4 +497,10 @@ module.exports = {
   getVendorsAnalyticsVendors,
   getVendorsAnalyticsTypes,
   getVendorsAnalyticsCategoryHistory,
+  syncVendorsTable,
+  getVendorsTable,
+  getVendorsCountries,
+  createVendorTable,
+  patchVendorTableStatus,
+  patchVendorTableById,
 };

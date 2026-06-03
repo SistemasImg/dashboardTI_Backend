@@ -24,7 +24,22 @@ function buildSupplierAccountsQuery() {
   `;
 }
 
+function buildDashboardVendorsQuery() {
+  return `
+    SELECT
+      Contact.Name,
+      Contact.Parent_Account__r.Name,
+      Username,
+      Id,
+      Contact.Country__c,
+      IsActive
+    FROM User
+    WHERE Contact.Name <> Null AND Contact.Parent_Account__r.Name <> Null
+  `;
+}
+
 module.exports = {
   buildUsersQuery,
   buildSupplierAccountsQuery,
+  buildDashboardVendorsQuery,
 };

@@ -1,5 +1,5 @@
 const axios = require("axios");
-const https = require("https");
+const https = require("node:https");
 const salesforceConfig = require("../../config/salesforce");
 
 const httpsAgent = new https.Agent({
@@ -54,7 +54,65 @@ async function runSoqlQueryFull(sf, soql, retries = 2) {
   }
 }
 
+async function patchSalesforceSObject(sf, objectName, recordId, payload) {
+  const endpoint = `${sf.instanceUrl}/services/data/${salesforceConfig.apiVersion}/sobjects/${objectName}/${recordId}`;
+
+  try {
+    await axios.patch(endpoint, payload, {
+      httpsAgent,
+      timeout: 30000,
+      headers: {
+        Authorization: `Bearer ${sf.accessToken}`,
+        "Content-Type": "application/json",
+      },
+    });
+  } catch (error) {
+    const sfErrors = error?.response?.data;
+    const sfDetail = Array.isArray(sfErrors)
+      ? sfErrors.map((e) => `[${e.errorCode}] ${e.message}`).join(" | ")
+      : String(sfErrors || error.message);
+
+    const enriched = new Error(
+      `Salesforce PATCH ${objectName}/${recordId} failed: ${sfDetail}`,
+    );
+    enriched.status = error?.response?.status || 500;
+    enriched.salesforceErrors = sfErrors || null;
+    throw enriched;
+  }
+}
+
+async function createSalesforceSObject(sf, objectName, payload) {
+  const endpoint = `${sf.instanceUrl}/services/data/${salesforceConfig.apiVersion}/sobjects/${objectName}`;
+
+  try {
+    const response = await axios.post(endpoint, payload, {
+      httpsAgent,
+      timeout: 30000,
+      headers: {
+        Authorization: `Bearer ${sf.accessToken}`,
+        "Content-Type": "application/json",
+      },
+    });
+
+    return response.data;
+  } catch (error) {
+    const sfErrors = error?.response?.data;
+    const sfDetail = Array.isArray(sfErrors)
+      ? sfErrors.map((e) => `[${e.errorCode}] ${e.message}`).join(" | ")
+      : String(sfErrors || error.message);
+
+    const enriched = new Error(
+      `Salesforce POST ${objectName} failed: ${sfDetail}`,
+    );
+    enriched.status = error?.response?.status || 500;
+    enriched.salesforceErrors = sfErrors || null;
+    throw enriched;
+  }
+}
+
 module.exports = {
   runSoqlQuery,
   runSoqlQueryFull,
+  patchSalesforceSObject,
+  createSalesforceSObject,
 };
