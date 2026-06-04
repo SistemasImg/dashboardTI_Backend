@@ -8,7 +8,7 @@ const CaseAssignment = require("./caseAssignments");
 const AttemptsDaily = require("./attemptsDaily");
 const State = require("./state");
 const MessageRecords = require("./messageRecords");
-const sendApiRecords = require("./sendApiRecords");
+const casesSalesforce = require("./casesSalesforce");
 const MediaFiles = require("./mediaFile");
 const CallCenter = require("./callCenter");
 const ChatSession = require("./chatSession.model");
@@ -214,7 +214,7 @@ module.exports = {
   AttemptsDaily,
   State,
   MessageRecords,
-  sendApiRecords,
+  casesSalesforce,
   MediaFiles,
   CallCenter,
   CaseComment,

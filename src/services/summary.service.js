@@ -7,7 +7,7 @@ const {
   CaseAssignment,
   AttemptsDaily,
   MessageRecords,
-  sendApiRecords,
+  casesSalesforce,
   CallCenter,
 } = require("../models");
 
@@ -125,7 +125,7 @@ const getSummary = async () => {
   // ========================
   // SALESFORCE OPPORTUNITIES
   // ========================
-  const totalSalesforceOpportunities = await sendApiRecords.count();
+  const totalSalesforceOpportunities = await casesSalesforce.count();
 
   // ========================
   // CONNECTION STATUS
@@ -135,14 +135,14 @@ const getSummary = async () => {
   try {
     await authenticateSalesforce();
     salesforceStatus = "connected";
-  } catch (error) {
+  } catch {
     salesforceStatus = "error";
   }
 
   try {
     const pool = await sqlServerPool.getPool();
     if (pool) sqlServerStatus = "connected";
-  } catch (error) {
+  } catch {
     sqlServerStatus = "error";
   }
 

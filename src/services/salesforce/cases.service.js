@@ -1,26 +1,66 @@
-const logger = require("../utils/logger");
-const apiSendConfig = require("../config/apiSend.config");
+const logger = require("../../utils/logger");
+const salesforceCasesConfig = require("../../config/salesforceCases.config");
 const axios = require("axios");
 const https = require("node:https");
-const { verifyAccessToken } = require("../utils/verifyAccessToken");
-const { sendApiRecords, User } = require("../models");
+const { verifyAccessToken } = require("../../utils/verifyAccessToken");
+const { casesSalesforce, User } = require("../../models");
 
-// HTTPS agent
 const httpsAgent = new https.Agent({
   rejectUnauthorized: false,
 });
 
-// helpers
+function sanitizeHeaders(headers = {}) {
+  const cloned = { ...headers };
+  if (cloned.Authorization) {
+    cloned.Authorization = "[REDACTED]";
+  }
+  return cloned;
+}
+
+function buildAxiosErrorDetails(error) {
+  return {
+    isAxiosError: Boolean(error?.isAxiosError),
+    code: error?.code,
+    status: error?.response?.status,
+    statusText: error?.response?.statusText,
+    responseData: error?.response?.data,
+    request: {
+      method: error?.config?.method,
+      url: error?.config?.url,
+      timeout: error?.config?.timeout,
+      headers: sanitizeHeaders(error?.config?.headers),
+    },
+  };
+}
+
 function getBasicAuthHeader() {
   const token = Buffer.from(
-    `${apiSendConfig.username}:${apiSendConfig.password}`,
+    `${salesforceCasesConfig.username}:${salesforceCasesConfig.password}`,
   ).toString("base64");
 
   return `Basic ${token}`;
 }
 
-exports.apiSendPost = async (data, token) => {
-  logger.info("ApiSendService → apiSendPost() started");
+const createSalesforceCase = async (data, token) => {
+  logger.info("SalesforceCasesService -> createSalesforceCase() started");
+
+  if (
+    !salesforceCasesConfig.url ||
+    !salesforceCasesConfig.username ||
+    !salesforceCasesConfig.password
+  ) {
+    const error = new Error(
+      "Salesforce cases API is not configured. Check SALESFORCE_CASES_API_USER / SALESFORCE_CASES_API_PASSWORD (or legacy API_USER / API_PASSWORD).",
+    );
+    error.status = 500;
+    error.details = {
+      hasUrl: Boolean(salesforceCasesConfig.url),
+      hasUsername: Boolean(salesforceCasesConfig.username),
+      hasPassword: Boolean(salesforceCasesConfig.password),
+    };
+    throw error;
+  }
+
   const decoded = verifyAccessToken(token);
   const userId = decoded.id;
   const { dataValues } = await User.findByPk(userId);
@@ -54,7 +94,7 @@ exports.apiSendPost = async (data, token) => {
       },
     ];
 
-    const response = await axios.post(apiSendConfig.url, payload, {
+    const response = await axios.post(salesforceCasesConfig.url, payload, {
       headers: {
         "Content-Type": "application/json",
         Authorization: getBasicAuthHeader(),
@@ -63,7 +103,7 @@ exports.apiSendPost = async (data, token) => {
       timeout: 15000,
     });
 
-    logger.success("ApiSendService → apiSendPost() SUCCESS");
+    logger.success("SalesforceCasesService -> createSalesforceCase() success");
 
     const apiResponse =
       response.data?.data?.resultCasos?.compositeResponse?.[0];
@@ -74,7 +114,7 @@ exports.apiSendPost = async (data, token) => {
     let message = "Unknown error";
     if (httpStatusCode >= 200 && httpStatusCode < 300) {
       message = "success";
-      await sendApiRecords.create({
+      await casesSalesforce.create({
         email: data.email,
         firstname: data.firstName || data.phone,
         lastname: data.lastName || data.phone,
@@ -96,10 +136,20 @@ exports.apiSendPost = async (data, token) => {
       message,
     };
   } catch (error) {
-    logger.error("ApiSendService → apiSendPost() ERROR", {
-      message: error.response?.data || error.message,
+    const details = buildAxiosErrorDetails(error);
+
+    logger.error("SalesforceCasesService -> createSalesforceCase() error", {
+      message: error.message,
+      details,
     });
+
+    error.status = error.status || (error.response ? 502 : 500);
+    error.details = error.details || details;
 
     throw error;
   }
+};
+
+module.exports = {
+  createSalesforceCase,
 };

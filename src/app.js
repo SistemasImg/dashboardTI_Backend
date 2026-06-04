@@ -43,9 +43,9 @@ app.use("/domains", require("./routes/domain.routes"));
 app.use("/products", require("./routes/product.routes"));
 app.use("/uat", require("./routes/uat.routes"));
 app.use("/salesforce", require("./routes/salesforce.routes"));
+app.use("/salesforce/cases", require("./routes/salesforce/cases.routes"));
 app.use("/assign", require("./routes/caseAssignments.routes"));
 app.use("/state", require("./routes/state.routes"));
-app.use("/api", require("./routes/apiSend.routes"));
 app.use("/owner", require("./routes/owner.routes"));
 app.use("/vendors", require("./routes/vendor.routes"));
 app.use("/infobit", require("./routes/infobit.routes"));
@@ -95,6 +95,10 @@ app.get("/health", (req, res) => {
 // ------------------------------
 app.use((err, req, res, next) => {
   console.error("🔥 Internal Error:", err.message);
+  console.error("🔥 Route:", `${req.method} ${req.originalUrl}`);
+  if (err.stack) {
+    console.error("🔥 Stack:", err.stack);
+  }
   if (err.details) {
     console.error("🔥 Error Details:", err.details);
   }

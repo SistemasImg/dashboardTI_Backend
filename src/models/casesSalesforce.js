@@ -1,8 +1,8 @@
 const { DataTypes } = require("sequelize");
 const sequelize = require("../config/db");
 
-const sendApiRecords = sequelize.define(
-  "sendApi_records",
+const casesSalesforce = sequelize.define(
+  "cases_salesforce",
   {
     id: {
       type: DataTypes.BIGINT.UNSIGNED,
@@ -47,7 +47,7 @@ const sendApiRecords = sequelize.define(
     },
   },
   {
-    tableName: "sendapi_records",
+    tableName: "cases_salesforce",
     timestamps: true,
     createdAt: "created_at",
     updatedAt: "updated_at",
@@ -55,4 +55,4 @@ const sendApiRecords = sequelize.define(
   },
 );
 
-module.exports = sendApiRecords;
+module.exports = casesSalesforce;
