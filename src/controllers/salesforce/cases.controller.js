@@ -14,11 +14,12 @@ const createCaseInSalesforce = async (req, res, next) => {
 
     const token = authHeader.split(" ")[1];
     const result = await createSalesforceCase(req.body, token);
+    const httpStatus = result?.statusMessage === 200 ? 201 : 400;
 
     logger.success(
       "SalesforceCasesController -> createCaseInSalesforce() success",
     );
-    return res.status(201).json(result);
+    return res.status(httpStatus).json(result);
   } catch (error) {
     logger.error(
       `SalesforceCasesController -> createCaseInSalesforce() error: ${error.message}`,

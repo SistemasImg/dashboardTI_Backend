@@ -147,6 +147,14 @@ const createSalesforceCase = async (data, token) => {
       message = body.errors[0]?.message || "Request failed";
     }
 
+    if (httpStatusCode < 200 || httpStatusCode >= 300) {
+      logger.warn("SalesforceCasesService -> non-success composite response", {
+        httpStatusCode,
+        body,
+        responseData: response.data,
+      });
+    }
+
     return {
       statusMessage: httpStatusCode >= 200 && httpStatusCode < 300 ? 200 : 400,
       message,
