@@ -6,6 +6,7 @@ const vendorCategorySchema = require("../schemas/vendorCategory.schema");
 const vendorTortAssignmentSchema = require("../schemas/vendorTortAssignment.schema");
 const vendorRewardSchema = require("../schemas/vendorReward.schema");
 const vendorTableUpdateSchema = require("../schemas/vendorTableUpdate.schema");
+const vendorTableBulkUpdateSchema = require("../schemas/vendorTableBulkUpdate.schema");
 const vendorTableCreateSchema = require("../schemas/vendorTableCreate.schema");
 const vendorTableStatusSchema = require("../schemas/vendorTableStatus.schema");
 const {
@@ -29,6 +30,7 @@ const {
   getVendorsCountries,
   createVendorTable,
   patchVendorTableStatus,
+  patchVendorsTableBulk,
   patchVendorTableById,
 } = require("../controllers/vendor.controller");
 
@@ -52,6 +54,11 @@ router.patch(
   "/table/:vendorId/status",
   validate(vendorTableStatusSchema),
   patchVendorTableStatus,
+);
+router.patch(
+  "/table/bulk",
+  validate(vendorTableBulkUpdateSchema),
+  patchVendorsTableBulk,
 );
 router.patch(
   "/table/:vendorId",

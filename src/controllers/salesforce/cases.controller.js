@@ -16,9 +16,20 @@ const createCaseInSalesforce = async (req, res, next) => {
     const result = await createSalesforceCase(req.body, token);
     const httpStatus = result?.statusMessage === 200 ? 201 : 400;
 
-    logger.success(
-      "SalesforceCasesController -> createCaseInSalesforce() success",
-    );
+    if (httpStatus >= 400) {
+      logger.warn(
+        "SalesforceCasesController -> createCaseInSalesforce() non-success result",
+        {
+          statusMessage: result?.statusMessage,
+          message: result?.message,
+          errorType: result?.errorType,
+        },
+      );
+    } else {
+      logger.success(
+        "SalesforceCasesController -> createCaseInSalesforce() success",
+      );
+    }
     return res.status(httpStatus).json(result);
   } catch (error) {
     logger.error(

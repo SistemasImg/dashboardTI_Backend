@@ -28,6 +28,7 @@ const {
   listVendorsCountries,
   createVendorTableEntry,
   toggleVendorTableStatus,
+  updateVendorsTableBulk,
   updateVendorsTableById,
 } = require("../services/vendor/vendors.service");
 
@@ -481,6 +482,24 @@ async function patchVendorTableById(req, res, next) {
   }
 }
 
+async function patchVendorsTableBulk(req, res, next) {
+  logger.info("VendorController → patchVendorsTableBulk() called");
+
+  try {
+    const result = await updateVendorsTableBulk(req.body.vendorIds, req.body);
+    return res.status(200).json(result);
+  } catch (error) {
+    logger.error(
+      `VendorController → patchVendorsTableBulk() error: ${error.message}`,
+      {
+        stack: error.stack,
+        origin: "controller",
+      },
+    );
+    next(error);
+  }
+}
+
 module.exports = {
   syncVendors,
   getVendors,
@@ -502,5 +521,6 @@ module.exports = {
   getVendorsCountries,
   createVendorTable,
   patchVendorTableStatus,
+  patchVendorsTableBulk,
   patchVendorTableById,
 };

@@ -605,6 +605,52 @@ async function updateVendorsTableById(vendorId, payload = {}) {
   return toPublicVendor(refreshed || row);
 }
 
+async function updateVendorsTableBulk(vendorIds = [], payload = {}) {
+  await ensureVendorsTable();
+
+  const ids = Array.isArray(vendorIds)
+    ? vendorIds
+        .map((item) => Number(item))
+        .filter((item) => Number.isInteger(item) && item > 0)
+    : [];
+
+  const uniqueIds = Array.from(new Set(ids));
+  if (!uniqueIds.length) {
+    const error = new Error("vendorIds must contain at least one valid id");
+    error.status = 400;
+    throw error;
+  }
+
+  const updatePayload = { ...payload };
+  delete updatePayload.vendorIds;
+
+  const updated = [];
+  const failed = [];
+
+  for (const vendorId of uniqueIds) {
+    try {
+      const result = await updateVendorsTableById(vendorId, updatePayload);
+      updated.push(result);
+    } catch (error) {
+      failed.push({
+        vendorId,
+        message: error.message,
+        status: error.status || 500,
+      });
+    }
+  }
+
+  return {
+    summary: {
+      total: uniqueIds.length,
+      updated: updated.length,
+      failed: failed.length,
+    },
+    updated,
+    failed,
+  };
+}
+
 async function createVendorTableEntry(payload = {}) {
   await ensureVendorsTable();
 
@@ -861,5 +907,6 @@ module.exports = {
   listVendorsCountries,
   createVendorTableEntry,
   toggleVendorTableStatus,
+  updateVendorsTableBulk,
   updateVendorsTableById,
 };

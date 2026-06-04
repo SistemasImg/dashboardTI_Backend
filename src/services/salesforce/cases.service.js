@@ -33,6 +33,18 @@ function buildAxiosErrorDetails(error) {
   };
 }
 
+function detectSecurityChallenge(responseData) {
+  if (typeof responseData !== "string") {
+    return false;
+  }
+
+  const normalized = responseData.toLowerCase();
+  return (
+    normalized.includes("/.well-known/sgcaptcha") ||
+    (normalized.includes("<html") && normalized.includes("captcha"))
+  );
+}
+
 function getBasicAuthHeader() {
   const token = Buffer.from(
     `${salesforceCasesConfig.username}:${salesforceCasesConfig.password}`,
@@ -41,45 +53,112 @@ function getBasicAuthHeader() {
   return `Basic ${token}`;
 }
 
+function ensureCasesApiConfig() {
+  if (
+    salesforceCasesConfig.url &&
+    salesforceCasesConfig.username &&
+    salesforceCasesConfig.password
+  ) {
+    return;
+  }
+
+  const error = new Error(
+    "Salesforce cases API is not configured. Check API_USER / API_PASSWORD",
+  );
+  error.status = 500;
+  error.details = {
+    hasUrl: Boolean(salesforceCasesConfig.url),
+    hasUsername: Boolean(salesforceCasesConfig.username),
+    hasPassword: Boolean(salesforceCasesConfig.password),
+  };
+  throw error;
+}
+
+async function getAuthenticatedUser(token) {
+  const decoded = verifyAccessToken(token);
+  const userId = decoded?.id;
+
+  if (!userId) {
+    const authError = new Error("Invalid token payload: missing user id");
+    authError.status = 401;
+    throw authError;
+  }
+
+  const user = await User.findByPk(userId);
+  if (!user) {
+    const userError = new Error(
+      `Authenticated user not found in DB (id: ${userId})`,
+    );
+    userError.status = 401;
+    throw userError;
+  }
+
+  return user;
+}
+
+function resolveSalesforceResult(apiResponse, responseData) {
+  const httpStatusCode = apiResponse?.httpStatusCode ?? 500;
+  const body = apiResponse?.body;
+  const isSuccess = httpStatusCode >= 200 && httpStatusCode < 300;
+  const isSecurityChallenge = detectSecurityChallenge(responseData);
+
+  if (isSuccess) {
+    return {
+      httpStatusCode,
+      body,
+      isSuccess,
+      isSecurityChallenge,
+      message: "success",
+    };
+  }
+
+  if (isSecurityChallenge) {
+    return {
+      httpStatusCode,
+      body,
+      isSuccess,
+      isSecurityChallenge,
+      message:
+        "Upstream security challenge detected (captcha). The provider is blocking requests from this server origin.",
+    };
+  }
+
+  if (Array.isArray(body) && body.length > 0) {
+    return {
+      httpStatusCode,
+      body,
+      isSuccess,
+      isSecurityChallenge,
+      message: body[0]?.message || "Request failed",
+    };
+  }
+
+  if (body?.errors && body.errors.length > 0) {
+    return {
+      httpStatusCode,
+      body,
+      isSuccess,
+      isSecurityChallenge,
+      message: body.errors[0]?.message || "Request failed",
+    };
+  }
+
+  return {
+    httpStatusCode,
+    body,
+    isSuccess,
+    isSecurityChallenge,
+    message: "Unknown error",
+  };
+}
+
 const createSalesforceCase = async (data, token) => {
   logger.info("SalesforceCasesService -> createSalesforceCase() started");
 
-  if (
-    !salesforceCasesConfig.url ||
-    !salesforceCasesConfig.username ||
-    !salesforceCasesConfig.password
-  ) {
-    const error = new Error(
-      "Salesforce cases API is not configured. Check SALESFORCE_CASES_API_USER / SALESFORCE_CASES_API_PASSWORD (or legacy API_USER / API_PASSWORD).",
-    );
-    error.status = 500;
-    error.details = {
-      hasUrl: Boolean(salesforceCasesConfig.url),
-      hasUsername: Boolean(salesforceCasesConfig.username),
-      hasPassword: Boolean(salesforceCasesConfig.password),
-    };
-    throw error;
-  }
+  ensureCasesApiConfig();
 
   try {
-    const decoded = verifyAccessToken(token);
-    const userId = decoded?.id;
-
-    if (!userId) {
-      const authError = new Error("Invalid token payload: missing user id");
-      authError.status = 401;
-      throw authError;
-    }
-
-    const user = await User.findByPk(userId);
-    if (!user) {
-      const userError = new Error(
-        `Authenticated user not found in DB (id: ${userId})`,
-      );
-      userError.status = 401;
-      throw userError;
-    }
-
+    const user = await getAuthenticatedUser(token);
     const { dataValues } = user;
 
     const payload = [
@@ -124,12 +203,9 @@ const createSalesforceCase = async (data, token) => {
     const apiResponse =
       response.data?.data?.resultCasos?.compositeResponse?.[0];
 
-    const httpStatusCode = apiResponse?.httpStatusCode ?? 500;
-    const body = apiResponse?.body;
+    const result = resolveSalesforceResult(apiResponse, response.data);
 
-    let message = "Unknown error";
-    if (httpStatusCode >= 200 && httpStatusCode < 300) {
-      message = "success";
+    if (result.isSuccess) {
       await casesSalesforce.create({
         email: data.email,
         firstname: data.firstName || data.phone,
@@ -141,23 +217,22 @@ const createSalesforceCase = async (data, token) => {
         supplier: data.ownerId,
         userId: dataValues.id,
       });
-    } else if (Array.isArray(body) && body.length > 0) {
-      message = body[0]?.message || "Request failed";
-    } else if (body?.errors && body.errors.length > 0) {
-      message = body.errors[0]?.message || "Request failed";
     }
 
-    if (httpStatusCode < 200 || httpStatusCode >= 300) {
+    if (!result.isSuccess) {
       logger.warn("SalesforceCasesService -> non-success composite response", {
-        httpStatusCode,
-        body,
+        httpStatusCode: result.httpStatusCode,
+        body: result.body,
         responseData: response.data,
       });
     }
 
     return {
-      statusMessage: httpStatusCode >= 200 && httpStatusCode < 300 ? 200 : 400,
-      message,
+      statusMessage: result.isSuccess ? 200 : 400,
+      message: result.message,
+      errorType: result.isSecurityChallenge
+        ? "UPSTREAM_SECURITY_CHALLENGE"
+        : null,
     };
   } catch (error) {
     const details = buildAxiosErrorDetails(error);
