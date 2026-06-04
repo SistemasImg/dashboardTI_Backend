@@ -9,7 +9,13 @@ const tortSchema = Joi.object({
 const vendorTableUpdateSchema = Joi.object({
   countryId: Joi.number().integer().positive().allow(null).optional(),
   country: Joi.string().trim().max(100).allow(null, "").optional(),
-  communicationChannel: Joi.string().trim().max(255).allow(null, "").optional(),
+  communicationChannel: Joi.alternatives()
+    .try(
+      Joi.string().trim().max(255),
+      Joi.array().items(Joi.string().trim().max(255)).max(2),
+    )
+    .allow(null, "")
+    .optional(),
   torts: Joi.alternatives()
     .try(tortSchema, Joi.array().items(tortSchema))
     .optional(),

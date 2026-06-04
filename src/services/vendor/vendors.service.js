@@ -14,6 +14,10 @@ const { mapDashboardVendor } = require("../salesforce/mappers/users.mapper");
 const { Vendor, Product, VendorCountry } = require("../../models");
 
 function toPublicVendor(row) {
+  const communicationChannels = parseCommunicationChannels(
+    row.communication_channel,
+  );
+
   return {
     id: row.id,
     salesforceId: row.salesforce_id,
@@ -24,7 +28,7 @@ function toPublicVendor(row) {
     country: row.countryInfo?.name || null,
     status: row.status,
     supplierSegment: row.supplier_segment,
-    communicationChannel: row.communication_channel || null,
+    communicationChannel: communicationChannels,
     tortTierStatuses: Array.isArray(row.tort_tier_statuses)
       ? row.tort_tier_statuses
       : [],
@@ -207,6 +211,62 @@ function normalizeStringOrNull(value) {
   if (value == null) return null;
   const normalized = String(value).trim();
   return normalized || null;
+}
+
+function hasOwn(object, key) {
+  return Object.prototype.hasOwnProperty.call(object, key);
+}
+
+function normalizeCommunicationChannelsInput(value) {
+  if (value == null || value === "") return [];
+
+  const rawList = Array.isArray(value) ? value : [value];
+  const normalized = rawList
+    .map((item) => String(item || "").trim())
+    .filter(Boolean);
+
+  const dedup = [];
+  const seen = new Set();
+  for (const item of normalized) {
+    const key = item.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    dedup.push(item);
+  }
+
+  if (dedup.length > 2) {
+    const error = new Error("communicationChannel accepts at most 2 values");
+    error.status = 400;
+    throw error;
+  }
+
+  return dedup;
+}
+
+function serializeCommunicationChannels(list) {
+  if (!Array.isArray(list) || !list.length) return null;
+  return JSON.stringify(list);
+}
+
+function parseCommunicationChannels(value) {
+  if (value == null || value === "") return [];
+
+  const text = String(value).trim();
+  if (!text) return [];
+
+  try {
+    const parsed = JSON.parse(text);
+    if (Array.isArray(parsed)) {
+      return parsed
+        .map((item) => String(item || "").trim())
+        .filter(Boolean)
+        .slice(0, 2);
+    }
+  } catch (_error) {
+    return [text];
+  }
+
+  return [text];
 }
 
 function escapeSoqlString(value) {
@@ -414,28 +474,19 @@ async function updateVendorsTableById(vendorId, payload = {}) {
   }
 
   const nextCountryText = normalizeStringOrNull(payload.country);
-  const nextCommunicationChannel = normalizeStringOrNull(
-    payload.communicationChannel,
-  );
+  const nextCommunicationChannels = hasOwn(payload, "communicationChannel")
+    ? normalizeCommunicationChannelsInput(payload.communicationChannel)
+    : [];
   const nextTorts = normalizeTortsInput(payload.torts);
   const nextPostingMethods = normalizePostingMethodsInput(
     payload.postingMethods,
   );
 
-  const hasCountry = Object.prototype.hasOwnProperty.call(payload, "country");
-  const hasCountryId = Object.prototype.hasOwnProperty.call(
-    payload,
-    "countryId",
-  );
-  const hasCommunicationChannel = Object.prototype.hasOwnProperty.call(
-    payload,
-    "communicationChannel",
-  );
-  const hasTorts = Object.prototype.hasOwnProperty.call(payload, "torts");
-  const hasPostingMethods = Object.prototype.hasOwnProperty.call(
-    payload,
-    "postingMethods",
-  );
+  const hasCountry = hasOwn(payload, "country");
+  const hasCountryId = hasOwn(payload, "countryId");
+  const hasCommunicationChannel = hasOwn(payload, "communicationChannel");
+  const hasTorts = hasOwn(payload, "torts");
+  const hasPostingMethods = hasOwn(payload, "postingMethods");
 
   if (
     !hasCountry &&
@@ -524,7 +575,9 @@ async function updateVendorsTableById(vendorId, payload = {}) {
     }
 
     if (hasCommunicationChannel) {
-      updatePayload.communication_channel = nextCommunicationChannel;
+      updatePayload.communication_channel = serializeCommunicationChannels(
+        nextCommunicationChannels,
+      );
     }
 
     if (hasTorts) {
@@ -559,7 +612,7 @@ async function createVendorTableEntry(payload = {}) {
   const vendorName = String(payload.name || "").trim();
   const email = String(payload.email || "").trim();
   const status = String(payload.status || "active").toLowerCase();
-  const communicationChannel = normalizeStringOrNull(
+  const communicationChannels = normalizeCommunicationChannelsInput(
     payload.communicationChannel,
   );
   const nextTorts = normalizeTortsInput(payload.torts);
@@ -695,7 +748,9 @@ async function createVendorTableEntry(payload = {}) {
         country_id: nextCountryId,
         status,
         supplier_segment: "New Review",
-        communication_channel: communicationChannel,
+        communication_channel: serializeCommunicationChannels(
+          communicationChannels,
+        ),
         tort_tier_statuses: nextTorts || [],
         posting_methods: nextPostingMethods || [],
       },
