@@ -61,11 +61,27 @@ const createSalesforceCase = async (data, token) => {
     throw error;
   }
 
-  const decoded = verifyAccessToken(token);
-  const userId = decoded.id;
-  const { dataValues } = await User.findByPk(userId);
-
   try {
+    const decoded = verifyAccessToken(token);
+    const userId = decoded?.id;
+
+    if (!userId) {
+      const authError = new Error("Invalid token payload: missing user id");
+      authError.status = 401;
+      throw authError;
+    }
+
+    const user = await User.findByPk(userId);
+    if (!user) {
+      const userError = new Error(
+        `Authenticated user not found in DB (id: ${userId})`,
+      );
+      userError.status = 401;
+      throw userError;
+    }
+
+    const { dataValues } = user;
+
     const payload = [
       {
         email: data.email,
