@@ -10,6 +10,7 @@ pnpm-lock.yaml
 package-lock.json
 yarn.lock
 
+wpSalesforceApiLoad
 node_modules
 dist
 dist-ssr

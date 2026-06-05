@@ -12,6 +12,7 @@ SELECT
   Id,
   Supplier_Segment__c,
   Origin,
+  Reason_for_Callback__c,
   OwnerId
 FROM Case
 WHERE Status IN ('In Progress','New')

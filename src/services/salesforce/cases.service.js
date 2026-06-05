@@ -2,6 +2,7 @@ const logger = require("../../utils/logger");
 const salesforceCasesConfig = require("../../config/salesforceCases.config");
 const axios = require("axios");
 const https = require("node:https");
+const crypto = require("node:crypto");
 const { verifyAccessToken } = require("../../utils/verifyAccessToken");
 const { casesSalesforce, User } = require("../../models");
 
@@ -51,6 +52,37 @@ function getBasicAuthHeader() {
   ).toString("base64");
 
   return `Basic ${token}`;
+}
+
+function buildRequestHeaders(payload) {
+  const headers = {
+    "Content-Type": "application/json",
+    Accept: "application/json, text/plain, */*",
+    Authorization: getBasicAuthHeader(),
+    "User-Agent": salesforceCasesConfig.userAgent,
+  };
+
+  if (salesforceCasesConfig.internalKey) {
+    const timestamp = new Date().toISOString();
+    const body = JSON.stringify(payload);
+
+    headers["X-Api-Internal-Key"] = salesforceCasesConfig.internalKey;
+    headers["X-Api-Timestamp"] = timestamp;
+    headers["X-Api-Checksum"] = crypto
+      .createHash("sha256")
+      .update(`${timestamp}.${body}`)
+      .digest("hex");
+  }
+
+  return headers;
+}
+
+async function postCases(url, payload) {
+  return axios.post(url, payload, {
+    headers: buildRequestHeaders(payload),
+    httpsAgent,
+    timeout: 15000,
+  });
 }
 
 function ensureCasesApiConfig() {
@@ -189,21 +221,31 @@ const createSalesforceCase = async (data, token) => {
       },
     ];
 
-    const response = await axios.post(salesforceCasesConfig.url, payload, {
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: getBasicAuthHeader(),
-      },
-      httpsAgent,
-      timeout: 15000,
-    });
+    let response = await postCases(salesforceCasesConfig.url, payload);
 
     logger.success("SalesforceCasesService -> createSalesforceCase() success");
 
-    const apiResponse =
-      response.data?.data?.resultCasos?.compositeResponse?.[0];
+    let apiResponse = response.data?.data?.resultCasos?.compositeResponse?.[0];
 
-    const result = resolveSalesforceResult(apiResponse, response.data);
+    let result = resolveSalesforceResult(apiResponse, response.data);
+
+    if (
+      result.isSecurityChallenge &&
+      salesforceCasesConfig.fallbackUrl &&
+      salesforceCasesConfig.fallbackUrl !== salesforceCasesConfig.url
+    ) {
+      logger.warn(
+        "SalesforceCasesService -> security challenge on primary URL, retrying fallback URL",
+        {
+          primaryUrl: salesforceCasesConfig.url,
+          fallbackUrl: salesforceCasesConfig.fallbackUrl,
+        },
+      );
+
+      response = await postCases(salesforceCasesConfig.fallbackUrl, payload);
+      apiResponse = response.data?.data?.resultCasos?.compositeResponse?.[0];
+      result = resolveSalesforceResult(apiResponse, response.data);
+    }
 
     if (result.isSuccess) {
       await casesSalesforce.create({
