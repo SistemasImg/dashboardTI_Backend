@@ -135,7 +135,7 @@ function computeWeeklyGoalResults(assignments, snapshots) {
 
       const actualInflow = weekSnapshots.filter(
         (s) =>
-          String(s.case_type || "")
+          String(s.caseProduct?.name || s.product?.name || "")
             .trim()
             .toLowerCase() === productName.toLowerCase(),
       ).length;
@@ -560,10 +560,18 @@ async function evaluateCategoryRules() {
         model: VendorCaseSnapshot,
         as: "caseSnapshots",
         attributes: [
-          "case_type",
+          "product_id",
           "case_created_at",
           "signed_date",
           "sub_status",
+        ],
+        include: [
+          {
+            model: Product,
+            as: "caseProduct",
+            attributes: ["id", "name"],
+            required: false,
+          },
         ],
       },
     ],

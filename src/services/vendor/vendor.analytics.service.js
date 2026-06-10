@@ -320,11 +320,19 @@ function typeFilterAllowsCase(typeFilter, caseType) {
   return typeFilter.typeNames.includes(normalizeText(caseType));
 }
 
+function getSnapshotTypeName(row) {
+  return (
+    String(row?.caseProduct?.name || row?.product?.name || "Unknown").trim() ||
+    "Unknown"
+  );
+}
+
 function buildVendorMetricsFromSnapshots(snapshots, typeFilter) {
   const byVendorId = new Map();
 
   snapshots.forEach((row) => {
-    if (!typeFilterAllowsCase(typeFilter, row.case_type)) return;
+    const typeName = getSnapshotTypeName(row);
+    if (!typeFilterAllowsCase(typeFilter, typeName)) return;
 
     const vendorId = Number(row.vendor_id);
     if (!byVendorId.has(vendorId)) {
@@ -342,7 +350,6 @@ function buildVendorMetricsFromSnapshots(snapshots, typeFilter) {
       entry.accepted += 1;
     }
 
-    const typeName = String(row.case_type || "Unknown").trim() || "Unknown";
     if (!entry.byType[typeName]) {
       entry.byType[typeName] = {
         inflow: 0,
@@ -466,9 +473,17 @@ async function loadAnalyticsDataset(rawFilters = {}) {
         },
         attributes: [
           "vendor_id",
-          "case_type",
+          "product_id",
           "case_created_at",
           "signed_date",
+        ],
+        include: [
+          {
+            model: Product,
+            as: "caseProduct",
+            attributes: ["id", "name"],
+            required: false,
+          },
         ],
       })
     : [];
@@ -618,7 +633,8 @@ function buildTrendsResponse(dataset) {
   const inflowByBucket = new Map();
 
   dataset.snapshots.forEach((row) => {
-    if (!typeFilterAllowsCase(dataset.typeFilter, row.case_type)) return;
+    const typeName = getSnapshotTypeName(row);
+    if (!typeFilterAllowsCase(dataset.typeFilter, typeName)) return;
 
     const bucket =
       granularity === "day"
@@ -782,9 +798,9 @@ function buildTypesResponse(dataset) {
   const typeMap = new Map();
 
   dataset.snapshots.forEach((row) => {
-    if (!typeFilterAllowsCase(dataset.typeFilter, row.case_type)) return;
+    const typeName = getSnapshotTypeName(row);
+    if (!typeFilterAllowsCase(dataset.typeFilter, typeName)) return;
 
-    const typeName = String(row.case_type || "Unknown").trim() || "Unknown";
     if (!typeMap.has(typeName)) {
       typeMap.set(typeName, {
         type: typeName,
