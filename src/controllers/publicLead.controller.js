@@ -13,10 +13,27 @@ const STATIC_FORM_CONFIGS = {
     gf_form_id: 169,
     campaign_product: "RIDESHARE-07100",
     campaign_topic: "rideshare",
+    source: "rideshare-landing",
+  },
+  depo_provera: {
+    slug: "depo_provera",
+    gf_form_id: 180,
+    campaign_product: "DEPO_PROVERA-04118",
+    campaign_topic: "depo-provera",
+    source: "depo-provera-landing",
   },
 };
 
 const DEFAULT_FORM_CONFIG = STATIC_FORM_CONFIGS.rideshare;
+
+const FORM_SLUG_ALIASES = {
+  rideshare: "rideshare",
+  "rideshare-07100": "rideshare",
+  depo_provera: "depo_provera",
+  "depo-provera": "depo_provera",
+  "depo_provera-04118": "depo_provera",
+  "depo-provera-04118": "depo_provera",
+};
 
 const leadSchema = Joi.object({
   assaulted: Joi.string().valid("YES", "NO").required(),
@@ -56,7 +73,9 @@ function isAllowedOrigin(origin) {
 }
 
 function getFormConfigBySlug(formSlug) {
-  return STATIC_FORM_CONFIGS[formSlug] || DEFAULT_FORM_CONFIG;
+  const normalized = normalizeString(formSlug).toLowerCase();
+  const resolvedSlug = FORM_SLUG_ALIASES[normalized] || normalized;
+  return STATIC_FORM_CONFIGS[resolvedSlug] || null;
 }
 
 function buildGravityPayload(data, requestMeta, formConfig) {
@@ -121,7 +140,7 @@ function buildActiveProspectPayload(data, requestMeta, formConfig) {
     state: data.state,
     trustedform_cert_url: data.trustedform_cert_url,
     source_url: requestMeta.sourceUrl,
-    source: "rideshare-landing",
+    source: formConfig?.source || "public-landing",
     campaign_product: formConfig?.campaign_product || "",
     campaign_topic: formConfig?.campaign_topic || "",
     facebook_field_data_apros: JSON.stringify(fieldData),
@@ -134,11 +153,21 @@ async function submitRideshareLead(req, res) {
   try {
     const origin = req.headers.origin || "";
     const ip = req.ip || req.headers["x-forwarded-for"] || "unknown";
-    const formSlug = normalizeString(req.body.form_slug) || "rideshare";
+    const requestedFormSlug = normalizeString(req.body.form_slug);
+    const formSlug = requestedFormSlug || "rideshare";
+    const formConfig = getFormConfigBySlug(formSlug);
 
     logger.info(
       `Public lead received | slug=${formSlug} | origin=${origin || "n/a"} | ip=${ip}`,
     );
+
+    if (!formConfig) {
+      logger.warn(`Public lead unsupported form slug | slug=${formSlug}`);
+      return res.status(400).json({
+        success: false,
+        message: "Unsupported form_slug",
+      });
+    }
 
     if (origin && !isAllowedOrigin(origin)) {
       logger.warn(
@@ -198,7 +227,6 @@ async function submitRideshareLead(req, res) {
       });
     }
 
-    const formConfig = getFormConfigBySlug(formSlug);
     const resolvedFormId = Number(formConfig?.gf_form_id);
 
     logger.info(

@@ -463,14 +463,24 @@ async function syncVendorsFromSalesforce() {
           const vendorId = profileIdBySalesforceUserId.get(row?.OwnerId);
           const caseId = String(row?.Id || "").trim();
           const caseNumber = String(row?.CaseNumber || "").trim();
+          const caseTypeName =
+            String(row?.Type || "Unknown").trim() || "Unknown";
+          const product = productMap.get(caseTypeName.toLowerCase());
 
-          if (!vendorId || !caseId || !caseNumber) return null;
+          if (!vendorId || !caseId || !caseNumber || !product?.id) {
+            if (vendorId && caseId && caseNumber && !product?.id) {
+              logger.warn(
+                `VendorService → syncVendorsFromSalesforce() case type not found in products: "${caseTypeName}" (case: ${caseNumber})`,
+              );
+            }
+            return null;
+          }
 
           return {
             vendor_id: vendorId,
+            product_id: product.id,
             salesforce_case_id: caseId,
             case_number: caseNumber,
-            case_type: String(row?.Type || "Unknown").trim() || "Unknown",
             case_created_at: safeDate(row?.CreatedDate),
             signed_date: row?.Signed_Date__c
               ? safeDate(row.Signed_Date__c)
@@ -771,7 +781,9 @@ function buildCaseEntriesByTypeMap(rows = []) {
 
   rows.forEach((row) => {
     const type =
-      String(row?.Type || row?.case_type || "Unknown").trim() || "Unknown";
+      String(
+        row?.Type || row?.caseProduct?.name || row?.product?.name || "Unknown",
+      ).trim() || "Unknown";
     const caseNumber = String(row?.CaseNumber || row?.case_number || "").trim();
     const caseId = String(row?.Id || row?.salesforce_case_id || "").trim();
 
@@ -1083,7 +1095,14 @@ async function getVendorInsightsById(vendorId) {
       {
         model: VendorCaseSnapshot,
         as: "caseSnapshots",
-        attributes: ["salesforce_case_id", "case_number", "case_type"],
+        attributes: ["salesforce_case_id", "case_number", "product_id"],
+        include: [
+          {
+            model: Product,
+            as: "caseProduct",
+            attributes: ["id", "name"],
+          },
+        ],
       },
       {
         model: VendorWeeklyGoal,

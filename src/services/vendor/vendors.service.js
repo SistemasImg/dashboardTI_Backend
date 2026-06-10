@@ -213,6 +213,28 @@ function normalizeStringOrNull(value) {
   return normalized || null;
 }
 
+function splitContactName(value) {
+  const normalized = String(value || "").trim();
+  if (!normalized) {
+    const error = new Error("contactName cannot be empty");
+    error.status = 400;
+    throw error;
+  }
+
+  const parts = normalized.split(/\s+/);
+  if (parts.length === 1) {
+    return {
+      firstName: null,
+      lastName: parts[0],
+    };
+  }
+
+  return {
+    firstName: parts[0],
+    lastName: parts.slice(1).join(" "),
+  };
+}
+
 function hasOwn(object, key) {
   return Object.prototype.hasOwnProperty.call(object, key);
 }
@@ -415,51 +437,164 @@ async function syncProductTiersByTorts(torts, transaction) {
 }
 
 async function syncCountryToSalesforce({ salesforceUserId, country }) {
-  const sf = await authenticateSalesforce();
-  const escapedUserId = escapeSoqlString(salesforceUserId);
+  return syncVendorIdentityToSalesforce({
+    salesforceRefId: salesforceUserId,
+    hasCountry: true,
+    country,
+  });
+}
 
-  logger.info(
-    `VendorsService → syncCountryToSalesforce() querying User: ${salesforceUserId}`,
-  );
+async function resolveSalesforceContactContext(sf, salesforceRefId) {
+  const refId = String(salesforceRefId || "").trim();
+  if (!refId) {
+    const error = new Error("Missing salesforce reference id");
+    error.status = 400;
+    throw error;
+  }
 
-  const rows = await runSoqlQuery(
+  let contactId = null;
+
+  if (refId.startsWith("003")) {
+    contactId = refId;
+  } else if (refId.startsWith("005")) {
+    const escapedUserId = escapeSoqlString(refId);
+    const userRows = await runSoqlQuery(
+      sf,
+      `SELECT Id, ContactId FROM User WHERE Id = '${escapedUserId}' LIMIT 1`,
+    );
+
+    const user = userRows?.[0];
+    if (!user) {
+      const error = new Error(`Salesforce user not found for id: ${refId}`);
+      error.status = 404;
+      throw error;
+    }
+
+    contactId = user.ContactId || null;
+    if (!contactId) {
+      const error = new Error(
+        `Salesforce user ${refId} has no linked ContactId`,
+      );
+      error.status = 400;
+      throw error;
+    }
+  } else {
+    const escapedRefId = escapeSoqlString(refId);
+    const contactRows = await runSoqlQuery(
+      sf,
+      `SELECT Id, AccountId FROM Contact WHERE Id = '${escapedRefId}' LIMIT 1`,
+    );
+    if (contactRows?.[0]?.Id) {
+      return {
+        contactId: contactRows[0].Id,
+        accountId: contactRows[0].AccountId || null,
+      };
+    }
+
+    const userRows = await runSoqlQuery(
+      sf,
+      `SELECT Id, ContactId FROM User WHERE Id = '${escapedRefId}' LIMIT 1`,
+    );
+
+    const user = userRows?.[0];
+    if (!user) {
+      const error = new Error(
+        `Salesforce record not found for reference id: ${refId}`,
+      );
+      error.status = 404;
+      throw error;
+    }
+
+    contactId = user.ContactId || null;
+    if (!contactId) {
+      const error = new Error(
+        `Salesforce user ${refId} has no linked ContactId`,
+      );
+      error.status = 400;
+      throw error;
+    }
+  }
+
+  const escapedContactId = escapeSoqlString(contactId);
+  const contactRows = await runSoqlQuery(
     sf,
-    `SELECT Id, ContactId FROM User WHERE Id = '${escapedUserId}' LIMIT 1`,
+    `SELECT Id, AccountId FROM Contact WHERE Id = '${escapedContactId}' LIMIT 1`,
   );
 
-  const user = rows?.[0];
-  const contactId = user?.ContactId;
-
-  logger.info(
-    `VendorsService → syncCountryToSalesforce() User found: ${Boolean(user)} | ContactId: ${contactId || "none"}`,
-  );
-
-  if (!user) {
+  const contact = contactRows?.[0];
+  if (!contact) {
     const error = new Error(
-      `Salesforce user not found for id: ${salesforceUserId}`,
+      `Salesforce contact not found for id: ${contactId}`,
     );
     error.status = 404;
     throw error;
   }
 
-  if (!contactId) {
-    const error = new Error(
-      `Salesforce user ${salesforceUserId} has no linked ContactId. Country cannot be synced.`,
-    );
-    error.status = 400;
-    throw error;
-  }
+  return {
+    contactId: contact.Id,
+    accountId: contact.AccountId || null,
+  };
+}
 
-  logger.info(
-    `VendorsService → syncCountryToSalesforce() patching Contact ${contactId} Country__c = "${country}"`,
+async function syncVendorIdentityToSalesforce({
+  salesforceRefId,
+  hasCountry,
+  country,
+  hasContactName,
+  contactName,
+  hasEmail,
+  email,
+  hasName,
+  name,
+}) {
+  const sf = await authenticateSalesforce();
+  const { contactId, accountId } = await resolveSalesforceContactContext(
+    sf,
+    salesforceRefId,
   );
 
-  await patchSalesforceSObject(sf, "Contact", contactId, {
-    Country__c: country,
-  });
+  const contactPatch = {};
+
+  if (hasCountry) {
+    contactPatch.Country__c = country;
+  }
+
+  if (hasEmail) {
+    contactPatch.Email = email;
+  }
+
+  if (hasContactName) {
+    const split = splitContactName(contactName);
+    contactPatch.FirstName = split.firstName;
+    contactPatch.LastName = split.lastName;
+  }
+
+  if (Object.keys(contactPatch).length > 0) {
+    logger.info(
+      `VendorsService → syncVendorIdentityToSalesforce() patching Contact ${contactId}`,
+    );
+    await patchSalesforceSObject(sf, "Contact", contactId, contactPatch);
+  }
+
+  if (hasName) {
+    if (!accountId) {
+      const error = new Error(
+        `Salesforce Contact ${contactId} has no AccountId. Vendor name cannot be synced.`,
+      );
+      error.status = 400;
+      throw error;
+    }
+
+    logger.info(
+      `VendorsService → syncVendorIdentityToSalesforce() patching Account ${accountId} Name = "${name}"`,
+    );
+    await patchSalesforceSObject(sf, "Account", accountId, {
+      Name: name,
+    });
+  }
 
   logger.success(
-    `VendorsService → syncCountryToSalesforce() success | contactId: ${contactId} | country: ${country}`,
+    `VendorsService → syncVendorIdentityToSalesforce() success | contactId: ${contactId} | accountId: ${accountId || "none"}`,
   );
 }
 
@@ -474,6 +609,9 @@ async function updateVendorsTableById(vendorId, payload = {}) {
   }
 
   const nextCountryText = normalizeStringOrNull(payload.country);
+  const nextName = normalizeStringOrNull(payload.name);
+  const nextContactName = normalizeStringOrNull(payload.contactName);
+  const nextEmail = normalizeStringOrNull(payload.email);
   const nextCommunicationChannels = hasOwn(payload, "communicationChannel")
     ? normalizeCommunicationChannelsInput(payload.communicationChannel)
     : [];
@@ -484,6 +622,9 @@ async function updateVendorsTableById(vendorId, payload = {}) {
 
   const hasCountry = hasOwn(payload, "country");
   const hasCountryId = hasOwn(payload, "countryId");
+  const hasName = hasOwn(payload, "name");
+  const hasContactName = hasOwn(payload, "contactName");
+  const hasEmail = hasOwn(payload, "email");
   const hasCommunicationChannel = hasOwn(payload, "communicationChannel");
   const hasTorts = hasOwn(payload, "torts");
   const hasPostingMethods = hasOwn(payload, "postingMethods");
@@ -491,13 +632,28 @@ async function updateVendorsTableById(vendorId, payload = {}) {
   if (
     !hasCountry &&
     !hasCountryId &&
+    !hasName &&
+    !hasContactName &&
+    !hasEmail &&
     !hasCommunicationChannel &&
     !hasTorts &&
     !hasPostingMethods
   ) {
     const error = new Error(
-      "Nothing to update. Send at least one field: countryId, country, communicationChannel, torts, postingMethods",
+      "Nothing to update. Send at least one field: name, contactName, email, countryId, country, communicationChannel, torts, postingMethods",
     );
+    error.status = 400;
+    throw error;
+  }
+
+  if (hasName && !nextName) {
+    const error = new Error("name cannot be empty");
+    error.status = 400;
+    throw error;
+  }
+
+  if (hasContactName && !nextContactName) {
+    const error = new Error("contactName cannot be empty");
     error.status = 400;
     throw error;
   }
@@ -556,10 +712,17 @@ async function updateVendorsTableById(vendorId, payload = {}) {
     }
   }
 
-  if (hasCountry || hasCountryId) {
-    await syncCountryToSalesforce({
-      salesforceUserId: row.salesforce_id,
+  if (hasCountry || hasCountryId || hasName || hasContactName || hasEmail) {
+    await syncVendorIdentityToSalesforce({
+      salesforceRefId: row.salesforce_id,
+      hasCountry: hasCountry || hasCountryId,
       country: nextCountryName,
+      hasName,
+      name: nextName,
+      hasContactName,
+      contactName: nextContactName,
+      hasEmail,
+      email: nextEmail,
     });
   }
 
@@ -572,6 +735,18 @@ async function updateVendorsTableById(vendorId, payload = {}) {
 
     if (hasCountry || hasCountryId) {
       updatePayload.country_id = nextCountryId;
+    }
+
+    if (hasName) {
+      updatePayload.name = nextName;
+    }
+
+    if (hasContactName) {
+      updatePayload.contact_name = nextContactName;
+    }
+
+    if (hasEmail) {
+      updatePayload.email = nextEmail;
     }
 
     if (hasCommunicationChannel) {

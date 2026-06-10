@@ -140,6 +140,18 @@ VendorProfile.hasMany(VendorCaseSnapshot, {
   constraints: false,
 });
 
+VendorCaseSnapshot.belongsTo(Product, {
+  foreignKey: "product_id",
+  as: "caseProduct",
+  constraints: false,
+});
+
+Product.hasMany(VendorCaseSnapshot, {
+  foreignKey: "product_id",
+  as: "vendorCaseSnapshots",
+  constraints: false,
+});
+
 // ============================
 // VENDOR WEEKLY GOALS
 // ============================

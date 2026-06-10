@@ -22,9 +22,9 @@ const VendorCaseSnapshot = sequelize.define(
       type: DataTypes.STRING(30),
       allowNull: false,
     },
-    case_type: {
-      type: DataTypes.STRING(255),
-      allowNull: true,
+    product_id: {
+      type: DataTypes.INTEGER.UNSIGNED,
+      allowNull: false,
     },
     case_created_at: {
       type: DataTypes.DATE,
@@ -47,7 +47,7 @@ const VendorCaseSnapshot = sequelize.define(
     updatedAt: "updated_at",
     indexes: [
       { fields: ["vendor_id"] },
-      { fields: ["case_type"] },
+      { fields: ["product_id"] },
       { fields: ["case_created_at"] },
     ],
   },

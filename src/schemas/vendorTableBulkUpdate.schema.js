@@ -11,6 +11,9 @@ const vendorTableBulkUpdateSchema = Joi.object({
     .items(Joi.number().integer().positive())
     .min(1)
     .required(),
+  name: Joi.string().trim().max(255).optional(),
+  contactName: Joi.string().trim().max(255).optional(),
+  email: Joi.string().trim().email().allow(null, "").optional(),
   countryId: Joi.number().integer().positive().allow(null).optional(),
   country: Joi.string().trim().max(100).allow(null, "").optional(),
   communicationChannel: Joi.alternatives()
@@ -30,7 +33,16 @@ const vendorTableBulkUpdateSchema = Joi.object({
     )
     .optional(),
 })
-  .or("countryId", "country", "communicationChannel", "torts", "postingMethods")
+  .or(
+    "name",
+    "contactName",
+    "email",
+    "countryId",
+    "country",
+    "communicationChannel",
+    "torts",
+    "postingMethods",
+  )
   .required();
 
 module.exports = vendorTableBulkUpdateSchema;

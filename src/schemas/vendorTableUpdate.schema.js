@@ -7,6 +7,9 @@ const tortSchema = Joi.object({
 });
 
 const vendorTableUpdateSchema = Joi.object({
+  name: Joi.string().trim().max(255).optional(),
+  contactName: Joi.string().trim().max(255).optional(),
+  email: Joi.string().trim().email().allow(null, "").optional(),
   countryId: Joi.number().integer().positive().allow(null).optional(),
   country: Joi.string().trim().max(100).allow(null, "").optional(),
   communicationChannel: Joi.alternatives()
@@ -26,7 +29,16 @@ const vendorTableUpdateSchema = Joi.object({
     )
     .optional(),
 })
-  .or("countryId", "country", "communicationChannel", "torts", "postingMethods")
+  .or(
+    "name",
+    "contactName",
+    "email",
+    "countryId",
+    "country",
+    "communicationChannel",
+    "torts",
+    "postingMethods",
+  )
   .required();
 
 module.exports = vendorTableUpdateSchema;
