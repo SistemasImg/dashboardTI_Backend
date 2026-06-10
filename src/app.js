@@ -59,8 +59,6 @@ app.use("/callcenter", require("./routes/callCenter.routes"));
 app.use("/vicidial", require("./routes/vicidial.routes"));
 app.use("/sqlserver", require("./routes/sqlserver/insertApi.routes"));
 app.use("/sqlserver", require("./routes/sqlserver/queries.routes"));
-app.use("/meta", require("./routes/meta.routes"));
-app.use("/public-leads", require("./routes/publicLead.routes"));
 app.use("/transcriptions", require("./routes/transcription.routes"));
 
 app.get("/version", (req, res) => {

@@ -10,13 +10,13 @@ pnpm-lock.yaml
 package-lock.json
 yarn.lock
 
+# Dependency directories
 wpSalesforceApiLoad
 node_modules
 dist
 dist-ssr
-*.local
 
-# Editor directories and files
+# Editor files
 .vscode
 !.vscode/extensions.json
 .idea
@@ -25,6 +25,7 @@ dist-ssr
 *.ntvs*
 *.njsproj
 *.sln
+*.local
 *.sw?
 .cspell.json
 .env
