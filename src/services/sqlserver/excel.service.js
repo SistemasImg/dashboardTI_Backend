@@ -273,7 +273,7 @@ function buildAgentsAttemptsMatrix(records, callCenterFilter = null) {
 }
 
 /**
- * Build a combined matrix for the "All" sheet grouped by Number + Case + Substatus + Supplier + Type.
+ * Build a combined matrix for the "All" sheet grouped by Number + Case + Agent + Call Center + Substatus + Supplier + Type.
  * Used for the "All" sheet that contains all data from all call centers.
  * @param {Array} records - Raw records from database
  * @returns {Object} { rows, dateKeys }
@@ -286,11 +286,13 @@ function buildAllAttemptsMatrix(records) {
     const date = toDateLabel(record.DATE);
     const phoneNumber = record["PHONE NUMBER"] || "No number";
     const caseNumber = record.CASE_NUMBER || "No case";
+    const agentName = record["AGENT NAME"] || "No agent";
+    const callCenter = record["CALL CENTER"] || "No call center";
     const substatus = record.SUBSTATUS || "No substatus";
     const supplier = record.SUPPLIER || "No supplier";
     const type = record.TYPE || "No type";
     const attempts = Number(record.ATTEMPTS) || 0;
-    const key = `${phoneNumber}__${caseNumber}__${substatus}__${supplier}__${type}`;
+    const key = `${phoneNumber}__${caseNumber}__${agentName}__${callCenter}__${substatus}__${supplier}__${type}`;
 
     dateSet.add(date);
 
@@ -298,6 +300,8 @@ function buildAllAttemptsMatrix(records) {
       grouped.set(key, {
         phoneNumber,
         caseNumber,
+        agentName,
+        callCenter,
         substatus,
         supplier,
         type,
@@ -323,6 +327,12 @@ function buildAllAttemptsMatrix(records) {
         numeric: true,
         sensitivity: "base",
       });
+    }
+    if (a.agentName !== b.agentName) {
+      return a.agentName.localeCompare(b.agentName);
+    }
+    if (a.callCenter !== b.callCenter) {
+      return a.callCenter.localeCompare(b.callCenter);
     }
     if (a.substatus !== b.substatus) {
       return a.substatus.localeCompare(b.substatus);
@@ -351,6 +361,8 @@ function populateAllDailySheet(worksheet, title, matrixRows, dateKeys) {
   const columnDefs = [
     { header: "Phone Number", key: "phone_number", width: 15 },
     { header: "Case Number", key: "case_number", width: 14 },
+    { header: "Agent", key: "agent_name", width: 22 },
+    { header: "Call Center", key: "call_center", width: 18 },
     { header: "Substatus", key: "substatus", width: 20 },
     { header: "Supplier", key: "supplier", width: 22 },
     { header: "Type", key: "type", width: 16 },
@@ -375,6 +387,8 @@ function populateAllDailySheet(worksheet, title, matrixRows, dateKeys) {
     const rowValues = {
       phone_number: row.phoneNumber ?? "",
       case_number: row.caseNumber ?? "",
+      agent_name: row.agentName ?? "",
+      call_center: row.callCenter ?? "",
       substatus: row.substatus ?? "",
       supplier: row.supplier ?? "",
       type: row.type ?? "",
@@ -416,7 +430,7 @@ function populateAllDailySheet(worksheet, title, matrixRows, dateKeys) {
     fgColor: { argb: "FFE2F0D9" },
   };
 
-  worksheet.views = [{ state: "frozen", ySplit: 4, xSplit: 5 }];
+  worksheet.views = [{ state: "frozen", ySplit: 4, xSplit: 7 }];
   worksheet.autoFilter = {
     from: { row: headerRow.number, column: 1 },
     to: { row: headerRow.number, column: columnDefs.length },
