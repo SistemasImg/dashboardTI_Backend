@@ -154,6 +154,14 @@ function sanitizeFileName(value) {
   return safe || "recording";
 }
 
+function getOriginalFileName(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return null;
+
+  const base = path.basename(raw).replaceAll("\0", "").trim();
+  return base || null;
+}
+
 function removeAudioExtension(fileName) {
   return String(fileName || "").replace(/\.(mp3|wav|ogg)$/i, "");
 }
@@ -180,6 +188,10 @@ function buildDirectRecordingUrlCandidates(fileName) {
       `${vicidialConfig.ORIGIN}/RECORDINGS/${item}.mp3`,
       `${vicidialConfig.ORIGIN}/RECORDINGS/FTP/${item}.wav`,
       `${vicidialConfig.ORIGIN}/RECORDINGS/FTP/${item}.mp3`,
+      `${vicidialConfig.ORIGIN}/MONITOR/${item}.wav`,
+      `${vicidialConfig.ORIGIN}/MONITOR/${item}.mp3`,
+      `${vicidialConfig.ORIGIN}/MONITOR/FTP/${item}.wav`,
+      `${vicidialConfig.ORIGIN}/MONITOR/FTP/${item}.mp3`,
     );
   });
 
@@ -305,11 +317,23 @@ function createUnexpectedVicidialResponseError(status, contentType, prefix) {
   );
 }
 
+function createRecordingNotFoundError(status = 404) {
+  return Object.assign(new Error(`Recording not found (status=${status})`), {
+    statusCode: status,
+    errorCode: "VICIDIAL_RECORDING_NOT_FOUND",
+  });
+}
+
 async function resolveAudioUrlFromHtmlResponse(
   response,
   baseUrl,
   options = {},
 ) {
+  const status = Number(response?.status) || 0;
+  if (status === 404) {
+    throw createRecordingNotFoundError(status);
+  }
+
   const html = await streamToString(response.data);
   const audioUrl = extractAudioUrlFromHtml(html, baseUrl);
 
@@ -455,9 +479,9 @@ function getUniqueFileName(fileName, usedNames) {
   return uniqueName;
 }
 
-async function fetchRecordingStream(url) {
+async function fetchRecordingStream(url, options = {}) {
   const { response: firstResponse, finalUrl: firstUrl } =
-    await fetchVicidialResponse(url, "stream");
+    await fetchVicidialResponse(url, "stream", options);
   const directAudio = await ensureAudioResponse(
     firstResponse,
     "Unexpected Vicidial response for recording",
@@ -470,11 +494,13 @@ async function fetchRecordingStream(url) {
   const audioUrl = await resolveAudioUrlFromHtmlResponse(
     firstResponse,
     firstUrl,
+    options,
   );
 
   const { response: secondResponse } = await fetchVicidialResponse(
     audioUrl,
     "stream",
+    options,
   );
   const secondAudio = await ensureAudioResponse(
     secondResponse,
@@ -490,6 +516,14 @@ async function fetchRecordingStream(url) {
       secondResponse.headers["content-type"] || "application/octet-stream",
     )
   ) {
+    const status = Number(secondResponse.status) || 0;
+    if (status === 404) {
+      if (typeof secondResponse.data?.destroy === "function") {
+        secondResponse.data.destroy();
+      }
+      throw createRecordingNotFoundError(status);
+    }
+
     const html = await streamToString(secondResponse.data);
     if (/do not have permissions to access recordings/i.test(html)) {
       throw createPermissionDeniedError();
@@ -525,13 +559,25 @@ async function downloadRecordingToTempFile({
     ),
   ];
 
-  for (const candidateUrl of candidateUrls) {
+  for (let index = 0; index < candidateUrls.length; index += 1) {
+    const candidateUrl = candidateUrls[index];
+    const isLastCandidate = index === candidateUrls.length - 1;
+
     try {
-      const result = await fetchRecordingStream(candidateUrl);
+      const result = await fetchRecordingStream(candidateUrl, {
+        suppressWarnings: !isLastCandidate,
+      });
       stream = result.stream;
       contentType = result.contentType;
       break;
     } catch (error) {
+      if (
+        !isLastCandidate &&
+        (error?.errorCode === "VICIDIAL_RECORDING_NOT_FOUND" ||
+          Number(error?.statusCode) === 404)
+      ) {
+        continue;
+      }
       lastError = error;
     }
   }
@@ -641,9 +687,10 @@ async function streamRecordingsZip({
 
       try {
         const safeUrl = assertAllowedVicidialUrl(item.url);
-        const safeBaseName = sanitizeFileName(
-          item.fileName || `recording_${index + 1}`,
-        );
+        const originalName =
+          getOriginalFileName(item.sourceFileName) ||
+          getOriginalFileName(item.fileName);
+        const safeBaseName = originalName || `recording_${index + 1}`;
         const baseWithExt = ensureAudioExtension(safeBaseName, "");
         const uniqueName = getUniqueFileName(baseWithExt, usedNames);
 
@@ -663,7 +710,7 @@ async function streamRecordingsZip({
           permissionDeniedCount += 1;
         }
         logger.warn(
-          `VicidialRecordingsDownloadService → skipped recording ${index + 1}: ${error.message}`,
+          `VicidialRecordingsDownloadService → skipped recording ${index + 1}: ${error.message} | url="${item.url}" sourceFileName="${item.sourceFileName || ""}"`,
         );
       }
     }

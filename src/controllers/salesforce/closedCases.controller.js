@@ -132,13 +132,6 @@ async function collectCasesForBulkDownload(date, types, caseType) {
   return groupedCases.flat();
 }
 
-function buildRecordingFileName(closedCase, date, recording) {
-  return `${closedCase.caseNumber || closedCase.CaseNumber || "case"}_${closedCase._reportType}_${date}_${recording.dateTime ? recording.dateTime.replace(/[:\s]/g, "-") : ""}`.replace(
-    /[^a-zA-Z0-9_\-.]/g,
-    "_",
-  );
-}
-
 async function getVicidialPhoneMapForBulkDownload(cases) {
   const phones = Array.from(
     new Set(
@@ -165,7 +158,7 @@ async function getVicidialPhoneMapForBulkDownload(cases) {
   return phoneMap;
 }
 
-function getQualifiedLeadRecordings(closedCase, lead, date) {
+function getQualifiedLeadRecordings(closedCase, lead) {
   if (!Array.isArray(lead.recordings)) {
     return [];
   }
@@ -188,13 +181,13 @@ function getQualifiedLeadRecordings(closedCase, lead, date) {
     })
     .map((recording) => ({
       url: recording.location,
-      fileName: buildRecordingFileName(closedCase, date, recording),
+      fileName: recording.fileName || null,
       sourceFileName: recording.fileName || null,
       durationSeconds: recording.seconds || 0,
     }));
 }
 
-async function collectRecordingsForCase(closedCase, date, vicidialPhoneMap) {
+async function collectRecordingsForCase(closedCase, vicidialPhoneMap) {
   const phone = normalizePhone(closedCase.phoneNumber);
   if (!phone) {
     return [];
@@ -207,7 +200,7 @@ async function collectRecordingsForCase(closedCase, date, vicidialPhoneMap) {
     }
 
     return vicidialResult.records.flatMap((lead) =>
-      getQualifiedLeadRecordings(closedCase, lead, date),
+      getQualifiedLeadRecordings(closedCase, lead),
     );
   } catch (error) {
     logger.warn(
@@ -241,7 +234,7 @@ async function bulkDownloadClosedCasesRecordings(req, res, next) {
 
     const recordingsByCase = await Promise.all(
       allCases.map((closedCase) =>
-        collectRecordingsForCase(closedCase, filters.date, vicidialPhoneMap),
+        collectRecordingsForCase(closedCase, vicidialPhoneMap),
       ),
     );
     const recordings = recordingsByCase.flat();

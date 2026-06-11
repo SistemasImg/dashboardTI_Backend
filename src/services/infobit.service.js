@@ -189,6 +189,51 @@ function extractTextDeep(value, depth = 0) {
   return pickFirstTextFromList(Object.values(value), depth);
 }
 
+function extractPhoneDeep(value, depth = 0) {
+  if (depth > 4 || value == null) return "";
+
+  if (typeof value === "string") {
+    const normalized = toConversationPhone(value);
+    return normalized || "";
+  }
+
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const candidate = extractPhoneDeep(item, depth + 1);
+      if (candidate) return candidate;
+    }
+    return "";
+  }
+
+  if (typeof value !== "object") return "";
+
+  const preferredKeys = [
+    "phone",
+    "phoneNumber",
+    "number",
+    "msisdn",
+    "address",
+    "id",
+    "identifier",
+    "from",
+    "to",
+    "sender",
+    "originator",
+  ];
+
+  for (const key of preferredKeys) {
+    const candidate = extractPhoneDeep(value[key], depth + 1);
+    if (candidate) return candidate;
+  }
+
+  for (const candidateValue of Object.values(value)) {
+    const candidate = extractPhoneDeep(candidateValue, depth + 1);
+    if (candidate) return candidate;
+  }
+
+  return "";
+}
+
 async function startConversationForPhone(numberPhone, message, agentId) {
   const from = toE164WithoutPlus(infobipConfig.sender);
   const to = toE164WithoutPlus(numberPhone);
@@ -289,80 +334,134 @@ async function findConversationIdInDbByPhone(numberPhone) {
   return latest?.conversationId || null;
 }
 
-async function findCcaasConversationByPhone(numberPhone, limit = 30) {
+function extractConversationsList(payload) {
+  if (Array.isArray(payload?.conversations)) return payload.conversations;
+  if (Array.isArray(payload?.results)) return payload.results;
+  if (Array.isArray(payload?.items)) return payload.items;
+  if (Array.isArray(payload?.data)) return payload.data;
+  if (Array.isArray(payload)) return payload;
+  return [];
+}
+
+function conversationMatchesPhone(conv, phoneVariants) {
+  const directCandidates = [
+    conv?.customer,
+    conv?.contact,
+    conv?.participant,
+    conv?.participants,
+    conv?.author,
+    conv?.from,
+    conv?.to,
+    conv,
+  ];
+
+  return directCandidates.some((candidate) => {
+    const normalized = extractPhoneDeep(candidate);
+    return normalized ? phoneVariants.has(normalized) : false;
+  });
+}
+
+async function findCcaasConversationByPhone(
+  numberPhone,
+  limit = 30,
+  options = {},
+) {
   const target = toConversationPhone(numberPhone);
   if (!target) return null;
 
   const phoneVariants = new Set(buildPhoneVariants(target));
-
-  const { data } = await axios.get(
-    `${infobipConfig.baseUrl}/ccaas/1/conversations`,
-    {
-      headers: INFOBIP_HEADERS,
-      httpsAgent,
-      timeout: SCAN_TIMEOUT_MS,
-      params: { limit: Math.min(Math.max(Number(limit) || 30, 5), 100) },
-    },
+  const listTimeoutMs = Math.min(
+    Math.max(Number(options?.listTimeoutMs) || SCAN_TIMEOUT_MS, 1000),
+    30000,
   );
-
-  const conversations = Array.isArray(data?.conversations)
-    ? data.conversations
-    : [];
-
+  const allowMessageScan = options?.allowMessageScan === true;
+  const conversationEndpoints = Array.isArray(
+    infobipConfig.conversationListEndpoints,
+  )
+    ? infobipConfig.conversationListEndpoints
+    : ["/ccaas/1/conversations"];
   const candidates = [];
 
-  for (const conv of conversations) {
-    if (!conv?.id) continue;
-
+  for (const endpoint of conversationEndpoints) {
     try {
-      const messagesResp = await axios.get(
-        `${infobipConfig.baseUrl}/ccaas/1/conversations/${encodeURIComponent(conv.id)}/messages`,
-        {
-          headers: INFOBIP_HEADERS,
-          httpsAgent,
-          timeout: SCAN_TIMEOUT_MS,
-          params: { limit: 20 },
-        },
-      );
-
-      const messages = Array.isArray(messagesResp.data?.messages)
-        ? messagesResp.data.messages
-        : [];
-
-      const matches = messages.some((msg) => {
-        const from = toConversationPhone(msg?.from);
-        const to = toConversationPhone(msg?.to);
-        return phoneVariants.has(from) || phoneVariants.has(to);
+      const { data } = await axios.get(`${infobipConfig.baseUrl}${endpoint}`, {
+        headers: INFOBIP_HEADERS,
+        httpsAgent,
+        timeout: listTimeoutMs,
+        params: { limit: Math.min(Math.max(Number(limit) || 30, 5), 100) },
       });
 
-      if (matches) {
-        const latestMessageTimestamp = messages.reduce(
-          (maxTs, msg) =>
-            Math.max(
-              maxTs,
+      const conversations = extractConversationsList(data);
+
+      for (const conv of conversations) {
+        if (!conv?.id) continue;
+
+        if (conversationMatchesPhone(conv, phoneVariants)) {
+          candidates.push({
+            id: conv.id,
+            agentId: conv.agentId || infobipConfig.ccaasAgentId || null,
+            timestamp: safeTimestamp(
+              conv.updatedAt || conv.lastMessageAt || conv.createdAt,
+            ),
+          });
+          continue;
+        }
+
+        if (!allowMessageScan) {
+          continue;
+        }
+
+        try {
+          const conversationData = await getConversationMessages(conv.id, 20);
+          const messages = Array.isArray(conversationData?.messages)
+            ? conversationData.messages
+            : [];
+
+          const matches = messages.some((msg) => {
+            const from = extractCcaasMessageFromPhone(msg);
+            const to = toConversationPhone(msg?.to);
+            return phoneVariants.has(from) || phoneVariants.has(to);
+          });
+
+          if (!matches) continue;
+
+          const latestMessageTimestamp = messages.reduce(
+            (maxTs, msg) =>
+              Math.max(
+                maxTs,
+                safeTimestamp(
+                  msg?.createdAt || msg?.created_at || msg?.sentAt || msg?.time,
+                ),
+              ),
+            0,
+          );
+
+          candidates.push({
+            id: conv.id,
+            agentId: conv.agentId || infobipConfig.ccaasAgentId || null,
+            timestamp: Math.max(
+              latestMessageTimestamp,
               safeTimestamp(
-                msg?.createdAt || msg?.created_at || msg?.sentAt || msg?.time,
+                conv.updatedAt || conv.lastMessageAt || conv.createdAt,
               ),
             ),
-          0,
-        );
-
-        const conversationTimestamp = Math.max(
-          latestMessageTimestamp,
-          safeTimestamp(conv.updatedAt || conv.lastMessageAt || conv.createdAt),
-        );
-
-        candidates.push({
-          id: conv.id,
-          agentId: conv.agentId || infobipConfig.ccaasAgentId || null,
-          timestamp: conversationTimestamp,
-        });
+          });
+        } catch (error) {
+          logger.warn(
+            "InfobitService → findCcaasConversationByPhone() conversation scan warning",
+            {
+              endpoint,
+              conversationId: conv.id,
+              error: error.response?.data || error.message,
+            },
+          );
+        }
       }
     } catch (error) {
       logger.warn(
-        "InfobitService → findCcaasConversationByPhone() conversation scan warning",
+        "InfobitService → findCcaasConversationByPhone() list warning",
         {
-          conversationId: conv.id,
+          endpoint,
           error: error.response?.data || error.message,
         },
       );
@@ -400,7 +499,10 @@ async function updateLatestConversationIdForPhone(numberPhone, conversationId) {
 function scheduleConversationBackfill(numberPhone) {
   setImmediate(async () => {
     try {
-      const conversation = await findCcaasConversationByPhone(numberPhone, 10);
+      const conversation = await findCcaasConversationByPhone(numberPhone, 10, {
+        listTimeoutMs: 15000,
+        allowMessageScan: true,
+      });
       if (conversation?.id) {
         await updateLatestConversationIdForPhone(numberPhone, conversation.id);
       }
@@ -1002,14 +1104,26 @@ function normalizeInboundItem(rawItem = {}) {
     textCandidates.find((value) => typeof value === "string" && value.trim()) ||
     "";
 
-  const from =
+  const fromRaw =
     nestedMessage?.from ||
     envelope?.from ||
     envelope?.msisdn ||
     envelope?.source?.address ||
     envelope?.sender ||
     envelope?.originator ||
+    nestedMessage?.contact ||
+    envelope?.contact ||
+    envelope?.author ||
+    envelope?.customer ||
     "";
+
+  const from =
+    typeof fromRaw === "string"
+      ? fromRaw
+      : extractPhoneDeep(fromRaw) ||
+        extractPhoneDeep(nestedMessage?.from) ||
+        extractPhoneDeep(envelope?.from) ||
+        "";
 
   const conversationId =
     nestedMessage?.conversationId ||
@@ -1047,6 +1161,43 @@ function normalizeInboundItem(rawItem = {}) {
 // Main caller: infobitInboundWebhook() in infobit.controller.js.
 // It only stores inbound rows linked to at least one previous outbound message
 // to keep the chat feed scoped to conversations started from this API.
+async function findLatestOutboundForInbound(
+  normalizedInbound,
+  normalizedPhone,
+) {
+  if (normalizedInbound?.conversationId) {
+    const outboundByConversation = await MessageRecords.findOne({
+      where: {
+        conversationId: normalizedInbound.conversationId,
+        direction: "OUTBOUND",
+      },
+      attributes: ["id_agent", "numberphone", "conversationId"],
+      order: [["id", "DESC"]],
+      raw: true,
+    });
+
+    if (outboundByConversation) {
+      return outboundByConversation;
+    }
+  }
+
+  if (!normalizedPhone) {
+    return null;
+  }
+
+  return MessageRecords.findOne({
+    where: {
+      numberphone: {
+        [Op.in]: buildPhoneVariants(normalizedPhone),
+      },
+      direction: "OUTBOUND",
+    },
+    attributes: ["id_agent", "numberphone", "conversationId"],
+    order: [["id", "DESC"]],
+    raw: true,
+  });
+}
+
 async function saveInboundMessages(results) {
   if (!Array.isArray(results) || results.length === 0) {
     return [];
@@ -1057,34 +1208,29 @@ async function saveInboundMessages(results) {
   for (const msg of results) {
     const normalizedInbound = normalizeInboundItem(msg);
     const fromPhone = normalizedInbound.from;
-
     const normalizedPhone = toConversationPhone(fromPhone);
 
-    if (!normalizedPhone) continue;
-
-    const phoneVariants = buildPhoneVariants(normalizedPhone);
-
-    const latestOutbound = await MessageRecords.findOne({
-      where: {
-        numberphone: {
-          [Op.in]: phoneVariants,
-        },
-        direction: "OUTBOUND",
-      },
-      attributes: ["id_agent"],
-      order: [["id", "DESC"]],
-      raw: true,
-    });
+    const latestOutbound = await findLatestOutboundForInbound(
+      normalizedInbound,
+      normalizedPhone,
+    );
 
     // Skip inbound messages not linked to a previous outbound message from our API.
     if (!latestOutbound?.id_agent) {
       continue;
     }
 
+    const persistedPhone =
+      normalizedPhone || toConversationPhone(latestOutbound.numberphone);
+
+    if (!persistedPhone) {
+      continue;
+    }
+
     const inboundMessageId =
       normalizedInbound.messageId ||
       (normalizedInbound.receivedAt
-        ? `in_${normalizedPhone}_${String(normalizedInbound.receivedAt).replaceAll(/\D/g, "")}`
+        ? `in_${persistedPhone}_${String(normalizedInbound.receivedAt).replaceAll(/\D/g, "")}`
         : `in_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`);
 
     const existingInbound = await MessageRecords.findOne({
@@ -1099,13 +1245,13 @@ async function saveInboundMessages(results) {
 
     if (normalizedInbound.conversationId) {
       await updateLatestConversationIdForPhone(
-        normalizedPhone,
+        persistedPhone,
         normalizedInbound.conversationId,
       );
     }
 
     const newMessage = await MessageRecords.create({
-      numberphone: normalizedPhone,
+      numberphone: persistedPhone,
       message: normalizedInbound.text,
       id_agent: latestOutbound?.id_agent || 1,
       bulkId: normalizedInbound.bulkId || "inbound",
@@ -1182,19 +1328,6 @@ async function fetchInboundFromCcaas(limit = 200) {
   const safeLimit = Math.min(Math.max(Number(limit) || 200, 1), 1000);
   const attempts = [];
 
-  const knownOutboundRows = await MessageRecords.findAll({
-    where: { direction: "OUTBOUND" },
-    attributes: ["numberphone"],
-    raw: true,
-    limit: 50000,
-  });
-
-  const knownOutboundPhones = new Set(
-    knownOutboundRows
-      .map((row) => toConversationPhone(row.numberphone))
-      .filter(Boolean),
-  );
-
   try {
     const conversationsResp = await axios.get(
       `${infobipConfig.baseUrl}/ccaas/1/conversations`,
@@ -1226,18 +1359,20 @@ async function fetchInboundFromCcaas(limit = 200) {
 
     const appendInboundFromMessages = (messages, convId) => {
       for (const msg of messages) {
-        if (String(msg?.direction || "").toUpperCase() !== "INBOUND") continue;
+        if (!isInboundDirection(msg?.direction)) continue;
 
-        const normalizedFrom = toConversationPhone(msg.from);
-        if (!normalizedFrom || !knownOutboundPhones.has(normalizedFrom)) {
+        const fromCandidate =
+          extractCcaasMessageFromPhone(msg) || msg?.from || "";
+
+        if (!toConversationPhone(fromCandidate)) {
           continue;
         }
 
         inboundResults.push({
           messageId: msg.id,
-          from: msg.from,
+          from: fromCandidate,
           to: msg.to,
-          text: msg.content?.text || "",
+          text: extractTextDeep(msg?.content) || msg?.text || "",
           receivedAt: msg.createdAt,
           conversationId: msg.conversationId || convId,
         });
@@ -1318,9 +1453,23 @@ async function syncInboundFromInfobip(limit = 200) {
   try {
     // Priority: CCAAS (Conversations) because replies are stored there in this tenant.
     const ccaasData = await fetchInboundFromCcaas(limit);
-    const fetchedData = ccaasData.results?.length
-      ? ccaasData
-      : await fetchInboundFromInfobip(limit);
+    let fetchedData = ccaasData;
+    let combinedAttempts = [...(ccaasData.attempts || [])];
+
+    if (!ccaasData.results?.length) {
+      const smsData = await fetchInboundFromInfobip(limit);
+      combinedAttempts = [...combinedAttempts, ...(smsData.attempts || [])];
+      fetchedData = {
+        ...smsData,
+        endpoint: smsData.endpoint || ccaasData.endpoint,
+      };
+    }
+
+    fetchedData = {
+      ...fetchedData,
+      attempts: combinedAttempts,
+    };
+
     const inboundResults = fetchedData.results || [];
 
     if (!inboundResults.length) {
@@ -1353,20 +1502,49 @@ async function syncInboundFromInfobip(limit = 200) {
 }
 
 function mapInboundFromCcaasMessage(msg, fallbackConversationId) {
+  const from =
+    extractPhoneDeep(msg?.from) ||
+    extractPhoneDeep(msg?.contact) ||
+    extractPhoneDeep(msg?.customer) ||
+    extractPhoneDeep(msg?.author) ||
+    msg?.from ||
+    "";
+
   return {
     messageId: msg.id,
-    from: msg.from,
+    from,
     to: msg.to,
-    text: msg.content?.text || "",
+    text: extractTextDeep(msg?.content) || msg?.text || "",
     receivedAt: msg.createdAt,
     conversationId: msg.conversationId || fallbackConversationId,
   };
 }
 
-function isInboundForPhone(msg, targetPhone, sinceMs) {
-  if (String(msg?.direction || "").toUpperCase() !== "INBOUND") return false;
+function isInboundDirection(direction) {
+  const normalized = String(direction || "").toUpperCase();
+  return (
+    normalized === "INBOUND" ||
+    normalized.includes("INBOUND") ||
+    normalized === "RECEIVED" ||
+    normalized === "MO"
+  );
+}
 
-  const normalizedFrom = toConversationPhone(msg.from);
+function extractCcaasMessageFromPhone(msg) {
+  return (
+    extractPhoneDeep(msg?.from) ||
+    extractPhoneDeep(msg?.contact) ||
+    extractPhoneDeep(msg?.customer) ||
+    extractPhoneDeep(msg?.author) ||
+    toConversationPhone(msg?.from) ||
+    ""
+  );
+}
+
+function isInboundForPhone(msg, targetPhone, sinceMs) {
+  if (!isInboundDirection(msg?.direction)) return false;
+
+  const normalizedFrom = extractCcaasMessageFromPhone(msg);
   if (normalizedFrom !== targetPhone) return false;
 
   const createdMs = msg.createdAt ? new Date(msg.createdAt).getTime() : 0;
@@ -1510,6 +1688,314 @@ async function fetchCcaasInboundByPhone(numberPhone, sinceDate, limit = 100) {
   }
 }
 
+function dedupeInboundResults(results = []) {
+  const unique = [];
+  const seen = new Set();
+
+  for (const item of results) {
+    const dedupeKey =
+      item?.messageId ||
+      `${toConversationPhone(item?.from)}_${String(item?.receivedAt || "")}_${String(item?.text || "").slice(0, 80)}`;
+
+    if (!dedupeKey || seen.has(dedupeKey)) continue;
+    seen.add(dedupeKey);
+    unique.push(item);
+  }
+
+  return unique;
+}
+
+function mapInboundResultsFromConversationMessages(
+  messages,
+  conversationId,
+  targetPhone,
+  sinceDate,
+) {
+  const normalizedTarget = toConversationPhone(targetPhone);
+  const sinceMs = sinceDate ? new Date(sinceDate).getTime() : 0;
+
+  return dedupeInboundResults(
+    (Array.isArray(messages) ? messages : [])
+      .filter((msg) => isInboundDirection(msg?.direction))
+      .map((msg) => mapInboundFromCcaasMessage(msg, conversationId))
+      .filter((msg) => {
+        const normalizedFrom = toConversationPhone(msg.from);
+        if (normalizedTarget && normalizedFrom !== normalizedTarget) {
+          return false;
+        }
+
+        const createdMs = msg.receivedAt
+          ? new Date(msg.receivedAt).getTime()
+          : 0;
+        if (sinceMs && createdMs && createdMs < sinceMs) {
+          return false;
+        }
+
+        return Boolean(normalizedFrom);
+      }),
+  );
+}
+
+async function fetchKnownConversationInboundByPhone(
+  numberPhone,
+  sinceDate,
+  limit = 100,
+  options = {},
+) {
+  const normalizedPhone = toConversationPhone(numberPhone);
+  if (!normalizedPhone) {
+    return { results: [], endpoint: null, attempts: [] };
+  }
+
+  const attempts = [];
+  const knownConversationId =
+    await findConversationIdInDbByPhone(normalizedPhone);
+  let conversationId = knownConversationId;
+
+  if (conversationId) {
+    attempts.push({
+      endpoint: "db:conversationId",
+      ok: true,
+      conversationId,
+    });
+  } else if (options?.discoverRemoteConversation === true) {
+    const discoveredConversation = await findCcaasConversationByPhone(
+      normalizedPhone,
+      100,
+      {
+        listTimeoutMs: options?.discoveryTimeoutMs,
+        allowMessageScan: options?.allowMessageScan === true,
+      },
+    );
+    conversationId = discoveredConversation?.id || null;
+
+    attempts.push({
+      endpoint: "/ccaas/1/conversations (discover by phone)",
+      ok: Boolean(conversationId),
+      conversationId,
+    });
+  } else {
+    attempts.push({
+      endpoint: "discover:conversationId",
+      ok: false,
+      skipped: true,
+      reason: "remote_discovery_disabled",
+    });
+  }
+
+  if (conversationId == null) {
+    return { results: [], endpoint: null, attempts };
+  }
+
+  try {
+    const conversationData = await getConversationMessages(
+      conversationId,
+      limit,
+    );
+    const results = mapInboundResultsFromConversationMessages(
+      conversationData.messages,
+      conversationId,
+      normalizedPhone,
+      sinceDate,
+    );
+
+    attempts.push(...(conversationData.attempts || []));
+
+    return {
+      results,
+      endpoint: conversationData.sourceEndpoint,
+      attempts,
+    };
+  } catch (error) {
+    attempts.push({
+      endpoint: "/conversations/*/messages",
+      ok: false,
+      status: error.status || error.response?.status || null,
+      message: error.message,
+    });
+
+    return { results: [], endpoint: null, attempts };
+  }
+}
+
+async function fetchSmsInboundByPhone(
+  numberPhone,
+  limit = 100,
+  sinceDate = null,
+) {
+  const normalizedPhone = toConversationPhone(numberPhone);
+  if (!normalizedPhone) {
+    return { results: [], endpoint: null, attempts: [] };
+  }
+
+  const smsData = await fetchInboundFromInfobip(
+    Math.min(Math.max(limit, 1), 200),
+  );
+  const sinceMs = sinceDate ? new Date(sinceDate).getTime() : 0;
+
+  const results = (smsData.results || []).filter((item) => {
+    const normalizedInbound = normalizeInboundItem(item);
+    const inboundPhone = toConversationPhone(normalizedInbound.from);
+    if (inboundPhone !== normalizedPhone) return false;
+
+    const createdMs = normalizedInbound.receivedAt
+      ? new Date(normalizedInbound.receivedAt).getTime()
+      : 0;
+
+    if (sinceMs && createdMs && createdMs < sinceMs) {
+      return false;
+    }
+
+    return true;
+  });
+
+  return {
+    results,
+    endpoint: smsData.endpoint,
+    attempts: smsData.attempts || [],
+  };
+}
+
+async function syncInboundForRecentOutboundPhones(
+  maxPhones = 100,
+  perPhoneLimit = 50,
+) {
+  const safeMaxPhones = Math.min(Math.max(Number(maxPhones) || 100, 1), 500);
+  const safePerPhoneLimit = Math.min(
+    Math.max(Number(perPhoneLimit) || 50, 1),
+    200,
+  );
+
+  const outboundRows = await MessageRecords.findAll({
+    where: { direction: "OUTBOUND" },
+    attributes: ["numberphone"],
+    raw: true,
+    order: [["id", "DESC"]],
+    limit: 5000,
+  });
+
+  const phones = [
+    ...new Set(
+      outboundRows
+        .map((row) => toConversationPhone(row.numberphone))
+        .filter(Boolean),
+    ),
+  ].slice(0, safeMaxPhones);
+
+  if (!phones.length) {
+    return { scannedPhones: 0, fetched: 0, saved: 0, attempts: [] };
+  }
+
+  const attempts = [];
+  const aggregated = [];
+  const dedupe = new Set();
+
+  for (const phone of phones) {
+    const live = await fetchCcaasInboundByPhone(phone, null, safePerPhoneLimit);
+    attempts.push(...(live.attempts || []));
+
+    for (const item of live.results || []) {
+      const dedupeKey =
+        item.messageId ||
+        `${toConversationPhone(item.from)}_${String(item.receivedAt || "")}_${String(item.text || "").slice(0, 80)}`;
+
+      if (dedupe.has(dedupeKey)) continue;
+      dedupe.add(dedupeKey);
+      aggregated.push(item);
+    }
+  }
+
+  if (!aggregated.length) {
+    return {
+      scannedPhones: phones.length,
+      fetched: 0,
+      saved: 0,
+      attempts: attempts.slice(-300),
+    };
+  }
+
+  const savedRows = await saveInboundMessages(aggregated);
+  return {
+    scannedPhones: phones.length,
+    fetched: aggregated.length,
+    saved: savedRows.length,
+    attempts: attempts.slice(-300),
+  };
+}
+
+async function syncInboundForPhone(
+  numberPhone,
+  limit = 100,
+  sinceDate = null,
+  options = {},
+) {
+  const normalizedPhone = toConversationPhone(numberPhone);
+  if (!normalizedPhone) {
+    return {
+      numberPhone,
+      fetched: 0,
+      saved: 0,
+      attempts: [],
+      error: "invalid_phone",
+    };
+  }
+
+  const safeLimit = Math.min(Math.max(Number(limit) || 100, 1), 200);
+  const shouldDeepScan = options?.deepScan === true;
+  const knownConversationLive = await fetchKnownConversationInboundByPhone(
+    normalizedPhone,
+    sinceDate,
+    safeLimit,
+    {
+      discoverRemoteConversation: shouldDeepScan,
+      discoveryTimeoutMs: options?.discoveryTimeoutMs,
+      allowMessageScan: shouldDeepScan,
+    },
+  );
+  const smsLive = await fetchSmsInboundByPhone(
+    normalizedPhone,
+    safeLimit,
+    sinceDate,
+  );
+  const ccaasLive = shouldDeepScan
+    ? await fetchCcaasInboundByPhone(normalizedPhone, sinceDate, safeLimit)
+    : { results: [], endpoint: null, attempts: [] };
+
+  const combinedResults = dedupeInboundResults([
+    ...(knownConversationLive.results || []),
+    ...(ccaasLive.results || []),
+    ...(smsLive.results || []),
+  ]);
+  const combinedAttempts = [
+    ...(knownConversationLive.attempts || []),
+    ...(ccaasLive.attempts || []),
+    ...(smsLive.attempts || []),
+  ];
+
+  if (!combinedResults.length) {
+    return {
+      numberPhone: normalizedPhone,
+      fetched: 0,
+      saved: 0,
+      endpoint:
+        knownConversationLive.endpoint ||
+        ccaasLive.endpoint ||
+        smsLive.endpoint,
+      attempts: combinedAttempts,
+    };
+  }
+
+  const savedRows = await saveInboundMessages(combinedResults);
+  return {
+    numberPhone: normalizedPhone,
+    fetched: combinedResults.length,
+    saved: savedRows.length,
+    endpoint:
+      knownConversationLive.endpoint || ccaasLive.endpoint || smsLive.endpoint,
+    attempts: combinedAttempts,
+  };
+}
+
 function extractConversationMessages(payload) {
   if (Array.isArray(payload?.messages)) return payload.messages;
   if (Array.isArray(payload?.results)) return payload.results;
@@ -1602,7 +2088,12 @@ async function getConversationMessages(conversationId, limit = 100) {
   throw error;
 }
 
-async function getConversationHistoryByNumber(numberPhone, user, limit = 200) {
+async function getConversationHistoryByNumber(
+  numberPhone,
+  user,
+  limit = 200,
+  options = {},
+) {
   const { decoded, dbUser } = await resolveUserContext(user);
   const normalizedPhone = toConversationPhone(numberPhone);
 
@@ -1610,6 +2101,17 @@ async function getConversationHistoryByNumber(numberPhone, user, limit = 200) {
     const error = new Error("Invalid phone number");
     error.status = 400;
     throw error;
+  }
+
+  if (options?.sync === true) {
+    await syncInboundForPhone(
+      normalizedPhone,
+      Math.min(Math.max(Number(options?.syncLimit) || limit || 200, 1), 200),
+      options?.sinceDate || null,
+      {
+        deepScan: options?.syncDeep === true,
+      },
+    );
   }
 
   const where = {
@@ -1633,9 +2135,7 @@ async function getConversationHistoryByNumber(numberPhone, user, limit = 200) {
 async function getConversationsSummary(user, limit = 100) {
   const { decoded, dbUser } = await resolveUserContext(user);
 
-  const where = {
-    direction: "OUTBOUND",
-  };
+  const where = {};
   if (decoded.role_id === 4 || decoded.role_id === 5) {
     where.id_agent = dbUser.id;
   }
@@ -1673,6 +2173,7 @@ async function getConversationsSummary(user, limit = 100) {
 
     const conv = grouped.get(conversationPhone);
     if (row.direction === "OUTBOUND") conv.outboundCount += 1;
+    if (row.direction === "INBOUND") conv.inboundCount += 1;
   }
 
   // This is a DB summary for GET /infobit/conversations.
@@ -1948,6 +2449,8 @@ module.exports = {
   saveInboundMessages,
   getConversationHistoryByNumber,
   getConversationsSummary,
+  syncInboundForPhone,
+  syncInboundForRecentOutboundPhones,
   // Used by internal jobs
   syncPendingOutboundStatuses,
   syncInboundFromInfobip,

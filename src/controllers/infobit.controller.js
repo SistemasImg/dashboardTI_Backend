@@ -6,6 +6,9 @@ const {
   getConversationsSummary,
   getInboundNotifications,
   sendConversationMessage,
+  syncInboundFromInfobip,
+  syncInboundForPhone,
+  syncInboundForRecentOutboundPhones,
 } = require("../services/infobit.service");
 
 const sseClients = new Map();
@@ -90,6 +93,9 @@ function getBearerToken(req) {
 function extractWebhookResults(payload) {
   if (Array.isArray(payload?.results)) return payload.results;
   if (Array.isArray(payload?.messages)) return payload.messages;
+  if (payload?.payload && typeof payload.payload === "object") {
+    return [payload.payload];
+  }
   if (
     payload?.type &&
     payload?.payload &&
@@ -111,6 +117,21 @@ function extractWebhookResults(payload) {
     return [payload.result];
   }
 
+  // Fallback for direct single-message webhook bodies.
+  if (
+    payload &&
+    typeof payload === "object" &&
+    (payload.from ||
+      payload.msisdn ||
+      payload.sender ||
+      payload.originator ||
+      payload.message ||
+      payload.text ||
+      payload.content)
+  ) {
+    return [payload];
+  }
+
   return [];
 }
 
@@ -127,6 +148,31 @@ function normalizeNumberList(input) {
   }
 
   return [];
+}
+
+function isTruthyQuery(value) {
+  const normalized = String(value || "")
+    .trim()
+    .toLowerCase();
+  return normalized === "1" || normalized === "true" || normalized === "yes";
+}
+
+async function withTimeout(promise, timeoutMs, timeoutLabel = "operation") {
+  let timer;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise((_, reject) => {
+        timer = setTimeout(() => {
+          const error = new Error(`Timeout was reached (${timeoutLabel})`);
+          error.code = "SYNC_TIMEOUT";
+          reject(error);
+        }, timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
 // POST /conversations/:numberPhone/send - Send message via CCAAS (with optional SMS fallback)
@@ -348,8 +394,11 @@ async function getInfobitInboundBackfill(req, res, next) {
 
     const sinceId = Number(req.query.sinceId) || 0;
     const limit = Number(req.query.limit) || 200;
+    const shouldSync =
+      String(req.query.sync || "").toLowerCase() === "true" ||
+      String(req.query.sync || "") === "1";
     const result = await getInboundNotifications(token, sinceId, limit, {
-      sync: false,
+      sync: shouldSync,
       onlyApiLinked: false,
     });
 
@@ -373,7 +422,110 @@ async function getInfobitConversations(req, res, next) {
     if (!token) {
       return res.status(401).json({ error: "Token not provided" });
     }
+
+    const requestedPhone = String(
+      req.query.numberPhone || req.query.phone || "",
+    ).trim();
+    const shouldSync = isTruthyQuery(req.query.sync);
+    if (shouldSync) {
+      const syncLimit = Math.min(
+        Math.max(Number(req.query.syncLimit) || 80, 1),
+        200,
+      );
+      const syncTimeoutMs = Math.min(
+        Math.max(Number(req.query.syncTimeoutMs) || 12000, 3000),
+        45000,
+      );
+      const deepSync = isTruthyQuery(req.query.syncDeep);
+
+      let globalSync = { skipped: true };
+      let byPhoneSync = { skipped: true };
+
+      try {
+        globalSync = await withTimeout(
+          syncInboundFromInfobip(syncLimit),
+          syncTimeoutMs,
+          "syncInboundFromInfobip",
+        );
+      } catch (syncError) {
+        globalSync = {
+          error: syncError.message,
+          code: syncError.code || "SYNC_ERROR",
+        };
+      }
+
+      try {
+        if (requestedPhone) {
+          byPhoneSync = await withTimeout(
+            syncInboundForPhone(
+              requestedPhone,
+              Math.min(Math.max(Number(req.query.perPhoneLimit) || 80, 1), 200),
+            ),
+            syncTimeoutMs,
+            "syncInboundForPhone",
+          );
+        } else if (deepSync) {
+          byPhoneSync = await withTimeout(
+            syncInboundForRecentOutboundPhones(
+              Math.min(Math.max(Number(req.query.maxPhones) || 10, 1), 50),
+              Math.min(Math.max(Number(req.query.perPhoneLimit) || 40, 1), 120),
+            ),
+            Math.max(syncTimeoutMs, 20000),
+            "syncInboundForRecentOutboundPhones",
+          );
+        } else {
+          byPhoneSync = {
+            skipped: true,
+            reason: "Use numberPhone=... or syncDeep=true for deep scan",
+          };
+        }
+      } catch (syncError) {
+        byPhoneSync = {
+          error: syncError.message,
+          code: syncError.code || "SYNC_ERROR",
+        };
+      }
+
+      logger.info("InfobitController → getInfobitConversations() sync result", {
+        requestedPhone: requestedPhone || null,
+        deepSync,
+        syncTimeoutMs,
+        globalSync,
+        byPhoneSync,
+      });
+    }
+
     const limit = Number(req.query.limit) || 100;
+
+    if (requestedPhone) {
+      const messages = await getConversationHistoryByNumber(
+        requestedPhone,
+        token,
+        limit,
+        {
+          sync: false,
+        },
+      );
+
+      const summaryRows = await getConversationsSummary(
+        token,
+        Math.max(limit, 200),
+      );
+      const summary =
+        summaryRows.find(
+          (item) =>
+            String(item.numberphone || "") ===
+            String(requestedPhone).replaceAll(/\D/g, "").slice(-10),
+        ) || null;
+
+      return res.json({
+        numberPhone: requestedPhone,
+        summary,
+        count: messages.length,
+        messages,
+      });
+    }
+
     const result = await getConversationsSummary(token, limit);
     return res.json(result);
   } catch (error) {
@@ -397,11 +549,56 @@ async function getInfobitConversationHistory(req, res, next) {
     }
     const { numberPhone } = req.params;
     const limit = Number(req.query.limit) || 200;
-    const result = await getConversationHistoryByNumber(
-      numberPhone,
-      token,
-      limit,
+    const shouldSync = isTruthyQuery(req.query.sync);
+    const syncLimit = Math.min(
+      Math.max(Number(req.query.syncLimit) || limit, 1),
+      200,
     );
+    const syncDeep = isTruthyQuery(req.query.syncDeep);
+    const syncTimeoutMs = Math.min(
+      Math.max(Number(req.query.syncTimeoutMs) || 12000, 3000),
+      30000,
+    );
+
+    let result;
+
+    if (shouldSync) {
+      try {
+        result = await withTimeout(
+          getConversationHistoryByNumber(numberPhone, token, limit, {
+            sync: true,
+            syncLimit,
+            syncDeep,
+          }),
+          syncTimeoutMs,
+          "getConversationHistoryByNumber",
+        );
+      } catch (syncError) {
+        logger.warn(
+          "InfobitController → getInfobitConversationHistory() sync timeout/fallback",
+          {
+            numberPhone,
+            syncDeep,
+            syncTimeoutMs,
+            error: syncError.message,
+          },
+        );
+
+        result = await getConversationHistoryByNumber(
+          numberPhone,
+          token,
+          limit,
+          {
+            sync: false,
+          },
+        );
+      }
+    } else {
+      result = await getConversationHistoryByNumber(numberPhone, token, limit, {
+        sync: false,
+      });
+    }
+
     return res.json(result);
   } catch (error) {
     logger.error(
