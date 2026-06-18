@@ -3,7 +3,7 @@ const cors = require("cors");
 const allowedOrigins = [
   "http://localhost:5173",
   "https://dashboard-ti-three.vercel.app",
-  "https://dashboard.img360.com",
+  "https://dashboard.imglegal.us",
 ];
 
 const envOrigins = (process.env.CORS_ALLOWED_ORIGINS || "")
