@@ -103,9 +103,20 @@ ORDER BY CreatedDate DESC
 `;
 }
 
-function buildVendorCaseSnapshotsQuery(ownerIds = [], lastDays = 90) {
+function buildVendorCaseSnapshotsQuery(
+  ownerIds = [],
+  lastDays = 90,
+  options = {},
+) {
   const inClause = buildInClause(ownerIds);
   if (!inClause) return null;
+
+  const createdDateFilter = options.createdDateFrom
+    ? `CreatedDate >= ${options.createdDateFrom}`
+    : `CreatedDate = LAST_N_DAYS:${Number(lastDays)}`;
+  const signedDateFilter = options.signedDateFrom
+    ? `Signed_Date__c >= ${options.signedDateFrom}`
+    : `Signed_Date__c = LAST_N_DAYS:${Number(lastDays)}`;
 
   return `
 SELECT
@@ -122,8 +133,8 @@ FROM Case
 WHERE OwnerId IN (${inClause})
   AND CaseNumber != NULL
   AND (
-    CreatedDate = LAST_N_DAYS:${Number(lastDays)}
-    OR Signed_Date__c = LAST_N_DAYS:${Number(lastDays)}
+    ${createdDateFilter}
+    OR ${signedDateFilter}
   )
 ORDER BY CreatedDate DESC
 `;

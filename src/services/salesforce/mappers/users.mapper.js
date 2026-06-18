@@ -16,8 +16,8 @@ function mapSupplierAccount(user) {
 
   const supplierName = user.Contact?.Name?.trim();
   const accountName =
-    user.Contact?.Account?.Name?.trim() ||
-    user.Contact?.Parent_Account__r?.Name?.trim();
+    user.Contact?.Parent_Account__r?.Name?.trim() ||
+    user.Contact?.Account?.Name?.trim();
 
   if (!supplierName || !accountName) return null;
 
@@ -38,9 +38,9 @@ function mapDashboardVendor(user) {
 
   const contactName = String(user.Contact?.Name || "").trim();
   const vendorName = String(
-    user.CompanyName ||
+    user.Contact?.Parent_Account__r?.Name ||
       user.Contact?.Account?.Name ||
-      user.Contact?.Parent_Account__r?.Name ||
+      user.CompanyName ||
       "",
   ).trim();
 

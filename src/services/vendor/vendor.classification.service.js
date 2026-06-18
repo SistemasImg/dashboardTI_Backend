@@ -1,6 +1,10 @@
 const { Op, DataTypes } = require("sequelize");
 const sequelize = require("../../config/db");
 const logger = require("../../utils/logger");
+const {
+  getUsBusinessDaysWindowStartDate,
+  toSalesforceDateTimeLiteral,
+} = require("../../utils/usBusinessDays");
 const { evaluateCategoryRules } = require("./vendor.categoryRules.service");
 const {
   buildGoalCompensationSummary,
@@ -44,6 +48,7 @@ const LEGACY_CATEGORY_ALIASES = {
 const NEW_VENDOR_WINDOW_DAYS = 30;
 const SALESFORCE_METADATA_BATCH_SIZE = 100;
 const SALESFORCE_CASE_SNAPSHOT_DAYS = 90;
+const SALESFORCE_CASE_SNAPSHOT_WINDOW_TYPE = "us_business_days";
 const GOAL_OVERVIEW_WEEKS = 3;
 const ACCEPTED_CASE_SUBSTATUS = "accepted";
 
@@ -389,11 +394,17 @@ async function fetchSalesforceCaseSnapshots(salesforceIds) {
 
   const sf = await authenticateSalesforce();
   const rows = [];
+  const windowStart = getCaseSnapshotWindowStart();
+  const windowStartLiteral = toSalesforceDateTimeLiteral(windowStart);
 
   for (const batch of chunkArray(ownerIds, SALESFORCE_METADATA_BATCH_SIZE)) {
     const query = buildVendorCaseSnapshotsQuery(
       batch,
       SALESFORCE_CASE_SNAPSHOT_DAYS,
+      {
+        createdDateFrom: windowStartLiteral,
+        signedDateFrom: windowStartLiteral,
+      },
     );
     const batchRows = query ? await runSoqlQuery(sf, query) : [];
     rows.push(...(batchRows || []));
@@ -454,6 +465,8 @@ async function syncVendorCaseSnapshots(
     upserted,
     skipped,
     days: SALESFORCE_CASE_SNAPSHOT_DAYS,
+    windowType: SALESFORCE_CASE_SNAPSHOT_WINDOW_TYPE,
+    windowStart: getCaseSnapshotWindowStart().toISOString(),
   };
 }
 
@@ -664,11 +677,12 @@ function isGoalWeekComplete(weekEnd) {
   return new Date() > end;
 }
 
+function getCaseSnapshotWindowStart() {
+  return getUsBusinessDaysWindowStartDate(SALESFORCE_CASE_SNAPSHOT_DAYS);
+}
+
 function getLast90DaysStart() {
-  const start = new Date();
-  start.setUTCDate(start.getUTCDate() - SALESFORCE_CASE_SNAPSHOT_DAYS + 1);
-  start.setUTCHours(0, 0, 0, 0);
-  return start;
+  return getCaseSnapshotWindowStart();
 }
 
 async function ensureVendorClassificationTables() {
@@ -1185,22 +1199,43 @@ function getSnapshotProductName(row) {
   );
 }
 
-function buildSnapshotMetricsFromSnapshots(snapshots = []) {
+function getSnapshotCreatedAt(snapshot) {
+  return snapshot?.case_created_at || snapshot?.CreatedDate || null;
+}
+
+function isSnapshotInsideCreatedDateWindow(snapshot, windowStart) {
+  const createdAt = getSnapshotCreatedAt(snapshot);
+  if (!createdAt) return false;
+
+  const createdDate = new Date(createdAt);
+  if (Number.isNaN(createdDate.getTime())) return false;
+
+  return createdDate >= windowStart;
+}
+
+function buildSnapshotMetricsFromSnapshots(snapshots = [], options = {}) {
+  const windowStart = options.windowStart || getCaseSnapshotWindowStart();
+  const scopedSnapshots = snapshots.filter((snapshot) =>
+    isSnapshotInsideCreatedDateWindow(snapshot, windowStart),
+  );
   const byType = {};
   let acceptedCount = 0;
   let outflowCount = 0;
 
-  for (const snapshot of snapshots) {
+  for (const snapshot of scopedSnapshots) {
     const typeName = getSnapshotProductName(snapshot);
     byType[typeName] = (byType[typeName] || 0) + 1;
     if (isAcceptedCaseSnapshot(snapshot)) acceptedCount += 1;
     if (snapshot.sent_date_2 || snapshot.Sent_Date2__c) outflowCount += 1;
   }
 
-  const total = snapshots.length;
+  const total = scopedSnapshots.length;
 
   return {
     totals: {
+      windowType: SALESFORCE_CASE_SNAPSHOT_WINDOW_TYPE,
+      businessDays: SALESFORCE_CASE_SNAPSHOT_DAYS,
+      windowStart: windowStart.toISOString(),
       last90Days: total,
       acceptedLast90Days: acceptedCount,
       outflowLast90Days: outflowCount,
@@ -1253,6 +1288,10 @@ function toPublicAlertFlags(flags = {}) {
     ),
     topMeetsConversionThresholds: toBooleanFlag(
       flags.top_meets_conversion_thresholds,
+    ),
+    topConversionWindowType: flags.top_conversion_window_type || null,
+    topConversionWindowStart: formatDateForPublic(
+      flags.top_conversion_window_start,
     ),
     topCompletedWeeksEvaluated: toNumberSafe(
       flags.top_completed_weeks_evaluated,
@@ -1423,6 +1462,9 @@ function buildPerformancePayload(vendor) {
   return {
     score: toNumberSafe(vendor.performanceScore),
     kpis: {
+      windowType: totals.windowType || null,
+      businessDays: toNumberSafe(totals.businessDays),
+      windowStart: formatDateForPublic(totals.windowStart),
       inflowLast90Days: inflow90,
       acceptedLast90Days: accepted90,
       outflowLast90Days: outflow90,
@@ -2646,10 +2688,13 @@ async function getVendorInsightsById(vendorId) {
       row.salesforce_user_id,
     ]);
     if (Array.isArray(liveCaseRows) && liveCaseRows.length > 0) {
-      caseRows = liveCaseRows;
+      const windowStart = getCaseSnapshotWindowStart();
+      caseRows = liveCaseRows.filter((snapshot) =>
+        isSnapshotInsideCreatedDateWindow(snapshot, windowStart),
+      );
       metricsOverride = {
         ...(row.metrics_json || {}),
-        ...buildSnapshotMetricsFromSnapshots(liveCaseRows),
+        ...buildSnapshotMetricsFromSnapshots(liveCaseRows, { windowStart }),
       };
     }
   } catch (error) {

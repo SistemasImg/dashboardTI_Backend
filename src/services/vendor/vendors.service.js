@@ -225,6 +225,7 @@ async function syncSalesforceVendorsToMysql() {
         contact_name: normalizeStringOrNull(salesforceVendor.contactName),
         email: normalizeStringOrNull(salesforceVendor.email),
         country_id: nextCountryId,
+        status: salesforceVendor.status === "inactive" ? "inactive" : "active",
       };
 
       const localRow = localBySalesforceId.get(salesforceId);
@@ -259,6 +260,9 @@ async function syncSalesforceVendorsToMysql() {
       }
       if ((localRow.country_id || null) !== (nextValues.country_id || null)) {
         updatePayload.country_id = nextValues.country_id;
+      }
+      if (localRow.status !== nextValues.status) {
+        updatePayload.status = nextValues.status;
       }
 
       const changedFields = Object.keys(updatePayload);

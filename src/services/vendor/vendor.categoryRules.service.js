@@ -7,6 +7,9 @@ const { Op, DataTypes } = require("sequelize");
 const sequelize = require("../../config/db");
 const logger = require("../../utils/logger");
 const {
+  getUsBusinessDaysWindowStartDate,
+} = require("../../utils/usBusinessDays");
+const {
   Vendor,
   VendorProfile,
   VendorTortAssignment,
@@ -38,6 +41,7 @@ const CONSECUTIVE_MISS_THRESHOLD = 2;
 // Top vendor constraints
 const TOP_VENDOR_MAX = 20;
 const TOP_CONVERSION_WINDOW_DAYS = 90;
+const TOP_CONVERSION_WINDOW_TYPE = "us_business_days";
 const TOP_MIN_ACCEPTED_TO_INFLOW_RATE_PERCENT = 15;
 
 // Vendors qualify for top by meeting all weekly outflow goals in completed weeks.
@@ -104,10 +108,7 @@ function getCurrentWeekStartStr() {
 }
 
 function getLastDaysStart(days) {
-  const start = new Date();
-  start.setUTCDate(start.getUTCDate() - Number(days) + 1);
-  start.setUTCHours(0, 0, 0, 0);
-  return start;
+  return getUsBusinessDaysWindowStartDate(days);
 }
 
 function getProfileVendorInfo(profile) {
@@ -597,6 +598,8 @@ function computeTopEligibility(
     acceptedDaysCount: acceptedDaySet.size,
     avgAcceptedPerDay: Number(avgAcceptedPerDay.toFixed(4)),
     conversionWindowDays: TOP_CONVERSION_WINDOW_DAYS,
+    conversionWindowType: TOP_CONVERSION_WINDOW_TYPE,
+    conversionWindowStart: cutoff.toISOString(),
     acceptedToInflowRatePercent,
     acceptedToOutflowRatePercent,
     minAcceptedToInflowRatePercent: TOP_MIN_ACCEPTED_TO_INFLOW_RATE_PERCENT,
@@ -850,6 +853,8 @@ function buildAlertFlags(evaluation, newCategory) {
     accepted_days_28: topEligibility.acceptedDaysCount,
     accepted_avg_per_day: topEligibility.avgAcceptedPerDay,
     top_conversion_window_days: topEligibility.conversionWindowDays || 0,
+    top_conversion_window_type: topEligibility.conversionWindowType || null,
+    top_conversion_window_start: topEligibility.conversionWindowStart || null,
     top_inflow_90_days: topEligibility.inflowCount || 0,
     top_accepted_90_days: topEligibility.acceptedCount || 0,
     top_outflow_90_days: topEligibility.outflowCount || 0,
@@ -1269,5 +1274,6 @@ module.exports = {
   TOP_VENDOR_MAX,
   TOP_UNDERPERFORM_WEEKS_THRESHOLD,
   TOP_CONVERSION_WINDOW_DAYS,
+  TOP_CONVERSION_WINDOW_TYPE,
   TOP_MIN_ACCEPTED_TO_INFLOW_RATE_PERCENT,
 };
