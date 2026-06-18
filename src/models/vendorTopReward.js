@@ -29,6 +29,11 @@ const VendorTopReward = sequelize.define(
       allowNull: false,
       defaultValue: false,
     },
+    auto_intake: {
+      type: DataTypes.BOOLEAN,
+      allowNull: false,
+      defaultValue: false,
+    },
     active: {
       type: DataTypes.BOOLEAN,
       allowNull: false,

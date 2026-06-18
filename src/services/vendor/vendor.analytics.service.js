@@ -1,5 +1,7 @@
 const { Op } = require("sequelize");
 const {
+  Vendor,
+  VendorCountry,
   VendorProfile,
   VendorCaseSnapshot,
   VendorWeeklyGoal,
@@ -14,9 +16,11 @@ const RANGE_DAYS_MAP = {
   "90d": 90,
 };
 
+const GOAL_OVERVIEW_WEEKS = 3;
+
 const ALLOWED_CATEGORIES = new Set([
   "top_vendors",
-  "new_review",
+  "new_vendor",
   "under_review",
 ]);
 
@@ -72,6 +76,33 @@ function resolveCurrentCategory(profile) {
     return profile.manual_category;
   }
   return profile.computed_category;
+}
+
+function getProfileVendorInfo(profile) {
+  return profile?.vendorInfo || null;
+}
+
+function getProfileDisplayInfo(profile) {
+  const vendorInfo = getProfileVendorInfo(profile);
+  const metrics = profile?.metrics_json || {};
+  const salesforceInfo = metrics.salesforce || {};
+  const vendorFreshness = metrics.vendorFreshness || {};
+
+  return {
+    supplier: vendorInfo?.contact_name || profile?.supplier || null,
+    account: vendorInfo?.name || profile?.account || null,
+    supplierSegment:
+      vendorInfo?.supplier_segment || profile?.supplier_segment || null,
+    active: vendorInfo
+      ? vendorInfo.status === "active"
+      : Boolean(profile?.active),
+    country: vendorInfo?.countryInfo?.name || profile?.country || null,
+    isNewVendor: Boolean(vendorFreshness.isNewVendor),
+    newVendorWindowDays: Number(vendorFreshness.windowDays || 30),
+    contactCreatedAt: salesforceInfo.contactCreatedAt || null,
+    accountCreatedAt: salesforceInfo.accountCreatedAt || null,
+    accountLastModifiedAt: salesforceInfo.accountLastModifiedAt || null,
+  };
 }
 
 function parseFilters(raw = {}) {
@@ -179,7 +210,7 @@ function parseFilters(raw = {}) {
   const category = raw.category ? String(raw.category).toLowerCase() : null;
   if (category && !ALLOWED_CATEGORIES.has(category)) {
     const error = new Error(
-      "category must be one of top_vendors, new_review, under_review",
+      "category must be one of top_vendors, new_vendor, under_review",
     );
     error.status = 400;
     throw error;
@@ -257,13 +288,16 @@ function resolveTypeFilter(filters, productsIndex) {
 
 async function loadFilteredProfiles(filters, typeFilter) {
   const where = {};
+  const vendorWhere = {
+    status: "active",
+  };
 
   if (filters.vendorId) {
     where.id = filters.vendorId;
   }
 
   if (filters.supplierSegment) {
-    where.supplier_segment = filters.supplierSegment;
+    vendorWhere.supplier_segment = filters.supplierSegment;
   }
 
   if (filters.category) {
@@ -301,13 +335,41 @@ async function loadFilteredProfiles(filters, typeFilter) {
 
   return VendorProfile.findAll({
     where,
-    include: [includeAssignments],
+    include: [
+      {
+        model: Vendor,
+        as: "vendorInfo",
+        required: true,
+        where: vendorWhere,
+        attributes: [
+          "id",
+          "salesforce_id",
+          "name",
+          "contact_name",
+          "email",
+          "country_id",
+          "status",
+          "supplier_segment",
+        ],
+        include: [
+          {
+            model: VendorCountry,
+            as: "countryInfo",
+            attributes: ["id", "name", "status"],
+            required: false,
+          },
+        ],
+      },
+      includeAssignments,
+    ],
     attributes: [
       "id",
       "supplier",
       "account",
+      "country",
       "supplier_segment",
       "active",
+      "metrics_json",
       "computed_category",
       "category_source",
       "manual_category",
@@ -452,6 +514,21 @@ function getWeekStartIso(value) {
   return date.toISOString().split("T")[0];
 }
 
+function getRecentGoalWeekStartDates(count = GOAL_OVERVIEW_WEEKS) {
+  const now = new Date();
+  const day = now.getUTCDay();
+  const daysToMonday = day === 0 ? 6 : day - 1;
+  const monday = new Date(now);
+  monday.setUTCDate(now.getUTCDate() - daysToMonday);
+  monday.setUTCHours(0, 0, 0, 0);
+
+  return Array.from({ length: count }, (_item, index) => {
+    const week = new Date(monday);
+    week.setUTCDate(monday.getUTCDate() - index * 7);
+    return week.toISOString().split("T")[0];
+  });
+}
+
 async function loadAnalyticsDataset(rawFilters = {}) {
   const filters = parseFilters(rawFilters);
   const productsIndex = await loadProducts();
@@ -495,10 +572,7 @@ async function loadAnalyticsDataset(rawFilters = {}) {
             [Op.in]: vendorIds,
           },
           week_start: {
-            [Op.lte]: toDateOnlyIso(filters.toDate),
-          },
-          week_end: {
-            [Op.gte]: toDateOnlyIso(filters.fromDate),
+            [Op.in]: getRecentGoalWeekStartDates(),
           },
           ...(typeFilter.productIds.length
             ? {
@@ -734,6 +808,7 @@ function buildVendorsResponse(dataset) {
 
   const items = dataset.profiles.map((profile) => {
     const vendorId = Number(profile.id);
+    const displayInfo = getProfileDisplayInfo(profile);
     const metrics = metricsByVendor.get(vendorId) || {
       inflow: 0,
       accepted: 0,
@@ -751,9 +826,14 @@ function buildVendorsResponse(dataset) {
 
     return {
       vendorId,
-      supplier: profile.supplier,
-      account: profile.account,
-      supplierSegment: profile.supplier_segment,
+      supplier: displayInfo.supplier,
+      account: displayInfo.account,
+      supplierSegment: displayInfo.supplierSegment,
+      isNewVendor: displayInfo.isNewVendor,
+      newVendorWindowDays: displayInfo.newVendorWindowDays,
+      contactCreatedAt: displayInfo.contactCreatedAt,
+      accountCreatedAt: displayInfo.accountCreatedAt,
+      accountLastModifiedAt: displayInfo.accountLastModifiedAt,
       category: resolveCurrentCategory(profile),
       inflow: metrics.inflow,
       accepted: metrics.accepted,
@@ -908,10 +988,11 @@ async function buildCategoryHistoryResponse(dataset) {
 
   const items = logRows.map((row) => {
     const vendor = dataset.profileById.get(Number(row.vendor_id));
+    const displayInfo = getProfileDisplayInfo(vendor);
     return {
       date: row.created_at,
       vendorId: Number(row.vendor_id),
-      supplier: vendor?.supplier || null,
+      supplier: displayInfo.supplier,
       fromCategory: row.from_category,
       toCategory: row.to_category,
       triggeredBy: row.triggered_by,

@@ -34,6 +34,10 @@ const VendorCaseSnapshot = sequelize.define(
       type: DataTypes.DATEONLY,
       allowNull: true,
     },
+    sent_date_2: {
+      type: DataTypes.DATE,
+      allowNull: true,
+    },
     sub_status: {
       type: DataTypes.STRING(120),
       allowNull: true,

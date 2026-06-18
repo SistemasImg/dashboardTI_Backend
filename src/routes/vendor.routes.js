@@ -11,6 +11,7 @@ const vendorTableCreateSchema = require("../schemas/vendorTableCreate.schema");
 const vendorTableStatusSchema = require("../schemas/vendorTableStatus.schema");
 const {
   syncVendors,
+  getVendorSyncStatusSnapshot,
   getVendors,
   getVendorInsights,
   updateVendorCategory,
@@ -20,13 +21,15 @@ const {
   getVendorMonitoringSnapshot,
   getVendorMonitoringAlertsFeed,
   streamVendorMonitoringEvents,
+  getVendorSalesforceCases,
   getVendorsAnalyticsSummary,
   getVendorsAnalyticsTrends,
   getVendorsAnalyticsVendors,
   getVendorsAnalyticsTypes,
   getVendorsAnalyticsCategoryHistory,
-  syncVendorsTable,
   getVendorsTable,
+  getSalesforceVendors,
+  patchSalesforceVendorsToMysql,
   getVendorsCountries,
   createVendorTable,
   patchVendorTableStatus,
@@ -36,8 +39,8 @@ const {
 
 router.use(authMiddleware);
 
+router.get("/sync/status", getVendorSyncStatusSnapshot);
 router.post("/sync", syncVendors);
-router.post("/table/sync", syncVendorsTable);
 router.post("/category-rules/run", runVendorCategoryRules);
 router.get("/analytics/summary", getVendorsAnalyticsSummary);
 router.get("/analytics/trends", getVendorsAnalyticsTrends);
@@ -47,8 +50,11 @@ router.get("/analytics/category-history", getVendorsAnalyticsCategoryHistory);
 router.get("/monitoring/summary", getVendorMonitoringSnapshot);
 router.get("/monitoring/alerts", getVendorMonitoringAlertsFeed);
 router.get("/monitoring/events", streamVendorMonitoringEvents);
+router.get("/table/salesforce", getSalesforceVendors);
+router.patch("/table/salesforce", patchSalesforceVendorsToMysql);
 router.get("/table", getVendorsTable);
 router.get("/table/countries", getVendorsCountries);
+router.get("/table/:vendorId/cases", getVendorSalesforceCases);
 router.post("/table", validate(vendorTableCreateSchema), createVendorTable);
 router.patch(
   "/table/:vendorId/status",
@@ -78,6 +84,11 @@ router.post(
   upsertVendorTort,
 );
 router.patch(
+  "/:vendorId/rewards",
+  validate(vendorRewardSchema),
+  updateVendorRewards,
+);
+router.put(
   "/:vendorId/rewards",
   validate(vendorRewardSchema),
   updateVendorRewards,

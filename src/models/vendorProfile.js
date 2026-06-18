@@ -54,7 +54,7 @@ const VendorProfile = sequelize.define(
       defaultValue: DataTypes.NOW,
     },
     computed_category: {
-      type: DataTypes.ENUM("new_review", "top_vendors", "under_review"),
+      type: DataTypes.ENUM("new_vendor", "top_vendors", "under_review"),
       allowNull: false,
       defaultValue: "under_review",
     },
@@ -64,7 +64,7 @@ const VendorProfile = sequelize.define(
       defaultValue: "auto",
     },
     manual_category: {
-      type: DataTypes.ENUM("new_review", "top_vendors", "under_review"),
+      type: DataTypes.ENUM("new_vendor", "top_vendors", "under_review"),
       allowNull: true,
     },
     performance_score: {

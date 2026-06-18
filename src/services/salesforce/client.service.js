@@ -54,6 +54,43 @@ async function runSoqlQueryFull(sf, soql, retries = 2) {
   }
 }
 
+async function fetchSalesforceQueryPage(sf, url, retries = 2) {
+  try {
+    const response = await axios.get(url, {
+      httpsAgent,
+      timeout: 30000,
+      headers: {
+        Authorization: `Bearer ${sf.accessToken}`,
+      },
+    });
+
+    return response.data;
+  } catch (error) {
+    if (retries > 0) {
+      console.warn("Retrying Salesforce query page...", retries);
+      return fetchSalesforceQueryPage(sf, url, retries - 1);
+    }
+    throw error;
+  }
+}
+
+async function runSoqlQueryAll(sf, soql) {
+  const firstPage = await runSoqlQueryFull(sf, soql);
+  const records = [...(firstPage.records || [])];
+  let nextRecordsUrl = firstPage.nextRecordsUrl || null;
+
+  while (nextRecordsUrl) {
+    const page = await fetchSalesforceQueryPage(
+      sf,
+      `${sf.instanceUrl}${nextRecordsUrl}`,
+    );
+    records.push(...(page.records || []));
+    nextRecordsUrl = page.nextRecordsUrl || null;
+  }
+
+  return records;
+}
+
 async function patchSalesforceSObject(sf, objectName, recordId, payload) {
   const endpoint = `${sf.instanceUrl}/services/data/${salesforceConfig.apiVersion}/sobjects/${objectName}/${recordId}`;
 
@@ -113,6 +150,7 @@ async function createSalesforceSObject(sf, objectName, payload) {
 module.exports = {
   runSoqlQuery,
   runSoqlQueryFull,
+  runSoqlQueryAll,
   patchSalesforceSObject,
   createSalesforceSObject,
 };

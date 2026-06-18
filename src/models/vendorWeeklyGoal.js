@@ -34,6 +34,11 @@ const VendorWeeklyGoal = sequelize.define(
       allowNull: false,
       defaultValue: 0,
     },
+    actual_outflow: {
+      type: DataTypes.INTEGER.UNSIGNED,
+      allowNull: false,
+      defaultValue: 0,
+    },
     goal_met: {
       type: DataTypes.BOOLEAN,
       allowNull: false,

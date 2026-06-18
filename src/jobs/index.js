@@ -12,7 +12,7 @@ const {
 const { runVendorSyncJob } = require("./vendorSync.job");
 const isProduction = process.env.NODE_ENV === "production";
 const vendorSyncCronExpression =
-  process.env.VENDOR_SYNC_CRON_EXPRESSION || "*/30 * * * *";
+  process.env.VENDOR_SYNC_CRON_EXPRESSION || "0 * * * *";
 
 function buildTranscriptionCronExpression() {
   const rawValue = Number(

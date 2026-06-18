@@ -215,6 +215,20 @@ VendorCountry.hasMany(Vendor, {
   constraints: false,
 });
 
+VendorProfile.belongsTo(Vendor, {
+  foreignKey: "salesforce_user_id",
+  targetKey: "salesforce_id",
+  as: "vendorInfo",
+  constraints: false,
+});
+
+Vendor.hasOne(VendorProfile, {
+  foreignKey: "salesforce_user_id",
+  sourceKey: "salesforce_id",
+  as: "classificationProfile",
+  constraints: false,
+});
+
 module.exports = {
   User,
   Role,

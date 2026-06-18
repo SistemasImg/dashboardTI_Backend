@@ -1,6 +1,6 @@
 const { Op } = require("sequelize");
 const EventEmitter = require("events");
-const { VendorProfile, VendorCategoryLog } = require("../../models");
+const { Vendor, VendorProfile, VendorCategoryLog } = require("../../models");
 
 const ALERT_EVENT = "vendor-monitoring-alert";
 const MAX_BUFFERED_ALERTS = 1000;
@@ -20,6 +20,14 @@ function toFinalCategory(profile) {
   const manual = profile.manual_category || null;
   if (source === "manual" && manual) return manual;
   return profile.computed_category;
+}
+
+function getProfileDisplayInfo(profile) {
+  const vendorInfo = profile?.vendorInfo || null;
+  return {
+    supplier: vendorInfo?.contact_name || profile?.supplier || null,
+    username: vendorInfo?.email || profile?.username || null,
+  };
 }
 
 function publishVendorMonitoringAlert(payload) {
@@ -72,7 +80,15 @@ async function getVendorMonitoringSummary(options = {}) {
   const limit = normalizeLimit(options.limit, 20, 100);
 
   const profiles = await VendorProfile.findAll({
-    where: { active: true },
+    include: [
+      {
+        model: Vendor,
+        as: "vendorInfo",
+        required: true,
+        where: { status: "active" },
+        attributes: ["id", "salesforce_id", "contact_name", "email", "status"],
+      },
+    ],
     attributes: [
       "id",
       "supplier",
@@ -88,7 +104,7 @@ async function getVendorMonitoringSummary(options = {}) {
   });
 
   const byCategory = {
-    new_review: 0,
+    new_vendor: 0,
     top_vendors: 0,
     under_review: 0,
   };
@@ -105,14 +121,16 @@ async function getVendorMonitoringSummary(options = {}) {
     const hasRisk =
       Boolean(flags.fraud_risk) ||
       Boolean(flags.trending_to_under_review) ||
-      Boolean(flags.trending_to_new_review);
+      Boolean(flags.trending_to_new_vendor);
 
     if (!hasRisk) continue;
 
+    const displayInfo = getProfileDisplayInfo(profile);
+
     atRiskVendors.push({
       vendorId: profile.id,
-      supplier: profile.supplier,
-      username: profile.username,
+      supplier: displayInfo.supplier,
+      username: displayInfo.username,
       category: finalCategory,
       computedCategory: profile.computed_category,
       categorySource: profile.category_source,
@@ -155,6 +173,20 @@ async function getVendorMonitoringSummary(options = {}) {
   const changeVendors = vendorIds.length
     ? await VendorProfile.findAll({
         where: { id: { [Op.in]: vendorIds } },
+        include: [
+          {
+            model: Vendor,
+            as: "vendorInfo",
+            required: false,
+            attributes: [
+              "id",
+              "salesforce_id",
+              "contact_name",
+              "email",
+              "status",
+            ],
+          },
+        ],
         attributes: ["id", "supplier", "username"],
       })
     : [];
@@ -171,11 +203,12 @@ async function getVendorMonitoringSummary(options = {}) {
     atRiskVendors: atRiskVendors.slice(0, limit),
     recentCategoryChanges: recentCategoryChanges.map((item) => {
       const vendor = changeVendorMap.get(Number(item.vendor_id));
+      const displayInfo = getProfileDisplayInfo(vendor);
       return {
         id: item.id,
         vendorId: Number(item.vendor_id),
-        supplier: vendor?.supplier || null,
-        username: vendor?.username || null,
+        supplier: displayInfo.supplier,
+        username: displayInfo.username,
         fromCategory: item.from_category,
         toCategory: item.to_category,
         reason: item.reason,

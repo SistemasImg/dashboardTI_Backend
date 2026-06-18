@@ -1,12 +1,13 @@
 /**
  * Vendor category rules engine.
- * Evaluates weekly inflow goals, fraud/quality conditions, and top vendor criteria.
+ * Evaluates weekly outflow goals, fraud/quality conditions, and top vendor criteria.
  * Runs automatically after each vendor sync to keep categories and alerts current.
  */
-const { Op } = require("sequelize");
+const { Op, DataTypes } = require("sequelize");
 const sequelize = require("../../config/db");
 const logger = require("../../utils/logger");
 const {
+  Vendor,
   VendorProfile,
   VendorTortAssignment,
   VendorCaseSnapshot,
@@ -16,30 +17,30 @@ const {
   Product,
 } = require("../../models");
 const { publishVendorMonitoringAlert } = require("./vendor.alerts.service");
+const {
+  buildGoalCompensationSummary,
+} = require("./vendor.goalCompensation.service");
 
 // =============================================
 // RULE CONSTANTS
 // =============================================
 
-// Weekly inflow targets per tort type (cases/week)
-const WEEKLY_INFLOW_TARGETS = {
-  rideshare: 15,
-  depo: 5,
-  default: 10,
+// Weekly outflow targets per tort type (signed cases/week)
+const WEEKLY_OUTFLOW_TARGETS = {
+  rideshare: 5,
+  bardPort: 5,
+  default: 2,
 };
 
-// More than 2 consecutive weeks missing all goals → under_review
-const CONSECUTIVE_MISS_THRESHOLD = 3;
+// Missing both completed evaluation weeks keeps/promotes under_review.
+const CONSECUTIVE_MISS_THRESHOLD = 2;
 
 // Top vendor constraints
 const TOP_VENDOR_MAX = 20;
-const TOP_ACCEPTED_WINDOW_DAYS = 28;
+const TOP_CONVERSION_WINDOW_DAYS = 90;
+const TOP_MIN_ACCEPTED_TO_INFLOW_RATE_PERCENT = 15;
 
-// Minimum accepted avg/day in 28-day window to qualify for top
-const TOP_ACCEPTED_DAILY_MIN = 1;
-
-// Minimum to sustain top status (allows "intercalado" pattern)
-const TOP_ACCEPTED_DAILY_SUSTAIN = 0.5;
+// Vendors qualify for top by meeting all weekly outflow goals in completed weeks.
 
 // Consecutive underperforming weeks before demotion from top
 const TOP_UNDERPERFORM_WEEKS_THRESHOLD = 4;
@@ -50,8 +51,14 @@ const FRAUD_SUBSTATUS_VALUES = ["fake lead"];
 const FRAUD_RATE_THRESHOLD = 0.2; // 20%+ of cases flagged as Fake Lead
 const LOW_CONVERSION_THRESHOLD = 0.02; // less than 2% accepted
 
-// How many complete weeks to evaluate for consecutive miss check
-const GOAL_EVALUATION_WEEKS = 3;
+// Show current week + previous 2; classify only from complete weeks.
+const GOAL_DISPLAY_WEEKS = 3;
+const GOAL_CLASSIFICATION_COMPLETED_WEEKS = 2;
+const NEW_VENDOR_PROBATION_WEEKS = GOAL_CLASSIFICATION_COMPLETED_WEEKS;
+const GOAL_RULE_LOOKBACK_WEEKS = Math.max(
+  GOAL_DISPLAY_WEEKS,
+  NEW_VENDOR_PROBATION_WEEKS + 1,
+);
 
 // =============================================
 // WEEK HELPERS
@@ -96,15 +103,64 @@ function getCurrentWeekStartStr() {
   return monday.toISOString().split("T")[0];
 }
 
+function getLastDaysStart(days) {
+  const start = new Date();
+  start.setUTCDate(start.getUTCDate() - Number(days) + 1);
+  start.setUTCHours(0, 0, 0, 0);
+  return start;
+}
+
+function getProfileVendorInfo(profile) {
+  return profile?.vendorInfo || null;
+}
+
+function isProfileCurrentlyActive(profile) {
+  const vendorInfo = getProfileVendorInfo(profile);
+  return vendorInfo ? vendorInfo.status === "active" : Boolean(profile.active);
+}
+
+function getProfileDisplayInfo(profile) {
+  const vendorInfo = getProfileVendorInfo(profile);
+  return {
+    supplier: vendorInfo?.contact_name || profile.supplier || null,
+    username: vendorInfo?.email || profile.username || null,
+  };
+}
+
+function isAcceptedCaseSnapshot(snapshot) {
+  return (
+    String(snapshot?.sub_status || "")
+      .trim()
+      .toLowerCase() === "accepted"
+  );
+}
+
 // =============================================
 // GOAL TARGET RESOLUTION
 // =============================================
 
-function getWeeklyInflowTarget(tortName) {
+function getWeeklyOutflowTarget(tortName) {
   const name = String(tortName || "").toLowerCase();
-  if (name.includes("rideshare")) return WEEKLY_INFLOW_TARGETS.rideshare;
-  if (name.includes("depo")) return WEEKLY_INFLOW_TARGETS.depo;
-  return WEEKLY_INFLOW_TARGETS.default;
+  if (name.includes("rideshare")) return WEEKLY_OUTFLOW_TARGETS.rideshare;
+  if (name.includes("bard") && name.includes("port")) {
+    return WEEKLY_OUTFLOW_TARGETS.bardPort;
+  }
+  return WEEKLY_OUTFLOW_TARGETS.default;
+}
+
+function doesSnapshotMatchAssignment(snapshot, assignment, productName) {
+  const snapshotProductId = Number(snapshot.product_id || 0);
+  const assignmentProductId = Number(assignment.product_id || 0);
+
+  if (snapshotProductId && assignmentProductId) {
+    return snapshotProductId === assignmentProductId;
+  }
+
+  return (
+    String(snapshot.caseProduct?.name || snapshot.product?.name || "")
+      .trim()
+      .toLowerCase() === productName.toLowerCase()
+  );
 }
 
 // =============================================
@@ -112,50 +168,325 @@ function getWeeklyInflowTarget(tortName) {
 // =============================================
 
 /**
- * Computes inflow counts and goal pass/fail for the last N complete ISO weeks.
+ * Computes outflow counts and goal pass/fail for the latest ISO weeks.
  * Uses local snapshot data — no Salesforce call needed.
  */
 function computeWeeklyGoalResults(assignments, snapshots) {
   if (!assignments.length) return [];
 
   const results = [];
+  const now = new Date();
 
-  for (let w = 1; w <= GOAL_EVALUATION_WEEKS; w++) {
+  for (let w = 0; w < GOAL_RULE_LOOKBACK_WEEKS; w++) {
     const week = getWeekBoundaries(w);
+    const isComplete = now > week.end;
 
     const weekSnapshots = snapshots.filter((s) => {
-      if (!s.case_created_at) return false;
-      const d = new Date(s.case_created_at);
+      if (!s.signed_date) return false;
+      const d = new Date(s.signed_date);
       return d >= week.start && d <= week.end;
     });
 
     const goalResults = assignments.map((assignment) => {
       const productName = String(assignment.product?.name || "").trim();
-      const target = getWeeklyInflowTarget(productName);
+      const target = getWeeklyOutflowTarget(productName);
 
-      const actualInflow = weekSnapshots.filter(
-        (s) =>
-          String(s.caseProduct?.name || s.product?.name || "")
-            .trim()
-            .toLowerCase() === productName.toLowerCase(),
+      const actualOutflow = weekSnapshots.filter((snapshot) =>
+        doesSnapshotMatchAssignment(snapshot, assignment, productName),
       ).length;
 
       return {
         productId: assignment.product_id,
         productName,
         target,
-        actual: actualInflow,
-        met: actualInflow >= target,
+        actual: actualOutflow,
+        met: actualOutflow >= target,
       };
     });
 
     const allMissed =
       goalResults.length > 0 && goalResults.every((g) => !g.met);
 
-    results.push({ week, weeksAgo: w, goals: goalResults, allMissed });
+    results.push({
+      week,
+      weeksAgo: w,
+      isComplete,
+      goals: goalResults,
+      allMissed,
+    });
   }
 
   return results;
+}
+
+function getClassificationWeeklyResults(weeklyResults) {
+  return weeklyResults
+    .filter((result) => result.isComplete)
+    .sort((a, b) => a.weeksAgo - b.weeksAgo)
+    .slice(0, GOAL_CLASSIFICATION_COMPLETED_WEEKS);
+}
+
+function getNewVendorProbationWeeklyResults(weeklyResults) {
+  return weeklyResults
+    .filter((result) => result.isComplete)
+    .sort((a, b) => a.weeksAgo - b.weeksAgo)
+    .slice(0, NEW_VENDOR_PROBATION_WEEKS);
+}
+
+function buildCurrentWeekProgress(weeklyResults) {
+  const currentWeek = weeklyResults.find((result) => result.weeksAgo === 0);
+  const goals = currentWeek?.goals || [];
+  const totalTarget = goals.reduce(
+    (sum, goal) => sum + Number(goal.target || 0),
+    0,
+  );
+  const totalOutflow = goals.reduce(
+    (sum, goal) => sum + Number(goal.actual || 0),
+    0,
+  );
+
+  return {
+    weekStart: currentWeek?.week?.startStr || null,
+    weekEnd: currentWeek?.week?.endStr || null,
+    totalTarget,
+    totalOutflow,
+    byTort: goals.map((goal) => ({
+      productId: goal.productId,
+      productName: goal.productName,
+      target: goal.target,
+      actualOutflow: goal.actual,
+      goalMet: goal.met,
+    })),
+  };
+}
+
+function getFailedTortNames(summary) {
+  return (summary?.byTort || [])
+    .filter((item) => !item.eligibleAfterCompensation)
+    .map((item) => item.productName || `Product ${item.productId}`)
+    .filter(Boolean);
+}
+
+function hasMixedTortPerformance(summary) {
+  const byTort = summary?.byTort || [];
+  const failedCount = byTort.filter(
+    (item) => !item.eligibleAfterCompensation,
+  ).length;
+  const passedCount = byTort.length - failedCount;
+  return failedCount > 0 && passedCount > 0;
+}
+
+function formatTortList(names = []) {
+  if (names.length <= 2) return names.join(" and ");
+  return `${names.slice(0, -1).join(", ")}, and ${names[names.length - 1]}`;
+}
+
+function buildNewVendorProbationStatus(isNewVendor, weeklyResults) {
+  if (!isNewVendor) {
+    return {
+      enabled: false,
+      subcategory: null,
+      status: null,
+      actionRequired: false,
+      shouldDeactivate: false,
+      recommendedAction: null,
+    };
+  }
+
+  const probationWeeks = getNewVendorProbationWeeklyResults(weeklyResults);
+  const completedWeeksEvaluated = probationWeeks.length;
+  const finalSummary = buildGoalCompensationSummary(probationWeeks, {
+    windowWeeks: NEW_VENDOR_PROBATION_WEEKS,
+  });
+  const progressSummary = buildGoalCompensationSummary(probationWeeks, {
+    windowWeeks: Math.max(completedWeeksEvaluated, 1),
+  });
+  const trialComplete = completedWeeksEvaluated >= NEW_VENDOR_PROBATION_WEEKS;
+  const currentWeekProgress = buildCurrentWeekProgress(weeklyResults);
+
+  let status = "pending";
+  let subcategory = "new_trial_pending";
+  let messageCode = "new_trial_pending";
+  let message = "New vendor trial has no completed weeks yet.";
+  let actionRequired = false;
+  let shouldDeactivate = false;
+  let recommendedAction = "monitor_vendor";
+
+  if (trialComplete && finalSummary.eligibleAfterCompensation) {
+    status = "passed";
+    subcategory = "new_trial_passed";
+    messageCode = "new_trial_passed";
+    message = `New vendor passed the ${NEW_VENDOR_PROBATION_WEEKS}-completed-week trial: ${finalSummary.totalOutflow}/${finalSummary.totalTarget} outflow.`;
+    recommendedAction = "none";
+  } else if (trialComplete && hasMixedTortPerformance(finalSummary)) {
+    const failedTorts = getFailedTortNames(finalSummary);
+    status = "tort_action_required";
+    subcategory = "new_trial_tort_deactivation_required";
+    messageCode = "new_trial_tort_deactivation_required";
+    message = `New vendor has assigned tort underperformance in ${formatTortList(failedTorts)}: ${finalSummary.totalOutflow}/${finalSummary.totalTarget} outflow, deficit ${finalSummary.totalDeficit}.`;
+    actionRequired = true;
+    shouldDeactivate = false;
+    recommendedAction = "deactivate_underperforming_torts";
+  } else if (trialComplete) {
+    status = "failed";
+    subcategory = "new_trial_deactivation_required";
+    messageCode = "new_trial_deactivation_required";
+    message = `New vendor failed the ${NEW_VENDOR_PROBATION_WEEKS}-completed-week trial: ${finalSummary.totalOutflow}/${finalSummary.totalTarget} outflow, deficit ${finalSummary.totalDeficit}.`;
+    actionRequired = true;
+    shouldDeactivate = true;
+    recommendedAction = "deactivate_vendor";
+  } else if (
+    completedWeeksEvaluated > 0 &&
+    progressSummary.eligibleAfterCompensation
+  ) {
+    status = "on_track";
+    subcategory = "new_trial_on_track";
+    messageCode = "new_trial_on_track";
+    message = `New vendor is on track during trial: ${progressSummary.totalOutflow}/${progressSummary.totalTarget} outflow so far.`;
+  } else if (completedWeeksEvaluated > 0 && progressSummary.totalOutflow > 0) {
+    status = "partial";
+    subcategory = "new_trial_partial";
+    messageCode = "new_trial_partial";
+    message = `New vendor is partially meeting trial goals: ${progressSummary.totalOutflow}/${progressSummary.totalTarget} outflow so far.`;
+    actionRequired = true;
+  } else if (completedWeeksEvaluated > 0) {
+    status = "at_risk";
+    subcategory = "new_trial_at_risk";
+    messageCode = "new_trial_at_risk";
+    message = "New vendor has no outflow in completed trial weeks.";
+    actionRequired = true;
+  }
+
+  const summary = trialComplete ? finalSummary : progressSummary;
+
+  return {
+    enabled: true,
+    trialWeeks: NEW_VENDOR_PROBATION_WEEKS,
+    completedWeeksEvaluated,
+    remainingWeeks: Math.max(
+      NEW_VENDOR_PROBATION_WEEKS - completedWeeksEvaluated,
+      0,
+    ),
+    trialComplete,
+    status,
+    subcategory,
+    actionRequired,
+    shouldDeactivate,
+    recommendedAction,
+    messageCode,
+    message,
+    totalTarget: summary.totalTarget,
+    totalOutflow: summary.totalOutflow,
+    totalDeficit: summary.totalDeficit,
+    totalSurplus: summary.totalSurplus,
+    byTort: summary.byTort,
+    currentWeekProgress,
+  };
+}
+
+function buildUnderReviewProductivityStatus(isUnderReview, weeklyResults) {
+  if (!isUnderReview) {
+    return {
+      enabled: false,
+      subcategory: null,
+      status: null,
+      actionRequired: false,
+      shouldDeactivate: false,
+      recommendedAction: null,
+    };
+  }
+
+  const reviewWeeks = getClassificationWeeklyResults(weeklyResults);
+  const completedWeeksEvaluated = reviewWeeks.length;
+  const finalSummary = buildGoalCompensationSummary(reviewWeeks, {
+    windowWeeks: GOAL_CLASSIFICATION_COMPLETED_WEEKS,
+  });
+  const progressSummary = buildGoalCompensationSummary(reviewWeeks, {
+    windowWeeks: Math.max(completedWeeksEvaluated, 1),
+  });
+  const reviewComplete =
+    completedWeeksEvaluated >= GOAL_CLASSIFICATION_COMPLETED_WEEKS;
+  const currentWeekProgress = buildCurrentWeekProgress(weeklyResults);
+
+  let status = "pending";
+  let subcategory = "under_review_productivity_pending";
+  let messageCode = "under_review_productivity_pending";
+  let message = "Under review productivity has no completed weeks yet.";
+  let actionRequired = false;
+  let shouldDeactivate = false;
+  let recommendedAction = "monitor_vendor";
+
+  if (reviewComplete && finalSummary.eligibleAfterCompensation) {
+    status = "productive";
+    subcategory = "under_review_productivity_recovered";
+    messageCode = "under_review_productivity_recovered";
+    message = `Under review vendor met ${GOAL_CLASSIFICATION_COMPLETED_WEEKS}-completed-week productivity goals: ${finalSummary.totalOutflow}/${finalSummary.totalTarget} outflow.`;
+    recommendedAction = "none";
+  } else if (reviewComplete && hasMixedTortPerformance(finalSummary)) {
+    const failedTorts = getFailedTortNames(finalSummary);
+    status = "tort_action_required";
+    subcategory = "under_review_tort_deactivation_required";
+    messageCode = "under_review_tort_deactivation_required";
+    message = `Under review vendor has assigned tort underperformance in ${formatTortList(failedTorts)}: ${finalSummary.totalOutflow}/${finalSummary.totalTarget} outflow, deficit ${finalSummary.totalDeficit}.`;
+    actionRequired = true;
+    shouldDeactivate = false;
+    recommendedAction = "deactivate_underperforming_torts";
+  } else if (reviewComplete) {
+    status = "failed";
+    subcategory = "under_review_deactivation_required";
+    messageCode = "under_review_deactivation_required";
+    message = `Under review vendor failed ${GOAL_CLASSIFICATION_COMPLETED_WEEKS}-completed-week productivity goals: ${finalSummary.totalOutflow}/${finalSummary.totalTarget} outflow, deficit ${finalSummary.totalDeficit}.`;
+    actionRequired = true;
+    shouldDeactivate = true;
+    recommendedAction = "deactivate_vendor";
+  } else if (
+    completedWeeksEvaluated > 0 &&
+    progressSummary.eligibleAfterCompensation
+  ) {
+    status = "on_track";
+    subcategory = "under_review_productivity_on_track";
+    messageCode = "under_review_productivity_on_track";
+    message = `Under review vendor is on track: ${progressSummary.totalOutflow}/${progressSummary.totalTarget} outflow so far.`;
+  } else if (completedWeeksEvaluated > 0 && progressSummary.totalOutflow > 0) {
+    status = "partial";
+    subcategory = "under_review_productivity_partial";
+    messageCode = "under_review_productivity_partial";
+    message = `Under review vendor is partially productive: ${progressSummary.totalOutflow}/${progressSummary.totalTarget} outflow so far.`;
+    actionRequired = true;
+  } else if (completedWeeksEvaluated > 0) {
+    status = "at_risk";
+    subcategory = "under_review_productivity_at_risk";
+    messageCode = "under_review_productivity_at_risk";
+    message =
+      "Under review vendor has no outflow in completed productivity weeks.";
+    actionRequired = true;
+  }
+
+  const summary = reviewComplete ? finalSummary : progressSummary;
+
+  return {
+    enabled: true,
+    reviewWeeks: GOAL_CLASSIFICATION_COMPLETED_WEEKS,
+    completedWeeksEvaluated,
+    remainingWeeks: Math.max(
+      GOAL_CLASSIFICATION_COMPLETED_WEEKS - completedWeeksEvaluated,
+      0,
+    ),
+    reviewComplete,
+    status,
+    subcategory,
+    actionRequired,
+    shouldDeactivate,
+    recommendedAction,
+    messageCode,
+    message,
+    totalTarget: summary.totalTarget,
+    totalOutflow: summary.totalOutflow,
+    totalDeficit: summary.totalDeficit,
+    totalSurplus: summary.totalSurplus,
+    byTort: summary.byTort,
+    currentWeekProgress,
+  };
 }
 
 /** Counts consecutive leading weeks where ALL goals were missed. */
@@ -194,36 +525,101 @@ function computeFraudRisk(snapshots) {
 }
 
 /**
- * Evaluates top vendor eligibility and sustainability from snapshots.
- * Uses last 28 days (4 weeks) of accepted cases.
+ * Evaluates top vendor eligibility from completed weekly outflow goals.
+ * Accepted counts remain as ranking/context metrics, not as the top gate.
  */
-function computeTopEligibility(snapshots) {
-  const now = new Date();
-  const cutoff = new Date(now);
-  cutoff.setUTCDate(now.getUTCDate() - TOP_ACCEPTED_WINDOW_DAYS);
+function computeTopEligibility(
+  snapshots,
+  classificationWeeklyResults,
+  goalCompensation,
+) {
+  const cutoff = getLastDaysStart(TOP_CONVERSION_WINDOW_DAYS);
 
-  const recentAccepted = snapshots.filter((s) => {
-    if (!s.signed_date) return false;
-    const d = new Date(s.signed_date);
+  const recentWindowSnapshots = snapshots.filter((s) => {
+    if (!s.case_created_at) return false;
+    const d = new Date(s.case_created_at);
     return d >= cutoff;
   });
 
+  const recentAccepted = recentWindowSnapshots.filter((s) =>
+    isAcceptedCaseSnapshot(s),
+  );
+  const recentOutflow = recentWindowSnapshots.filter((s) =>
+    Boolean(s.sent_date_2),
+  );
+
   const acceptedCount = recentAccepted.length;
+  const inflowCount = recentWindowSnapshots.length;
+  const outflowCount = recentOutflow.length;
   const acceptedDaySet = new Set(
     recentAccepted.map(
-      (s) => new Date(s.signed_date).toISOString().split("T")[0],
+      (s) => new Date(s.case_created_at).toISOString().split("T")[0],
     ),
   );
 
-  const avgAcceptedPerDay = acceptedCount / TOP_ACCEPTED_WINDOW_DAYS;
+  const acceptedToInflowRatePercent =
+    inflowCount > 0
+      ? Number(((acceptedCount / inflowCount) * 100).toFixed(2))
+      : 0;
+  const acceptedToOutflowRatePercent =
+    outflowCount > 0
+      ? Number(((acceptedCount / outflowCount) * 100).toFixed(2))
+      : 0;
+  const meetsConversionThresholds =
+    acceptedToInflowRatePercent > TOP_MIN_ACCEPTED_TO_INFLOW_RATE_PERCENT;
+
+  const avgAcceptedPerDay = acceptedCount / TOP_CONVERSION_WINDOW_DAYS;
+  const completedWeeksEvaluated = classificationWeeklyResults.length;
+  const totalGoals = classificationWeeklyResults.reduce(
+    (sum, weekResult) => sum + weekResult.goals.length,
+    0,
+  );
+  const metGoals = classificationWeeklyResults.reduce(
+    (sum, weekResult) =>
+      sum + weekResult.goals.filter((goal) => goal.met).length,
+    0,
+  );
+  const meetsCompletedWeeklyGoals = Boolean(
+    goalCompensation?.eligibleAfterCompensation,
+  );
+  const isEligibleForTop =
+    meetsCompletedWeeklyGoals && meetsConversionThresholds;
 
   return {
-    isEligibleForTop: avgAcceptedPerDay >= TOP_ACCEPTED_DAILY_MIN,
-    isEligibleToStayTop: avgAcceptedPerDay >= TOP_ACCEPTED_DAILY_SUSTAIN,
+    isEligibleForTop,
+    isEligibleToStayTop: isEligibleForTop,
+    compensationApplied: Boolean(goalCompensation?.applied),
+    meetsCompletedWeeklyGoals,
+    meetsConversionThresholds,
+    inflowCount,
     acceptedCount,
+    outflowCount,
     acceptedDaysCount: acceptedDaySet.size,
     avgAcceptedPerDay: Number(avgAcceptedPerDay.toFixed(4)),
+    conversionWindowDays: TOP_CONVERSION_WINDOW_DAYS,
+    acceptedToInflowRatePercent,
+    acceptedToOutflowRatePercent,
+    minAcceptedToInflowRatePercent: TOP_MIN_ACCEPTED_TO_INFLOW_RATE_PERCENT,
+    minAcceptedToOutflowRatePercent: null,
+    completedWeeksEvaluated,
+    totalGoals,
+    metGoals,
+    compensatedGoalMetCount: meetsCompletedWeeklyGoals ? totalGoals : metGoals,
+    goalComplianceRate:
+      totalGoals > 0 ? Number((metGoals / totalGoals).toFixed(4)) : null,
+    compensatedGoalComplianceRate:
+      totalGoals > 0
+        ? Number(
+            (
+              (meetsCompletedWeeklyGoals ? totalGoals : metGoals) / totalGoals
+            ).toFixed(4),
+          )
+        : null,
   };
+}
+
+function isProfileNewVendor(profile) {
+  return Boolean(profile?.metrics_json?.vendorFreshness?.isNewVendor);
 }
 
 /** Runs all rule evaluations for a single vendor profile. */
@@ -234,15 +630,38 @@ function evaluateSingleVendor(profile) {
   );
 
   const weeklyResults = computeWeeklyGoalResults(activeAssignments, snapshots);
-  const consecutiveMissed = countConsecutiveMissedWeeks(weeklyResults);
+  const isNewVendor = isProfileNewVendor(profile);
+  const classificationWeeklyResults =
+    getClassificationWeeklyResults(weeklyResults);
+  const newVendorProbation = buildNewVendorProbationStatus(
+    isNewVendor,
+    weeklyResults,
+  );
+  const goalCompensation = buildGoalCompensationSummary(
+    classificationWeeklyResults,
+    {
+      windowWeeks: GOAL_CLASSIFICATION_COMPLETED_WEEKS,
+    },
+  );
+  const consecutiveMissed = goalCompensation.eligibleAfterCompensation
+    ? 0
+    : countConsecutiveMissedWeeks(classificationWeeklyResults);
   const fraudRisk = computeFraudRisk(snapshots);
-  const topEligibility = computeTopEligibility(snapshots);
+  const topEligibility = computeTopEligibility(
+    snapshots,
+    classificationWeeklyResults,
+    goalCompensation,
+  );
   const prevAlertFlags = profile.alert_flags || {};
 
   return {
     profileId: profile.id,
     profile,
+    isNewVendor,
     weeklyResults,
+    classificationWeeklyResults,
+    newVendorProbation,
+    goalCompensation,
     consecutiveMissed,
     fraudRisk,
     topEligibility,
@@ -260,7 +679,8 @@ function evaluateSingleVendor(profile) {
  */
 function buildTop20Set(evaluations, currentWeekStartStr) {
   const eligible = evaluations.filter(
-    (e) => e.profile.active && e.topEligibility.isEligibleForTop,
+    (e) =>
+      isProfileCurrentlyActive(e.profile) && e.topEligibility.isEligibleForTop,
   );
 
   eligible.sort(
@@ -306,18 +726,26 @@ function buildTop20Set(evaluations, currentWeekStartStr) {
 
 /** Determines the computed category for a vendor based on all evaluated rules. */
 function determineComputedCategory(evaluation, top20Set) {
-  const { fraudRisk, consecutiveMissed } = evaluation;
+  const { fraudRisk, consecutiveMissed, isNewVendor } = evaluation;
+
+  if (isNewVendor) return "new_vendor";
 
   if (fraudRisk.isFraudRisk) return "under_review";
   if (consecutiveMissed >= CONSECUTIVE_MISS_THRESHOLD) return "under_review";
   if (top20Set.has(evaluation.profileId)) return "top_vendors";
 
-  return "new_review";
+  return "under_review";
 }
 
 /** Builds a human-readable reason string for a category change. */
 function buildChangeReason(evaluation, newCategory) {
-  const { fraudRisk, consecutiveMissed, topEligibility } = evaluation;
+  const {
+    fraudRisk,
+    consecutiveMissed,
+    topEligibility,
+    goalCompensation,
+    isNewVendor,
+  } = evaluation;
 
   if (newCategory === "under_review") {
     if (fraudRisk.isFraudRisk) {
@@ -327,6 +755,17 @@ function buildChangeReason(evaluation, newCategory) {
         `${(fraudRisk.conversionRate * 100).toFixed(2)}% conversion rate`
       );
     }
+    if (goalCompensation?.messageCode === "goal_compensation_insufficient") {
+      return goalCompensation.message;
+    }
+    if (!topEligibility.meetsConversionThresholds) {
+      return (
+        `Top vendor conversion thresholds not met: ` +
+        `${topEligibility.acceptedToInflowRatePercent}% accepted/inflow ` +
+        `(min > ${topEligibility.minAcceptedToInflowRatePercent}%)`
+      );
+    }
+
     return (
       `Consecutive goal miss threshold reached: ` +
       `${consecutiveMissed} consecutive weeks with all assigned goals missed`
@@ -334,14 +773,32 @@ function buildChangeReason(evaluation, newCategory) {
   }
 
   if (newCategory === "top_vendors") {
+    if (topEligibility.compensationApplied) {
+      return (
+        `Promoted to top_vendors: ${goalCompensation.message}. ` +
+        `Conversion OK at ${topEligibility.acceptedToInflowRatePercent}% accepted/inflow. ` +
+        `Informational accepted/outflow: ` +
+        `${topEligibility.acceptedToOutflowRatePercent}% accepted/outflow`
+      );
+    }
+
     return (
       `Promoted to top_vendors: ` +
-      `${topEligibility.acceptedCount} accepted cases in last 28 days ` +
-      `(avg ${topEligibility.avgAcceptedPerDay}/day)`
+      `${topEligibility.metGoals}/${topEligibility.totalGoals} completed weekly outflow goals met, ` +
+      `${topEligibility.acceptedToInflowRatePercent}% accepted/inflow. ` +
+      `Informational accepted/outflow: ` +
+      `${topEligibility.acceptedToOutflowRatePercent}% accepted/outflow`
     );
   }
 
-  if (newCategory === "new_review") {
+  if (newCategory === "new_vendor") {
+    if (isNewVendor) {
+      return (
+        evaluation.newVendorProbation?.message ||
+        "New vendor detected from Salesforce Contact.CreatedDate"
+      );
+    }
+
     const underperformWeeks = evaluation.newTopUnderperformWeeks || 0;
     if (underperformWeeks >= TOP_UNDERPERFORM_WEEKS_THRESHOLD) {
       return `Demoted from top_vendors: ${underperformWeeks} consecutive underperforming weeks`;
@@ -353,7 +810,17 @@ function buildChangeReason(evaluation, newCategory) {
 
 /** Builds the alert_flags JSON object to persist in vendor_profiles. */
 function buildAlertFlags(evaluation, newCategory) {
-  const { fraudRisk, consecutiveMissed, topEligibility } = evaluation;
+  const {
+    fraudRisk,
+    consecutiveMissed,
+    topEligibility,
+    goalCompensation,
+    newVendorProbation,
+  } = evaluation;
+  const underReviewProductivity = buildUnderReviewProductivityStatus(
+    newCategory === "under_review" && !evaluation.isNewVendor,
+    evaluation.weeklyResults,
+  );
 
   return {
     // Goal tracking
@@ -368,7 +835,7 @@ function buildAlertFlags(evaluation, newCategory) {
     conversion_rate_pct: Number((fraudRisk.conversionRate * 100).toFixed(2)),
 
     // Top vendor tracking
-    trending_to_new_review:
+    trending_to_new_vendor:
       newCategory === "top_vendors" &&
       !topEligibility.isEligibleForTop &&
       (evaluation.newTopUnderperformWeeks || 0) > 0,
@@ -382,6 +849,115 @@ function buildAlertFlags(evaluation, newCategory) {
     accepted_28_days: topEligibility.acceptedCount,
     accepted_days_28: topEligibility.acceptedDaysCount,
     accepted_avg_per_day: topEligibility.avgAcceptedPerDay,
+    top_conversion_window_days: topEligibility.conversionWindowDays || 0,
+    top_inflow_90_days: topEligibility.inflowCount || 0,
+    top_accepted_90_days: topEligibility.acceptedCount || 0,
+    top_outflow_90_days: topEligibility.outflowCount || 0,
+    top_accepted_to_inflow_rate_pct:
+      topEligibility.acceptedToInflowRatePercent || 0,
+    top_accepted_to_outflow_rate_pct:
+      topEligibility.acceptedToOutflowRatePercent || 0,
+    top_min_accepted_to_inflow_rate_pct:
+      topEligibility.minAcceptedToInflowRatePercent || 0,
+    top_min_accepted_to_outflow_rate_pct:
+      topEligibility.minAcceptedToOutflowRatePercent || 0,
+    top_meets_conversion_thresholds: Boolean(
+      topEligibility.meetsConversionThresholds,
+    ),
+    top_completed_weeks_evaluated: topEligibility.completedWeeksEvaluated,
+    top_goal_met_count: topEligibility.metGoals,
+    top_goal_total_count: topEligibility.totalGoals,
+    top_goal_compliance_rate: topEligibility.goalComplianceRate,
+    top_compensated_goal_met_count: topEligibility.compensatedGoalMetCount,
+    top_compensated_goal_compliance_rate:
+      topEligibility.compensatedGoalComplianceRate,
+
+    // Completed-week balance compensation
+    goal_compensation_enabled: Boolean(goalCompensation?.enabled),
+    goal_compensation_mode: goalCompensation?.mode || null,
+    goal_compensation_applied: Boolean(goalCompensation?.applied),
+    goal_compensation_eligible: Boolean(
+      goalCompensation?.eligibleAfterCompensation,
+    ),
+    goal_compensation_message_code: goalCompensation?.messageCode || null,
+    goal_compensation_message: goalCompensation?.message || null,
+    goal_compensation_window_weeks: goalCompensation?.windowWeeks || 0,
+    goal_compensation_completed_weeks_evaluated:
+      goalCompensation?.completedWeeksEvaluated || 0,
+    goal_compensation_total_target: goalCompensation?.totalTarget || 0,
+    goal_compensation_total_outflow: goalCompensation?.totalOutflow || 0,
+    goal_compensation_total_deficit: goalCompensation?.totalDeficit || 0,
+    goal_compensation_total_surplus: goalCompensation?.totalSurplus || 0,
+    goal_compensation_by_tort: goalCompensation?.byTort || [],
+
+    // New vendor completed-week probation
+    new_vendor_probation_enabled: Boolean(newVendorProbation?.enabled),
+    new_vendor_probation_trial_weeks: newVendorProbation?.trialWeeks || 0,
+    new_vendor_probation_completed_weeks:
+      newVendorProbation?.completedWeeksEvaluated || 0,
+    new_vendor_probation_remaining_weeks:
+      newVendorProbation?.remainingWeeks || 0,
+    new_vendor_probation_trial_complete: Boolean(
+      newVendorProbation?.trialComplete,
+    ),
+    new_vendor_probation_status: newVendorProbation?.status || null,
+    new_vendor_probation_subcategory: newVendorProbation?.subcategory || null,
+    new_vendor_probation_action_required: Boolean(
+      newVendorProbation?.actionRequired,
+    ),
+    new_vendor_probation_should_deactivate: Boolean(
+      newVendorProbation?.shouldDeactivate,
+    ),
+    new_vendor_probation_recommended_action:
+      newVendorProbation?.recommendedAction || null,
+    new_vendor_probation_message_code: newVendorProbation?.messageCode || null,
+    new_vendor_probation_message: newVendorProbation?.message || null,
+    new_vendor_probation_total_target: newVendorProbation?.totalTarget || 0,
+    new_vendor_probation_total_outflow: newVendorProbation?.totalOutflow || 0,
+    new_vendor_probation_total_deficit: newVendorProbation?.totalDeficit || 0,
+    new_vendor_probation_total_surplus: newVendorProbation?.totalSurplus || 0,
+    new_vendor_probation_by_tort: newVendorProbation?.byTort || [],
+    new_vendor_probation_current_week:
+      newVendorProbation?.currentWeekProgress || null,
+
+    // Under review completed-week productivity check
+    under_review_productivity_enabled: Boolean(
+      underReviewProductivity?.enabled,
+    ),
+    under_review_productivity_review_weeks:
+      underReviewProductivity?.reviewWeeks || 0,
+    under_review_productivity_completed_weeks:
+      underReviewProductivity?.completedWeeksEvaluated || 0,
+    under_review_productivity_remaining_weeks:
+      underReviewProductivity?.remainingWeeks || 0,
+    under_review_productivity_review_complete: Boolean(
+      underReviewProductivity?.reviewComplete,
+    ),
+    under_review_productivity_status: underReviewProductivity?.status || null,
+    under_review_productivity_subcategory:
+      underReviewProductivity?.subcategory || null,
+    under_review_productivity_action_required: Boolean(
+      underReviewProductivity?.actionRequired,
+    ),
+    under_review_productivity_should_deactivate: Boolean(
+      underReviewProductivity?.shouldDeactivate,
+    ),
+    under_review_productivity_recommended_action:
+      underReviewProductivity?.recommendedAction || null,
+    under_review_productivity_message_code:
+      underReviewProductivity?.messageCode || null,
+    under_review_productivity_message: underReviewProductivity?.message || null,
+    under_review_productivity_total_target:
+      underReviewProductivity?.totalTarget || 0,
+    under_review_productivity_total_outflow:
+      underReviewProductivity?.totalOutflow || 0,
+    under_review_productivity_total_deficit:
+      underReviewProductivity?.totalDeficit || 0,
+    under_review_productivity_total_surplus:
+      underReviewProductivity?.totalSurplus || 0,
+    under_review_productivity_by_tort: underReviewProductivity?.byTort || [],
+    under_review_productivity_current_week:
+      underReviewProductivity?.currentWeekProgress || null,
   };
 }
 
@@ -392,10 +968,11 @@ function emitMonitoringAlerts(
   newAlertFlags,
 ) {
   const prevFlags = profile.alert_flags || {};
+  const displayInfo = getProfileDisplayInfo(profile);
   const basePayload = {
     vendorId: profile.id,
-    supplier: profile.supplier,
-    username: profile.username,
+    supplier: displayInfo.supplier,
+    username: displayInfo.username,
     oldCategory,
     newCategory,
     categorySource: profile.category_source,
@@ -424,14 +1001,14 @@ function emitMonitoringAlerts(
   }
 
   if (
-    !prevFlags.trending_to_new_review &&
-    newAlertFlags.trending_to_new_review
+    !prevFlags.trending_to_new_vendor &&
+    newAlertFlags.trending_to_new_vendor
   ) {
     publishVendorMonitoringAlert({
-      type: "trending_to_new_review",
+      type: "trending_to_new_vendor",
       severity: "medium",
       message:
-        "Top vendor is trending to new_review due to sustained underperformance",
+        "Top vendor is trending to new_vendor due to sustained underperformance",
       ...basePayload,
     });
   }
@@ -461,6 +1038,7 @@ async function upsertWeeklyGoals(evaluation, transaction) {
           week_end: weekResult.week.endStr,
           weekly_target: goal.target,
           actual_inflow: goal.actual,
+          actual_outflow: goal.actual,
           goal_met: goal.met,
         },
         { transaction },
@@ -506,6 +1084,7 @@ async function syncTopRewards(profile, isTop, transaction) {
         bonus_access: false,
         net_7: false,
         replacement_flexibility: false,
+        auto_intake: false,
         active: true,
       },
       { transaction },
@@ -517,6 +1096,7 @@ async function syncTopRewards(profile, isTop, transaction) {
         bonus_access: false,
         net_7: false,
         replacement_flexibility: false,
+        auto_intake: false,
       },
       { transaction },
     );
@@ -527,6 +1107,7 @@ async function syncTopRewards(profile, isTop, transaction) {
         bonus_access: false,
         net_7: false,
         replacement_flexibility: false,
+        auto_intake: false,
       },
       { transaction },
     );
@@ -537,12 +1118,38 @@ async function syncTopRewards(profile, isTop, transaction) {
 // MAIN ENTRY POINT
 // =============================================
 
+async function ensureVendorTopRewardColumns() {
+  await VendorTopReward.sync();
+
+  const tableDefinition = await sequelize
+    .getQueryInterface()
+    .describeTable("vendor_top_rewards");
+
+  if (!tableDefinition.auto_intake) {
+    await sequelize
+      .getQueryInterface()
+      .addColumn("vendor_top_rewards", "auto_intake", {
+        type: DataTypes.BOOLEAN,
+        allowNull: false,
+        defaultValue: false,
+      });
+  }
+}
+
 async function evaluateCategoryRules() {
   logger.info("VendorCategoryRules → evaluateCategoryRules() started");
 
+  await ensureVendorTopRewardColumns();
+
   const profiles = await VendorProfile.findAll({
-    where: { active: true },
     include: [
+      {
+        model: Vendor,
+        as: "vendorInfo",
+        required: true,
+        where: { status: "active" },
+        attributes: ["id", "salesforce_id", "contact_name", "email", "status"],
+      },
       {
         model: VendorTortAssignment,
         as: "tortAssignments",
@@ -563,6 +1170,7 @@ async function evaluateCategoryRules() {
           "product_id",
           "case_created_at",
           "signed_date",
+          "sent_date_2",
           "sub_status",
         ],
         include: [
@@ -656,8 +1264,10 @@ async function evaluateCategoryRules() {
 
 module.exports = {
   evaluateCategoryRules,
-  WEEKLY_INFLOW_TARGETS,
+  WEEKLY_OUTFLOW_TARGETS,
   CONSECUTIVE_MISS_THRESHOLD,
   TOP_VENDOR_MAX,
   TOP_UNDERPERFORM_WEEKS_THRESHOLD,
+  TOP_CONVERSION_WINDOW_DAYS,
+  TOP_MIN_ACCEPTED_TO_INFLOW_RATE_PERCENT,
 };

@@ -3,10 +3,16 @@ const {
   syncVendorsAndEvaluateRules,
   listVendors,
   getVendorInsightsById,
+  getVendorAssignedSalesforceCases,
   setVendorCategory,
   assignVendorToTort,
   updateVendorTopRewards,
-} = require("../services/vendor/vendor.service");
+} = require("../services/vendor/vendor.classification.service");
+const {
+  SYNC_KEYS,
+  getVendorSyncStatus,
+  trackVendorSync,
+} = require("../services/vendor/vendor.syncStatus.service");
 const {
   evaluateCategoryRules,
 } = require("../services/vendor/vendor.categoryRules.service");
@@ -23,8 +29,9 @@ const {
   getVendorAnalyticsCategoryHistory,
 } = require("../services/vendor/vendor.analytics.service");
 const {
-  syncVendorsTableFromSalesforce,
   listVendorsTable,
+  listSalesforceVendors,
+  syncSalesforceVendorsToMysql,
   listVendorsCountries,
   createVendorTableEntry,
   toggleVendorTableStatus,
@@ -36,21 +43,46 @@ async function syncVendors(req, res, next) {
   logger.info("VendorController → syncVendors() called");
 
   try {
-    const result = await syncVendorsAndEvaluateRules({
-      failOnRulesError: false,
-    });
+    const result = await trackVendorSync(
+      SYNC_KEYS.CLASSIFICATION,
+      "manual:/vendors/sync",
+      () =>
+        syncVendorsAndEvaluateRules({
+          failOnRulesError: false,
+        }),
+    );
 
     logger.success(
       `VendorController → syncVendors() success | synced: ${result.synced} | rulesEvaluated: ${result.rules?.evaluated || 0} | rulesChanged: ${result.rules?.changed || 0}`,
     );
 
-    return res.status(200).json(result);
+    return res.status(200).json({
+      ...result,
+      syncStatus: getVendorSyncStatus(),
+    });
   } catch (error) {
     logger.error(`VendorController → syncVendors() error: ${error.message}`, {
       stack: error.stack,
       origin: "controller",
     });
 
+    next(error);
+  }
+}
+
+async function getVendorSyncStatusSnapshot(req, res, next) {
+  logger.info("VendorController → getVendorSyncStatusSnapshot() called");
+
+  try {
+    return res.status(200).json({ syncStatus: getVendorSyncStatus() });
+  } catch (error) {
+    logger.error(
+      `VendorController → getVendorSyncStatusSnapshot() error: ${error.message}`,
+      {
+        stack: error.stack,
+        origin: "controller",
+      },
+    );
     next(error);
   }
 }
@@ -65,7 +97,10 @@ async function getVendors(req, res, next) {
       `VendorController → getVendors() success | total: ${result.summary.total}`,
     );
 
-    return res.status(200).json(result);
+    return res.status(200).json({
+      ...result,
+      syncStatus: getVendorSyncStatus(),
+    });
   } catch (error) {
     logger.error(`VendorController → getVendors() error: ${error.message}`, {
       stack: error.stack,
@@ -90,6 +125,30 @@ async function getVendorInsights(req, res, next) {
   } catch (error) {
     logger.error(
       `VendorController → getVendorInsights() error: ${error.message}`,
+      {
+        stack: error.stack,
+        origin: "controller",
+      },
+    );
+    next(error);
+  }
+}
+
+async function getVendorSalesforceCases(req, res, next) {
+  logger.info("VendorController → getVendorSalesforceCases() called");
+
+  try {
+    const vendorId = Number(req.params.vendorId);
+    const result = await getVendorAssignedSalesforceCases(vendorId);
+
+    logger.success(
+      `VendorController → getVendorSalesforceCases() success | vendorId: ${vendorId} | cases: ${result.summary.total}`,
+    );
+
+    return res.status(200).json(result);
+  } catch (error) {
+    logger.error(
+      `VendorController → getVendorSalesforceCases() error: ${error.message}`,
       {
         stack: error.stack,
         origin: "controller",
@@ -158,11 +217,7 @@ async function updateVendorRewards(req, res, next) {
 
   try {
     const vendorId = Number(req.params.vendorId);
-    const result = await updateVendorTopRewards(vendorId, {
-      bonusAccess: req.body.bonusAccess,
-      net7: req.body.net7,
-      replacementFlexibility: req.body.replacementFlexibility,
-    });
+    const result = await updateVendorTopRewards(vendorId, req.body);
 
     logger.success(
       `VendorController → updateVendorRewards() success | vendorId: ${vendorId}`,
@@ -378,15 +433,18 @@ async function getVendorsAnalyticsCategoryHistory(req, res, next) {
   }
 }
 
-async function syncVendorsTable(req, res, next) {
-  logger.info("VendorController → syncVendorsTable() called");
+async function getVendorsTable(req, res, next) {
+  logger.info("VendorController → getVendorsTable() called");
 
   try {
-    const result = await syncVendorsTableFromSalesforce();
-    return res.status(200).json(result);
+    const result = await listVendorsTable();
+    return res.status(200).json({
+      ...result,
+      syncStatus: getVendorSyncStatus(),
+    });
   } catch (error) {
     logger.error(
-      `VendorController → syncVendorsTable() error: ${error.message}`,
+      `VendorController → getVendorsTable() error: ${error.message}`,
       {
         stack: error.stack,
         origin: "controller",
@@ -396,15 +454,43 @@ async function syncVendorsTable(req, res, next) {
   }
 }
 
-async function getVendorsTable(req, res, next) {
-  logger.info("VendorController → getVendorsTable() called");
+async function getSalesforceVendors(req, res, next) {
+  logger.info("VendorController → getSalesforceVendors() called");
 
   try {
-    const result = await listVendorsTable();
-    return res.status(200).json(result);
+    const result = await listSalesforceVendors();
+    return res.status(200).json({
+      ...result,
+      syncStatus: getVendorSyncStatus(),
+    });
   } catch (error) {
     logger.error(
-      `VendorController → getVendorsTable() error: ${error.message}`,
+      `VendorController → getSalesforceVendors() error: ${error.message}`,
+      {
+        stack: error.stack,
+        origin: "controller",
+      },
+    );
+    next(error);
+  }
+}
+
+async function patchSalesforceVendorsToMysql(req, res, next) {
+  logger.info("VendorController → patchSalesforceVendorsToMysql() called");
+
+  try {
+    const result = await trackVendorSync(
+      SYNC_KEYS.SALESFORCE_TO_MYSQL,
+      "manual:PATCH /vendors/table/salesforce",
+      syncSalesforceVendorsToMysql,
+    );
+    return res.status(200).json({
+      ...result,
+      syncStatus: getVendorSyncStatus(),
+    });
+  } catch (error) {
+    logger.error(
+      `VendorController → patchSalesforceVendorsToMysql() error: ${error.message}`,
       {
         stack: error.stack,
         origin: "controller",
@@ -502,8 +588,10 @@ async function patchVendorsTableBulk(req, res, next) {
 
 module.exports = {
   syncVendors,
+  getVendorSyncStatusSnapshot,
   getVendors,
   getVendorInsights,
+  getVendorSalesforceCases,
   updateVendorCategory,
   upsertVendorTort,
   updateVendorRewards,
@@ -516,8 +604,9 @@ module.exports = {
   getVendorsAnalyticsVendors,
   getVendorsAnalyticsTypes,
   getVendorsAnalyticsCategoryHistory,
-  syncVendorsTable,
   getVendorsTable,
+  getSalesforceVendors,
+  patchSalesforceVendorsToMysql,
   getVendorsCountries,
   createVendorTable,
   patchVendorTableStatus,

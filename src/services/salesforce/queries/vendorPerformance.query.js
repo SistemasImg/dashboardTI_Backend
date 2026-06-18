@@ -103,9 +103,36 @@ ORDER BY CreatedDate DESC
 `;
 }
 
+function buildVendorCaseSnapshotsQuery(ownerIds = [], lastDays = 90) {
+  const inClause = buildInClause(ownerIds);
+  if (!inClause) return null;
+
+  return `
+SELECT
+  Id,
+  OwnerId,
+  Type,
+  CaseNumber,
+  CreatedDate,
+  Signed_Date__c,
+  Sent_Date2__c,
+  Status,
+  Substatus__c
+FROM Case
+WHERE OwnerId IN (${inClause})
+  AND CaseNumber != NULL
+  AND (
+    CreatedDate = LAST_N_DAYS:${Number(lastDays)}
+    OR Signed_Date__c = LAST_N_DAYS:${Number(lastDays)}
+  )
+ORDER BY CreatedDate DESC
+`;
+}
+
 module.exports = {
   buildVendorCasesAggregateQuery,
   buildVendorCasesByTypeTierAggregateQuery,
   buildVendorSignedCasesAggregateQuery,
   buildVendorCaseNumbersByTypeQuery,
+  buildVendorCaseSnapshotsQuery,
 };

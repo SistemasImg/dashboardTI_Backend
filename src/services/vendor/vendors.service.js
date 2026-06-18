@@ -73,86 +73,6 @@ function buildCountryMap(rows) {
   return map;
 }
 
-async function syncVendorsTableFromSalesforce() {
-  logger.info("VendorsService → syncVendorsTableFromSalesforce() started");
-
-  await ensureVendorsTable();
-
-  const countryRows = await loadVendorCountries({ onlyActive: true });
-  const countryByName = buildCountryMap(countryRows);
-
-  const sf = await authenticateSalesforce();
-  const raw = await runSoqlQuery(sf, buildDashboardVendorsQuery());
-  const incoming = raw.map(mapDashboardVendor).filter(Boolean);
-
-  let created = 0;
-  let updated = 0;
-
-  await sequelize.transaction(async (transaction) => {
-    for (const vendor of incoming) {
-      const normalizedCountry = normalizeCountryLookupKey(vendor.country);
-      const countryRow = normalizedCountry
-        ? countryByName.get(normalizedCountry)
-        : null;
-      const countryId = countryRow?.id || null;
-
-      if (normalizedCountry && !countryId) {
-        logger.warn(
-          `VendorsService → syncVendorsTableFromSalesforce() country not found in vendors_country: "${vendor.country}"`,
-        );
-      }
-
-      const existing = await Vendor.findOne({
-        where: {
-          salesforce_id: vendor.salesforceId,
-        },
-        transaction,
-      });
-
-      if (!existing) {
-        await Vendor.create(
-          {
-            salesforce_id: vendor.salesforceId,
-            name: vendor.name,
-            contact_name: vendor.contactName,
-            email: vendor.email,
-            country_id: countryId,
-            status: vendor.status,
-            supplier_segment: null,
-            tort_tier_statuses: [],
-            posting_methods: [],
-          },
-          { transaction },
-        );
-        created += 1;
-        continue;
-      }
-
-      await existing.update(
-        {
-          name: vendor.name,
-          contact_name: vendor.contactName,
-          email: vendor.email,
-          country_id: countryId,
-          status: vendor.status,
-        },
-        { transaction },
-      );
-      updated += 1;
-    }
-  });
-
-  logger.success(
-    `VendorsService → syncVendorsTableFromSalesforce() success | fetched: ${incoming.length} | created: ${created} | updated: ${updated}`,
-  );
-
-  return {
-    fetched: incoming.length,
-    created,
-    updated,
-  };
-}
-
 async function listVendorsTable() {
   await ensureVendorsTable();
 
@@ -204,6 +124,178 @@ async function listVendorsCountries() {
   return {
     total: countries.length,
     countries,
+  };
+}
+
+async function fetchSalesforceVendors() {
+  const sf = await authenticateSalesforce();
+  const rows = await runSoqlQuery(sf, buildDashboardVendorsQuery());
+  const vendors = (rows || []).map(mapDashboardVendor).filter(Boolean);
+
+  return {
+    rawCount: rows?.length || 0,
+    vendors,
+  };
+}
+
+async function listSalesforceVendors() {
+  const { vendors } = await fetchSalesforceVendors();
+
+  return {
+    summary: {
+      total: vendors.length,
+      active: vendors.filter((item) => item.status === "active").length,
+      inactive: vendors.filter((item) => item.status === "inactive").length,
+    },
+    vendors,
+  };
+}
+
+function resolveVendorCountryId(
+  countryName,
+  countryByName,
+  unresolvedCountries,
+) {
+  const normalizedCountry = normalizeStringOrNull(countryName);
+  if (!normalizedCountry) return null;
+
+  const countryRow = countryByName.get(
+    normalizeCountryLookupKey(normalizedCountry),
+  );
+
+  if (!countryRow) {
+    unresolvedCountries.add(normalizedCountry);
+    return null;
+  }
+
+  return countryRow.id;
+}
+
+function valuesDiffer(currentValue, nextValue) {
+  const current = currentValue == null ? null : String(currentValue).trim();
+  const next = nextValue == null ? null : String(nextValue).trim();
+  return current !== next;
+}
+
+async function syncSalesforceVendorsToMysql() {
+  await ensureVendorsTable();
+
+  const { rawCount, vendors: salesforceVendors } =
+    await fetchSalesforceVendors();
+
+  if (rawCount === 0 || salesforceVendors.length === 0) {
+    const error = new Error(
+      "Salesforce returned no vendors. Local sync aborted to avoid deleting vendors by mistake.",
+    );
+    error.status = 502;
+    throw error;
+  }
+
+  const countryRows = await loadVendorCountries({ onlyActive: false });
+  const countryByName = buildCountryMap(countryRows);
+  const unresolvedCountries = new Set();
+
+  const created = [];
+  const updated = [];
+  const deleted = [];
+  let unchanged = 0;
+
+  const salesforceById = new Map();
+  for (const vendor of salesforceVendors) {
+    const salesforceId = String(vendor.salesforceId || "").trim();
+    if (!salesforceId || salesforceById.has(salesforceId)) continue;
+    salesforceById.set(salesforceId, vendor);
+  }
+
+  await sequelize.transaction(async (transaction) => {
+    const localRows = await Vendor.findAll({ transaction });
+    const localBySalesforceId = new Map(
+      localRows.map((row) => [String(row.salesforce_id || "").trim(), row]),
+    );
+
+    for (const [salesforceId, salesforceVendor] of salesforceById.entries()) {
+      const nextCountryId = resolveVendorCountryId(
+        salesforceVendor.country,
+        countryByName,
+        unresolvedCountries,
+      );
+
+      const nextValues = {
+        name: normalizeStringOrNull(salesforceVendor.name),
+        contact_name: normalizeStringOrNull(salesforceVendor.contactName),
+        email: normalizeStringOrNull(salesforceVendor.email),
+        country_id: nextCountryId,
+      };
+
+      const localRow = localBySalesforceId.get(salesforceId);
+      if (!localRow) {
+        const newVendor = await Vendor.create(
+          {
+            salesforce_id: salesforceId,
+            ...nextValues,
+            status:
+              salesforceVendor.status === "inactive" ? "inactive" : "active",
+            supplier_segment: null,
+            communication_channel: null,
+            tort_tier_statuses: [],
+            posting_methods: [],
+          },
+          { transaction },
+        );
+
+        created.push({ id: newVendor.id, salesforceId });
+        continue;
+      }
+
+      const updatePayload = {};
+      if (valuesDiffer(localRow.name, nextValues.name)) {
+        updatePayload.name = nextValues.name;
+      }
+      if (valuesDiffer(localRow.contact_name, nextValues.contact_name)) {
+        updatePayload.contact_name = nextValues.contact_name;
+      }
+      if (valuesDiffer(localRow.email, nextValues.email)) {
+        updatePayload.email = nextValues.email;
+      }
+      if ((localRow.country_id || null) !== (nextValues.country_id || null)) {
+        updatePayload.country_id = nextValues.country_id;
+      }
+
+      const changedFields = Object.keys(updatePayload);
+      if (changedFields.length) {
+        await localRow.update(updatePayload, { transaction });
+        updated.push({ id: localRow.id, salesforceId, fields: changedFields });
+      } else {
+        unchanged += 1;
+      }
+    }
+
+    for (const localRow of localRows) {
+      const salesforceId = String(localRow.salesforce_id || "").trim();
+      if (salesforceById.has(salesforceId)) continue;
+
+      await localRow.destroy({ transaction });
+      deleted.push({ id: localRow.id, salesforceId });
+    }
+  });
+
+  logger.success(
+    `VendorsService → syncSalesforceVendorsToMysql() success | created: ${created.length} | updated: ${updated.length} | deleted: ${deleted.length} | unchanged: ${unchanged}`,
+  );
+
+  return {
+    summary: {
+      salesforceTotal: salesforceById.size,
+      created: created.length,
+      updated: updated.length,
+      deleted: deleted.length,
+      unchanged,
+      unresolvedCountries: unresolvedCountries.size,
+    },
+    created,
+    updated,
+    deleted,
+    unresolvedCountries: Array.from(unresolvedCountries).sort(),
   };
 }
 
@@ -436,14 +528,6 @@ async function syncProductTiersByTorts(torts, transaction) {
   }
 }
 
-async function syncCountryToSalesforce({ salesforceUserId, country }) {
-  return syncVendorIdentityToSalesforce({
-    salesforceRefId: salesforceUserId,
-    hasCountry: true,
-    country,
-  });
-}
-
 async function resolveSalesforceContactContext(sf, salesforceRefId) {
   const refId = String(salesforceRefId || "").trim();
   if (!refId) {
@@ -452,11 +536,13 @@ async function resolveSalesforceContactContext(sf, salesforceRefId) {
     throw error;
   }
 
+  let userId = null;
   let contactId = null;
 
   if (refId.startsWith("003")) {
     contactId = refId;
   } else if (refId.startsWith("005")) {
+    userId = refId;
     const escapedUserId = escapeSoqlString(refId);
     const userRows = await runSoqlQuery(
       sf,
@@ -482,12 +568,14 @@ async function resolveSalesforceContactContext(sf, salesforceRefId) {
     const escapedRefId = escapeSoqlString(refId);
     const contactRows = await runSoqlQuery(
       sf,
-      `SELECT Id, AccountId FROM Contact WHERE Id = '${escapedRefId}' LIMIT 1`,
+      `SELECT Id, AccountId, Parent_Account__c FROM Contact WHERE Id = '${escapedRefId}' LIMIT 1`,
     );
     if (contactRows?.[0]?.Id) {
       return {
         contactId: contactRows[0].Id,
         accountId: contactRows[0].AccountId || null,
+        parentAccountId: contactRows[0].Parent_Account__c || null,
+        userId,
       };
     }
 
@@ -506,6 +594,7 @@ async function resolveSalesforceContactContext(sf, salesforceRefId) {
     }
 
     contactId = user.ContactId || null;
+    userId = user.Id;
     if (!contactId) {
       const error = new Error(
         `Salesforce user ${refId} has no linked ContactId`,
@@ -518,7 +607,7 @@ async function resolveSalesforceContactContext(sf, salesforceRefId) {
   const escapedContactId = escapeSoqlString(contactId);
   const contactRows = await runSoqlQuery(
     sf,
-    `SELECT Id, AccountId FROM Contact WHERE Id = '${escapedContactId}' LIMIT 1`,
+    `SELECT Id, AccountId, Parent_Account__c FROM Contact WHERE Id = '${escapedContactId}' LIMIT 1`,
   );
 
   const contact = contactRows?.[0];
@@ -530,9 +619,22 @@ async function resolveSalesforceContactContext(sf, salesforceRefId) {
     throw error;
   }
 
+  if (!userId) {
+    const userRows = await runSoqlQuery(
+      sf,
+      `SELECT Id FROM User WHERE ContactId = '${escapedContactId}' LIMIT 2`,
+    );
+
+    if (userRows?.length === 1) {
+      userId = userRows[0].Id;
+    }
+  }
+
   return {
     contactId: contact.Id,
     accountId: contact.AccountId || null,
+    parentAccountId: contact.Parent_Account__c || null,
+    userId,
   };
 }
 
@@ -548,25 +650,32 @@ async function syncVendorIdentityToSalesforce({
   name,
 }) {
   const sf = await authenticateSalesforce();
-  const { contactId, accountId } = await resolveSalesforceContactContext(
-    sf,
-    salesforceRefId,
-  );
+  const { contactId, accountId, parentAccountId, userId } =
+    await resolveSalesforceContactContext(sf, salesforceRefId);
 
+  if (hasName && !parentAccountId) {
+    const error = new Error(
+      `Vendor name cannot be synced to Account.Name because Contact ${contactId} has no Parent_Account__c.`,
+    );
+    error.status = 409;
+    throw error;
+  }
+
+  // Patch Contact for contactName, email and country (one Contact per vendor, safe)
   const contactPatch = {};
 
-  if (hasCountry) {
-    contactPatch.Country__c = country;
+  if (hasContactName) {
+    const split = splitContactName(contactName);
+    contactPatch.FirstName = split.firstName;
+    contactPatch.LastName = split.lastName;
   }
 
   if (hasEmail) {
     contactPatch.Email = email;
   }
 
-  if (hasContactName) {
-    const split = splitContactName(contactName);
-    contactPatch.FirstName = split.firstName;
-    contactPatch.LastName = split.lastName;
+  if (hasCountry) {
+    contactPatch.Country__c = country;
   }
 
   if (Object.keys(contactPatch).length > 0) {
@@ -577,24 +686,29 @@ async function syncVendorIdentityToSalesforce({
   }
 
   if (hasName) {
-    if (!accountId) {
+    if (!userId) {
       const error = new Error(
-        `Salesforce Contact ${contactId} has no AccountId. Vendor name cannot be synced.`,
+        `Vendor name cannot be synced safely to Salesforce for Contact ${contactId}. No unique linked User was found.`,
       );
-      error.status = 400;
+      error.status = 409;
       throw error;
     }
 
     logger.info(
-      `VendorsService → syncVendorIdentityToSalesforce() patching Account ${accountId} Name = "${name}"`,
+      `VendorsService → syncVendorIdentityToSalesforce() patching User ${userId} CompanyName = "${name}"`,
     );
-    await patchSalesforceSObject(sf, "Account", accountId, {
+    await patchSalesforceSObject(sf, "User", userId, { CompanyName: name });
+
+    logger.info(
+      `VendorsService → syncVendorIdentityToSalesforce() patching Account ${parentAccountId} Name = "${name}" via Contact.Parent_Account__c`,
+    );
+    await patchSalesforceSObject(sf, "Account", parentAccountId, {
       Name: name,
     });
   }
 
   logger.success(
-    `VendorsService → syncVendorIdentityToSalesforce() success | contactId: ${contactId} | accountId: ${accountId || "none"}`,
+    `VendorsService → syncVendorIdentityToSalesforce() success | contactId: ${contactId} | accountId: ${accountId || "none"} | parentAccountId: ${parentAccountId || "none"} | userId: ${userId || "none"}`,
   );
 }
 
@@ -712,17 +826,18 @@ async function updateVendorsTableById(vendorId, payload = {}) {
     }
   }
 
-  if (hasCountry || hasCountryId || hasName || hasContactName || hasEmail) {
+  // Keep Salesforce in sync when identity fields are updated from this API.
+  if (hasName || hasContactName || hasEmail || hasCountry || hasCountryId) {
     await syncVendorIdentityToSalesforce({
       salesforceRefId: row.salesforce_id,
       hasCountry: hasCountry || hasCountryId,
       country: nextCountryName,
-      hasName,
-      name: nextName,
       hasContactName,
       contactName: nextContactName,
       hasEmail,
       email: nextEmail,
+      hasName,
+      name: nextName,
     });
   }
 
@@ -927,7 +1042,7 @@ async function createVendorTableEntry(payload = {}) {
     AccountId: sfAccountId,
     Title: "Provider",
     Email: email,
-    Supplier_segment__c: "New Review",
+    Supplier_segment__c: "New Vendor",
   };
 
   if (nextCountryName) {
@@ -968,7 +1083,7 @@ async function createVendorTableEntry(payload = {}) {
         email,
         country_id: nextCountryId,
         status,
-        supplier_segment: "New Review",
+        supplier_segment: "New Vendor",
         communication_channel: serializeCommunicationChannels(
           communicationChannels,
         ),
@@ -1077,8 +1192,9 @@ async function toggleVendorTableStatus(vendorId, newStatus) {
 }
 
 module.exports = {
-  syncVendorsTableFromSalesforce,
   listVendorsTable,
+  listSalesforceVendors,
+  syncSalesforceVendorsToMysql,
   listVendorsCountries,
   createVendorTableEntry,
   toggleVendorTableStatus,

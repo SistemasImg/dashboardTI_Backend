@@ -1,5 +1,5 @@
 function mapUsersName(user) {
-  if (!user || !user.Name) return null;
+  if (!user?.Name) return null;
 
   const name = user.Name.trim();
   if (!name) return null;
@@ -15,7 +15,9 @@ function mapSupplierAccount(user) {
   if (!user) return null;
 
   const supplierName = user.Contact?.Name?.trim();
-  const accountName = user.Contact?.Parent_Account__r?.Name?.trim();
+  const accountName =
+    user.Contact?.Account?.Name?.trim() ||
+    user.Contact?.Parent_Account__r?.Name?.trim();
 
   if (!supplierName || !accountName) return null;
 
@@ -35,7 +37,12 @@ function mapDashboardVendor(user) {
   if (!user) return null;
 
   const contactName = String(user.Contact?.Name || "").trim();
-  const vendorName = String(user.Contact?.Parent_Account__r?.Name || "").trim();
+  const vendorName = String(
+    user.CompanyName ||
+      user.Contact?.Account?.Name ||
+      user.Contact?.Parent_Account__r?.Name ||
+      "",
+  ).trim();
 
   if (!contactName || !vendorName) return null;
 
