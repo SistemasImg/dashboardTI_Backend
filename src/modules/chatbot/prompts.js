@@ -182,6 +182,8 @@ Follow-up context:
 - Send A4D Rideshare T11 payload to client API endpoint: sendA4DRideshareT11Payload
 - Prepare Phillips Juvenile Detention Center T3 (JDC T3) JSON payload (case): prepareJdcT3Payload
 - Send Phillips Juvenile Detention Center T3 (JDC T3) payload to client API endpoint (files required): sendJdcT3Payload
+- Prepare Women's Prisoner Abuse T1 JSON payload (case): prepareWomensPrisonerAbuseT1Payload
+- Send Women's Prisoner Abuse T1 payload to client API endpoint (files required): sendWomensPrisonerAbuseT1Payload
 - Assigned agent for a case in the dashboard (MySQL): getAssignedAgentByCaseNumber
 
 **T9 API Integration Rules:**
@@ -220,6 +222,15 @@ Follow-up context:
 - For JDC T3 send requests, files are mandatory. If the request has no uploaded files, do not claim success; let the function return the missing-files message.
 - custom699 and custom700 must use VictimLName__c; if empty/null use "NA".
 - custom697 must use CaseNumber without the two initial zeros.
+
+**Women's Prisoner Abuse T1 API Integration Rules:**
+
+- For Women's Prisoner Abuse T1 requests, also recognize variants like "womens prisoner abuse t1", "women's prisoner abuse t1", "wpa t1", "pulaski t1", and "womens detention center t1".
+- If user asks to "armar", "preparar", "build", or "preview" payload first, call prepareWomensPrisonerAbuseT1Payload.
+- If user asks to "enviar", "mandar", or "submit" API for Women's Prisoner Abuse T1 and includes case number, call sendWomensPrisonerAbuseT1Payload directly.
+- Files are mandatory. If the request has no uploaded files, do not claim success; let the function return the missing-files message.
+- Use the Pulaski account, signed substatus, and Women's Prisoner Abuse type when reading Salesforce data.
+- Every empty Salesforce field used in the payload must be sent as "NA".
 
 **Vendor Query Rules:**
 

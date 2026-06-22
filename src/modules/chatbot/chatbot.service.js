@@ -345,6 +345,31 @@ function detectJdcT3SendIntent(message) {
   return { caseNumber: caseMatch[1] };
 }
 
+function detectWomensPrisonerAbuseT1SendIntent(message) {
+  const text = String(message || "").toLowerCase();
+
+  const mentionsSend =
+    text.includes("envi") ||
+    text.includes("manda") ||
+    text.includes("send") ||
+    text.includes("submit");
+
+  const mentionsWpaT1 =
+    text.includes("womens prisoner abuse") ||
+    text.includes("women's prisoner abuse") ||
+    text.includes("wpa t1") ||
+    text.includes("pulaski t1") ||
+    text.includes("womens detention center") ||
+    (text.includes("prisoner abuse") && text.includes("t1"));
+
+  if (!mentionsSend || !mentionsWpaT1) return null;
+
+  const caseMatch = /\b(0*\d{5,8})\b/.exec(text);
+  if (!caseMatch) return null;
+
+  return { caseNumber: caseMatch[1] };
+}
+
 function detectDepoProveraT8SendIntent(message) {
   const text = String(message || "").toLowerCase();
 
@@ -1138,6 +1163,16 @@ exports.processMessage = async (
             field: editIntent.field,
             value: editIntent.value,
           });
+        } else if (pendingRuntime.kind === "wpa_t1") {
+          revised =
+            await apiIntegrations.womensPrisonerAbuseT1.reviseWomensPrisonerAbuseT1PayloadField(
+              {
+                caseNumber: pendingRuntime.caseNumber,
+                attachments: pendingRuntime.attachments || [],
+                field: editIntent.field,
+                value: editIntent.value,
+              },
+            );
         } else if (pendingRuntime.kind === "depo_t8") {
           revised =
             await apiIntegrations.depoProveraT8.reviseDepoProveraT8PayloadField(
@@ -1233,6 +1268,14 @@ exports.processMessage = async (
             caseNumber: pendingRuntime.caseNumber,
             attachments: pendingRuntime.attachments || [],
           });
+        } else if (pendingRuntime.kind === "wpa_t1") {
+          sendResult =
+            await apiIntegrations.womensPrisonerAbuseT1.sendWomensPrisonerAbuseT1Payload(
+              {
+                caseNumber: pendingRuntime.caseNumber,
+                attachments: pendingRuntime.attachments || [],
+              },
+            );
         } else if (pendingRuntime.kind === "depo_t8") {
           sendResult =
             await apiIntegrations.depoProveraT8.sendDepoProveraT8Payload({
@@ -1283,6 +1326,11 @@ exports.processMessage = async (
           ).message;
         } else if (pendingRuntime.kind === "jdc_t3") {
           sentMessage = formatSendJdcT3PayloadResult(
+            sendResult,
+            userLang,
+          ).message;
+        } else if (pendingRuntime.kind === "wpa_t1") {
+          sentMessage = formatSendWomensPrisonerAbuseT1PayloadResult(
             sendResult,
             userLang,
           ).message;
@@ -1368,7 +1416,7 @@ exports.processMessage = async (
                 .map((file) => file.fileName)
                 .join(
                   ", ",
-                )}. If user asks to send T9 or JDC T3 API, treat attachments as provided in this request.`,
+                )}. If user asks to send T9, JDC T3, or Women's Prisoner Abuse T1 API, treat attachments as provided in this request.`,
             },
           ]
         : [
@@ -1376,8 +1424,8 @@ exports.processMessage = async (
               role: "system",
               content:
                 "IMPORTANT: No files were attached to this request. " +
-                "If the user asks to send a T9 Rideshare or JDC T3 payload (any variant: enviar API, envíame el API, send API, PI, etc.), " +
-                "you MUST call the sendT9RidesharePayload or sendJdcT3Payload function with the provided case number — do NOT generate a text response, " +
+                "If the user asks to send a T9 Rideshare, JDC T3, or Women's Prisoner Abuse T1 payload (any variant: enviar API, envíame el API, send API, PI, etc.), " +
+                "you MUST call the sendT9RidesharePayload, sendJdcT3Payload, or sendWomensPrisonerAbuseT1Payload function with the provided case number — do NOT generate a text response, " +
                 "do NOT simulate success, do NOT invent HTTP codes, do NOT invent Lead IDs. " +
                 "The function itself will detect missing files and return the appropriate error. " +
                 "Never fabricate a successful delivery response under any circumstances.",
@@ -2180,6 +2228,74 @@ exports.processMessage = async (
             }
             break;
 
+          case "prepareWomensPrisonerAbuseT1Payload":
+            functionResult =
+              await apiIntegrations.womensPrisonerAbuseT1.prepareWomensPrisonerAbuseT1Payload(
+                {
+                  caseNumber: args.caseNumber,
+                },
+              );
+            if (args.caseNumber) {
+              sessionData.last_filters = {
+                ...(sessionData.last_filters || {}),
+                caseNumber: args.caseNumber,
+                tier: "T1",
+                type: "Women's Prisoner Abuse",
+              };
+              sessionCache[cacheKey].last_filters = sessionData.last_filters;
+            }
+            break;
+
+          case "sendWomensPrisonerAbuseT1Payload":
+            {
+              const wpaAttachments =
+                requestAttachments.length > 0
+                  ? requestAttachments
+                  : args.attachments || [];
+
+              const prepared =
+                await apiIntegrations.womensPrisonerAbuseT1.prepareWomensPrisonerAbuseT1Payload(
+                  {
+                    caseNumber: args.caseNumber,
+                  },
+                );
+
+              if (prepared.found && prepared.ready) {
+                setRuntimePendingApproval(cacheKey, {
+                  kind: "wpa_t1",
+                  apiLabel: "Women's Prisoner Abuse T1",
+                  caseNumber: prepared.caseNumber,
+                  payload: prepared.payload,
+                  attachments: wpaAttachments,
+                });
+
+                functionResult = {
+                  sent: false,
+                  approvalRequired: true,
+                  found: true,
+                  ready: true,
+                  caseNumber: prepared.caseNumber,
+                  payload: prepared.payload,
+                  attachments: wpaAttachments,
+                };
+              } else {
+                functionResult = {
+                  sent: false,
+                  ...prepared,
+                };
+              }
+            }
+            if (args.caseNumber) {
+              sessionData.last_filters = {
+                ...(sessionData.last_filters || {}),
+                caseNumber: args.caseNumber,
+                tier: "T1",
+                type: "Women's Prisoner Abuse",
+              };
+              sessionCache[cacheKey].last_filters = sessionData.last_filters;
+            }
+            break;
+
           case "sendJdcT3Payload":
             {
               const jdcAttachments =
@@ -2450,6 +2566,7 @@ exports.processMessage = async (
           functionName === "sendT9RidesharePayload" ||
           functionName === "sendA4DRideshareT11Payload" ||
           functionName === "sendJdcT3Payload" ||
+          functionName === "sendWomensPrisonerAbuseT1Payload" ||
           functionName === "sendDepoProveraT8Payload") &&
         functionResult?.approvalRequired
       ) {
@@ -2514,6 +2631,39 @@ exports.processMessage = async (
         }
 
         finalMessage = `${sentMessage}\n\n${i18n(userLang, "HTTP", "HTTP")}: ${functionResult.statusCode || "N/A"}\n${i18n(userLang, "Respuesta del cliente", "Client response")}: ${clientResponseText}\n${i18n(userLang, "Guardado en Salesforce", "Saved in Salesforce")}: ${salesforceSavedText}`;
+
+        if (
+          functionName === "sendWomensPrisonerAbuseT1Payload" &&
+          functionResult?.sent === false &&
+          functionResult?.attachmentsRequired === true
+        ) {
+          finalMessage = i18n(
+            userLang,
+            `No se hizo el envío Women's Prisoner Abuse T1 del case ${functionResult.caseNumber} porque los archivos son obligatorios. Adjunta los documentos directamente en el mismo mensaje y vuelve a pedir el envío.`,
+            `Women's Prisoner Abuse T1 delivery was not started for case ${functionResult.caseNumber} because files are mandatory. Attach the required documents directly in the same message and request the submission again.`,
+          );
+        }
+
+        if (
+          functionName === "sendWomensPrisonerAbuseT1Payload" &&
+          functionResult?.sent
+        ) {
+          const sentMessage = i18n(
+            userLang,
+            `Listo, envié correctamente el API del caso ${functionResult.caseNumber}.`,
+            `Done, I sent the API successfully for case ${functionResult.caseNumber}.`,
+          );
+
+          const clientResponseText = functionResult.clientResponse || "N/A";
+          let salesforceSavedText = "N/A";
+          if (typeof functionResult.salesforceUpdated === "boolean") {
+            salesforceSavedText = functionResult.salesforceUpdated
+              ? i18n(userLang, "si", "yes")
+              : i18n(userLang, "no", "no");
+          }
+
+          finalMessage = `${sentMessage}\n\n${i18n(userLang, "HTTP", "HTTP")}: ${functionResult.statusCode || "N/A"}\n${i18n(userLang, "Respuesta del cliente", "Client response")}: ${clientResponseText}\n${i18n(userLang, "Guardado en Salesforce", "Saved in Salesforce")}: ${salesforceSavedText}`;
+        }
       }
 
       if (functionName === "sendBardPortT2Payload" && functionResult?.sent) {
@@ -2694,6 +2844,57 @@ exports.processMessage = async (
         );
 
       return { message: jdcFinalMessage };
+    }
+
+    const wpaIntent = detectWomensPrisonerAbuseT1SendIntent(
+      normalizedUserMessage,
+    );
+    if (wpaIntent) {
+      logger.warn(
+        `[WPA T1 Safety Net] Model skipped function call. Forcing preview workflow for case ${wpaIntent.caseNumber}`,
+      );
+      const wpaPrepared =
+        await apiIntegrations.womensPrisonerAbuseT1.prepareWomensPrisonerAbuseT1Payload(
+          {
+            caseNumber: wpaIntent.caseNumber,
+          },
+        );
+
+      let wpaFinalMessage;
+      if (!wpaPrepared.found || !wpaPrepared.ready) {
+        wpaFinalMessage = formatSendWomensPrisonerAbuseT1PayloadResult(
+          { sent: false, ...wpaPrepared },
+          userLang,
+        ).message;
+      } else {
+        const pending = {
+          kind: "wpa_t1",
+          apiLabel: "Women's Prisoner Abuse T1",
+          caseNumber: wpaPrepared.caseNumber,
+          payload: wpaPrepared.payload,
+          attachments: requestAttachments,
+        };
+        setRuntimePendingApproval(cacheKey, pending);
+        wpaFinalMessage = formatApiApprovalPreviewMessage(pending, userLang);
+      }
+
+      chatSessionService
+        .appendMessages(
+          userId,
+          [
+            { role: "user", content: userMessage },
+            { role: "assistant", content: wpaFinalMessage },
+          ],
+          sessionCache[cacheKey].last_filters,
+          wpaPrepared,
+        )
+        .catch((err) =>
+          logger.error(
+            `[ChatSession] Failed to persist messages: ${err.message}`,
+          ),
+        );
+
+      return { message: wpaFinalMessage };
     }
 
     const depoIntent = detectDepoProveraT8SendIntent(normalizedUserMessage);
@@ -2949,6 +3150,14 @@ async function formatResult(type, data, lang = "en") {
 
   if (type === "sendJdcT3Payload") {
     return formatSendJdcT3PayloadResult(data, lang);
+  }
+
+  if (type === "prepareWomensPrisonerAbuseT1Payload") {
+    return formatPrepareWomensPrisonerAbuseT1PayloadResult(data, lang);
+  }
+
+  if (type === "sendWomensPrisonerAbuseT1Payload") {
+    return formatSendWomensPrisonerAbuseT1PayloadResult(data, lang);
   }
 
   // Grouped result
@@ -4652,5 +4861,110 @@ function formatSendJdcT3PayloadResult(data, lang = "en") {
 
   return {
     message: `${i18n(lang, `Listo, envié correctamente el API del caso ${data.caseNumber}.`, `Done, I sent the API successfully for case ${data.caseNumber}.`)}\n\n${i18n(lang, "Respuesta del cliente", "Client response")}: ${data.clientResponse || "N/A"}\n${i18n(lang, "Guardado en Salesforce", "Saved in Salesforce")}: ${sfText}`,
+  };
+}
+
+function formatPrepareWomensPrisonerAbuseT1PayloadResult(data, lang = "en") {
+  if (!data.found) {
+    return {
+      message: i18n(
+        lang,
+        `No encontré el case ${data.caseNumber} para armar el payload de Women's Prisoner Abuse T1.`,
+        `I couldn't find case ${data.caseNumber} to build the Women's Prisoner Abuse T1 payload.`,
+      ),
+    };
+  }
+
+  if (!data.ready) {
+    const fields = (data.missingFields || []).join(", ");
+    return {
+      message: i18n(
+        lang,
+        `⚠️ No se puede armar el payload de Women's Prisoner Abuse T1 para el case ${data.caseNumber}. Los siguientes campos están vacíos o no tienen datos en Salesforce: **${fields}**.`,
+        `⚠️ Cannot build Women's Prisoner Abuse T1 payload for case ${data.caseNumber}. The following fields are empty or missing in Salesforce: **${fields}**.`,
+      ),
+    };
+  }
+
+  return {
+    message: `
+🧩 **${i18n(lang, "Payload Women's Prisoner Abuse T1 preparado", "Women's Prisoner Abuse T1 payload prepared")}**
+• **Case:** ${data.caseNumber}
+
+${i18n(
+  lang,
+  "La estructura quedó lista para envío al endpoint de Pulaski y los campos vacíos fueron normalizados a NA.",
+  "The structure is ready to be sent to the Pulaski endpoint and empty fields were normalized to NA.",
+)}
+`,
+  };
+}
+
+function formatSendWomensPrisonerAbuseT1PayloadResult(data, lang = "en") {
+  if (!data.found) {
+    return {
+      message: i18n(
+        lang,
+        `No encontré el case ${data.caseNumber}. No pude enviar el payload de Women's Prisoner Abuse T1.`,
+        `I couldn't find case ${data.caseNumber}. I could not send the Women's Prisoner Abuse T1 payload.`,
+      ),
+    };
+  }
+
+  if (data.attachmentsRequired) {
+    return {
+      message: i18n(
+        lang,
+        `No se hizo el envío Women's Prisoner Abuse T1 del case ${data.caseNumber} porque los archivos son obligatorios. Vuelve a enviar tu mensaje del chatbot adjuntando los documentos en la misma solicitud usando el campo files, y luego pide el envío otra vez.`,
+        `Women's Prisoner Abuse T1 delivery was not started for case ${data.caseNumber} because files are mandatory. Send your chatbot message again with the required documents attached in the same request using the files field, then ask to submit it again.`,
+      ),
+    };
+  }
+
+  if (!data.ready) {
+    const fields = (data.missingFields || []).join(", ");
+    return {
+      message: i18n(
+        lang,
+        `⚠️ No se puede enviar el payload Women's Prisoner Abuse T1 para el case ${data.caseNumber}. Los siguientes campos están vacíos o no tienen datos en Salesforce: **${fields}**.`,
+        `⚠️ Cannot send Women's Prisoner Abuse T1 payload for case ${data.caseNumber}. The following fields are empty or missing in Salesforce: **${fields}**.`,
+      ),
+    };
+  }
+
+  if (data.approvalRequired) {
+    return {
+      message: formatApiApprovalPreviewMessage(data, lang),
+    };
+  }
+
+  if (!data.sent) {
+    let sfText = "N/A";
+    if (typeof data.salesforceUpdated === "boolean") {
+      sfText = data.salesforceUpdated
+        ? i18n(lang, "si", "yes")
+        : i18n(lang, "no", "no");
+    }
+
+    const failureMessageEs = `No se completó el envío Women's Prisoner Abuse T1 para el case ${data.caseNumber}. ${data.error || "Revisa la configuración del endpoint"}.`;
+    const failureMessageEn = `Women's Prisoner Abuse T1 delivery for case ${data.caseNumber} was not completed. ${data.error || "Check endpoint configuration"}.`;
+
+    return {
+      message: `${i18n(lang, failureMessageEs, failureMessageEn)}\n\n${i18n(lang, "HTTP", "HTTP")}: ${data.statusCode || "N/A"}\n${i18n(lang, "Respuesta del cliente", "Client response")}: ${data.clientResponse || "N/A"}\n${i18n(lang, "Guardado en Salesforce", "Saved in Salesforce")}: ${sfText}`,
+    };
+  }
+
+  let sfText = "N/A";
+  if (typeof data.salesforceUpdated === "boolean") {
+    sfText = data.salesforceUpdated
+      ? i18n(lang, "si", "yes")
+      : i18n(lang, "no", "no");
+  }
+
+  const successMessageEs = `Listo, envié correctamente el API del caso ${data.caseNumber}.`;
+  const successMessageEn = `Done, I sent the API successfully for case ${data.caseNumber}.`;
+
+  return {
+    message: `${i18n(lang, successMessageEs, successMessageEn)}\n\n${i18n(lang, "Respuesta del cliente", "Client response")}: ${data.clientResponse || "N/A"}\n${i18n(lang, "Guardado en Salesforce", "Saved in Salesforce")}: ${sfText}`,
   };
 }

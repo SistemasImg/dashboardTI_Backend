@@ -15,6 +15,8 @@ wpSalesforceApiLoad
 node_modules
 dist
 dist-ssr
+imgina-chatbot
+
 
 # Editor files
 .vscode
@@ -30,5 +32,4 @@ dist-ssr
 .cspell.json
 .env
 .env.*
-
 .env

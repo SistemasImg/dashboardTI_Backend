@@ -84,6 +84,10 @@ Recommended product definition:
 
 - Audience/export and campaign-oriented automation support.
 
+### SAP
+
+- Finance invoice intake can persist vendor-submitted invoice data in MySQL and submit it to a configured SAP supplier invoice endpoint.
+
 ### GoHighLevel (GHL) + Gravity Forms
 
 - Inbound/outbound sync style endpoints for lead/case state propagation.
@@ -228,6 +232,52 @@ SALESFORCE_CASES_FALLBACK_URL=
 SALESFORCE_CASES_INTERNAL_KEY=
 SALESFORCE_CASES_USER_AGENT=dashboardti-backend-salesforce-cases/1.0
 ```
+
+### 11.5.1 SAP / Finance Invoices
+
+```env
+SAP_ENABLED=false
+SAP_DRY_RUN=false
+SAP_BASE_URL=https://your-sap-host.example.com
+SAP_SUPPLIER_INVOICE_ENDPOINT=/sap/opu/odata/sap/API_SUPPLIERINVOICE_PROCESS_SRV/A_SupplierInvoice
+SAP_AUTH_TYPE=basic
+SAP_USERNAME=
+SAP_PASSWORD=
+SAP_CLIENT_ID=
+SAP_CLIENT_SECRET=
+SAP_TOKEN_URL=
+SAP_CSRF_ENABLED=true
+SAP_TIMEOUT_MS=30000
+SAP_REJECT_UNAUTHORIZED=true
+```
+
+Finance invoice API:
+
+- `POST /finance/invoices` stores the submitted invoice fields and, when SAP is configured, attempts to send it to SAP.
+- `POST /finance/invoices` accepts `multipart/form-data` and may include one optional PDF file under the `invoicePdf` field.
+- `GET /finance/invoices/catalogs` returns dropdown options for document type, identity document type, currency, purchase type, and goods/services type.
+- `GET /finance/invoices` lists stored invoices. Optional filters: `sapStatus`, `documentType`, `purchaseType`, `ruc`, `search`, `limit`.
+- `GET /finance/invoices/:invoiceId` returns one invoice.
+- `POST /finance/invoices/:invoiceId/sap-sync` retries SAP submission. Body: `{ "force": false }`.
+
+Required `POST /finance/invoices` body fields:
+
+`documentType`, `documentSeries`, `documentNumber`, `purchaseType`, `goodsServicesType`, `identityDocumentType`, `ruc`, `businessName`, `issueDate`, `dueDate`, `currencyType`, `taxableBaseAmount`, `igvAmount`, `totalAmount`, `validateDetraction`, `detractionPercentage`, `detractionCode`, `detractionAmount`.
+
+Optional file upload for `POST /finance/invoices`:
+
+- field name: `invoicePdf`
+- accepted type: `application/pdf`
+- max size: `10 MB`
+
+Optional SAP attachment config:
+
+```env
+SAP_SUPPLIER_INVOICE_ATTACHMENT_ENDPOINT=
+SAP_AUTH_TYPE=basic
+```
+
+If `SAP_SUPPLIER_INVOICE_ATTACHMENT_ENDPOINT` is configured and a PDF is uploaded, the backend sends the created invoice to SAP first and then posts the PDF attachment in a second request using the SAP document id. The endpoint may include the placeholder `:sapDocumentId`.
 
 ### 11.6 Infobip
 

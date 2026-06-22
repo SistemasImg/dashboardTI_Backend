@@ -797,6 +797,43 @@ exports.askModel = async (messages) => {
           },
         },
         {
+          name: "prepareWomensPrisonerAbuseT1Payload",
+          description:
+            "Prepare the payload for Women's Prisoner Abuse T1 (Pulaski / Womens Detention Center) using a Salesforce case number. This step only builds and validates the payload preview.",
+          parameters: {
+            type: "object",
+            properties: {
+              caseNumber: { type: "string" },
+            },
+            required: ["caseNumber"],
+          },
+        },
+        {
+          name: "sendWomensPrisonerAbuseT1Payload",
+          description:
+            "Send Women's Prisoner Abuse T1 payload to the Pulaski LawRuler endpoint. Requires uploaded files in the same request.",
+          parameters: {
+            type: "object",
+            properties: {
+              caseNumber: { type: "string" },
+              attachments: {
+                type: "array",
+                items: {
+                  type: "object",
+                  properties: {
+                    fileName: { type: "string" },
+                    mimeType: { type: "string" },
+                    fileBase64: { type: "string" },
+                    note: { type: "string" },
+                  },
+                  required: ["fileName", "fileBase64"],
+                },
+              },
+            },
+            required: ["caseNumber"],
+          },
+        },
+        {
           name: "prepareT9RidesharePayload",
           description:
             "Prepare the JSON payload for T9 Rideshare (Phillips Law Group) using a Salesforce case number, tort, tier, and optional attachments.",

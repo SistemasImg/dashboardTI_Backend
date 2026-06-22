@@ -26,11 +26,15 @@ const {
   markClosedCasesWorkedController,
   markClosedCasesWorkedByFilterController,
 } = require("../controllers/salesforce/closedCasesWorkStatus.controller");
+const {
+  getTimeToLeadController,
+} = require("../controllers/salesforce/timeToLead.controller");
 
 // All protected
 router.use(authMiddleware);
 
 router.get("/attempts/report", getRideshareReport);
+router.get("/time-to-lead", getTimeToLeadController);
 router.post(
   "/audience/export",
   validate(audienceExportSchema),

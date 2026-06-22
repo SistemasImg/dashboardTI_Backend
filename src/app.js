@@ -60,6 +60,7 @@ app.use("/vicidial", require("./routes/vicidial.routes"));
 app.use("/sqlserver", require("./routes/sqlserver/insertApi.routes"));
 app.use("/sqlserver", require("./routes/sqlserver/queries.routes"));
 app.use("/transcriptions", require("./routes/transcription.routes"));
+app.use("/finance/invoices", require("./routes/financeInvoice.routes"));
 
 app.get("/version", (req, res) => {
   res.setHeader(
