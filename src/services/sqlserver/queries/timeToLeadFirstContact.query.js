@@ -1,26 +1,28 @@
-function buildTimeToLeadFirstContactQuery(
-  startDate,
-  endDate,
-  phoneNumbers = [],
-) {
-  const normalizedPhones = [...new Set((phoneNumbers || []).filter(Boolean))];
+function buildTimeToLeadFirstContactQuery({
+  startDateTime,
+  endDateTime,
+  phoneVariants = [],
+}) {
+  const normalizedVariants = [
+    ...new Set((phoneVariants || []).filter(Boolean)),
+  ];
 
-  if (!normalizedPhones.length) {
+  if (!normalizedVariants.length) {
     return null;
   }
 
-  const phonesInClause = normalizedPhones
+  const phonesInClause = normalizedVariants
     .map((phone) => `'${phone}'`)
     .join(",");
 
   return `
-SELECT
-  REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(ANI, '+1', ''), '(', ''), ')', ''), '-', ''), ' ', ''), ':', '') AS CleanANI,
+SELECT TOP 1
+  ANI,
   TIMESTAMP AS ContactTimestamp
 FROM INTAKE.Call_Records_five9
-WHERE CONVERT(DATE, TIMESTAMP) >= '${startDate}'
-  AND CONVERT(DATE, TIMESTAMP) <= '${endDate}'
-  AND REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(ANI, '+1', ''), '(', ''), ')', ''), '-', ''), ' ', ''), ':', '') IN (${phonesInClause})
+WHERE TIMESTAMP >= '${startDateTime}'
+  AND TIMESTAMP < '${endDateTime}'
+  AND ANI IN (${phonesInClause})
   AND (
     DISPOSITION IS NULL
     OR DISPOSITION NOT IN (
@@ -33,9 +35,7 @@ WHERE CONVERT(DATE, TIMESTAMP) >= '${startDate}'
       'Outbound Auto Dial'
     )
   )
-ORDER BY
-  REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(ANI, '+1', ''), '(', ''), ')', ''), '-', ''), ' ', ''), ':', ''),
-  TIMESTAMP ASC
+ORDER BY TIMESTAMP ASC
 `;
 }
 

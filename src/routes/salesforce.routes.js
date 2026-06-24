@@ -5,6 +5,8 @@ const validate = require("../middlewares/validate");
 const audienceExportSchema = require("../schemas/audienceExportSchema");
 const {
   getRideshareReport,
+  getDailyInflowReport,
+  getDailyOutflowReport,
 } = require("../controllers/salesforce/rideshareReport.controller");
 const {
   postAudienceExport,
@@ -28,13 +30,24 @@ const {
 } = require("../controllers/salesforce/closedCasesWorkStatus.controller");
 const {
   getTimeToLeadController,
+  postTimeToLeadController,
+  syncTimeToLeadController,
+  refreshTimeToLeadMetricsController,
 } = require("../controllers/salesforce/timeToLead.controller");
 
 // All protected
 router.use(authMiddleware);
 
 router.get("/attempts/report", getRideshareReport);
+router.get("/attempts/inflow", getDailyInflowReport);
+router.get("/attempts/outflow", getDailyOutflowReport);
 router.get("/time-to-lead", getTimeToLeadController);
+router.post("/time-to-lead", postTimeToLeadController);
+router.post("/time-to-lead/sync", syncTimeToLeadController);
+router.post(
+  "/time-to-lead/refresh-metrics",
+  refreshTimeToLeadMetricsController,
+);
 router.post(
   "/audience/export",
   validate(audienceExportSchema),

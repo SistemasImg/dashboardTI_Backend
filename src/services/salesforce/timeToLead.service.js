@@ -1,13 +1,14 @@
 const { DateTime } = require("luxon");
+const { Op } = require("sequelize");
 const logger = require("../../utils/logger");
 const { authenticateSalesforce } = require("./auth.service");
 const { runSoqlQueryAll } = require("./client.service");
 const { buildTimeToLeadCasesQuery } = require("./queries/timeToLead.query");
-const sqlServerPool = require("../sqlserver/pool.service");
-const {
-  buildTimeToLeadFirstContactQuery,
-} = require("../sqlserver/queries/timeToLeadFirstContact.query");
 const { normalizePhone } = require("./phoneLookup.service");
+const { TimeToLeadSnapshot } = require("../../models");
+const {
+  searchVicidialLeadByPhone,
+} = require("../vicidial/vicidialLeadSearch.service");
 
 const LIMA_TIMEZONE = "America/Lima";
 const DEFAULT_BUSINESS_START_HOUR = 9;
@@ -28,7 +29,20 @@ const TIME_RANGE_LABELS = [
   "[60,+)",
 ];
 const SLA_THRESHOLDS_MINUTES = [5, 10, 15];
-const SQL_PHONE_CHUNK_SIZE = 200;
+const LOOKUP_CONCURRENCY = 1;
+const DEFAULT_METRICS_REFRESH_LIMIT = 3;
+const MAX_METRICS_REFRESH_LIMIT = 5;
+const VICIDIAL_LOOKUP_TIMEOUT_MS = 8000;
+
+let snapshotTableReadyPromise;
+
+async function ensureTimeToLeadSnapshotTable() {
+  if (!snapshotTableReadyPromise) {
+    snapshotTableReadyPromise = TimeToLeadSnapshot.sync();
+  }
+
+  return snapshotTableReadyPromise;
+}
 
 function buildDateWindow(startDate, endDate) {
   const nowInLima = DateTime.now().setZone(LIMA_TIMEZONE);
@@ -85,9 +99,11 @@ function computeWeekLabel(dateTime) {
 function computeResponseDelay(firstContact, dateReceived) {
   if (!firstContact || !dateReceived) return null;
 
-  const diffMillis = Math.abs(
-    firstContact.toMillis() - dateReceived.toMillis(),
-  );
+  const diffMillis = firstContact.toMillis() - dateReceived.toMillis();
+  if (diffMillis < 0) {
+    return null;
+  }
+
   const totalSeconds = Math.floor(diffMillis / 1000);
   const hours = String(Math.floor(totalSeconds / 3600)).padStart(2, "0");
   const minutes = String(Math.floor((totalSeconds % 3600) / 60)).padStart(
@@ -215,14 +231,22 @@ function countBy(items, selector) {
   }, {});
 }
 
-function chunkArray(items, chunkSize) {
-  const chunks = [];
+async function mapWithConcurrency(items, concurrency, iteratee) {
+  const results = new Array(items.length);
+  let currentIndex = 0;
 
-  for (let index = 0; index < items.length; index += chunkSize) {
-    chunks.push(items.slice(index, index + chunkSize));
+  async function worker() {
+    while (currentIndex < items.length) {
+      const itemIndex = currentIndex;
+      currentIndex += 1;
+      results[itemIndex] = await iteratee(items[itemIndex], itemIndex);
+    }
   }
 
-  return chunks;
+  const workerCount = Math.min(concurrency, items.length);
+  await Promise.all(Array.from({ length: workerCount }, () => worker()));
+
+  return results;
 }
 
 function buildBreakdown({
@@ -275,18 +299,75 @@ function buildBreakdown({
     .sort((left, right) => right.totalCases - left.totalCases);
 }
 
-function selectFirstContactAfterCase(contactHistory, dateReceived) {
-  if (!dateReceived?.isValid || !Array.isArray(contactHistory)) {
-    return null;
+function parseVicidialDateTime(value) {
+  if (!value) return null;
+
+  const normalized = String(value).trim();
+  if (!normalized) return null;
+
+  const candidates = [
+    DateTime.fromFormat(normalized, "yyyy-LL-dd HH:mm:ss", {
+      zone: LIMA_TIMEZONE,
+    }),
+    DateTime.fromFormat(normalized, "yyyy-LL-dd HH:mm", {
+      zone: LIMA_TIMEZONE,
+    }),
+    DateTime.fromFormat(normalized, "LL/dd/yyyy hh:mm:ss a", {
+      zone: LIMA_TIMEZONE,
+    }),
+    DateTime.fromFormat(normalized, "LL/dd/yyyy hh:mm a", {
+      zone: LIMA_TIMEZONE,
+    }),
+    DateTime.fromISO(normalized, { zone: LIMA_TIMEZONE }),
+  ];
+
+  return candidates.find((item) => item.isValid) || null;
+}
+
+function pickFirstNonEmpty(...values) {
+  for (const value of values) {
+    const normalized = sanitizeText(value);
+    if (normalized) {
+      return normalized;
+    }
   }
 
-  return (
-    contactHistory.find(
-      (contactTimestamp) =>
-        contactTimestamp?.isValid &&
-        contactTimestamp.toMillis() >= dateReceived.toMillis(),
-    ) || null
-  );
+  return null;
+}
+
+function collectVicidialCandidateContacts(records) {
+  return (records || []).flatMap((record) => {
+    const candidates = [];
+    const fallbackAgentName = pickFirstNonEmpty(record?.columns?.[3]);
+
+    if (Array.isArray(record.recordings)) {
+      record.recordings.forEach((recording) => {
+        const parsed = parseVicidialDateTime(recording?.dateTime);
+        if (parsed) {
+          candidates.push({
+            dateTime: parsed,
+            agentName: pickFirstNonEmpty(
+              recording?.agent,
+              recording?.tsr,
+              fallbackAgentName,
+            ),
+          });
+        }
+      });
+    }
+
+    if (Array.isArray(record.columns) && record.columns[6]) {
+      const parsedLeadDate = parseVicidialDateTime(record.columns[6]);
+      if (parsedLeadDate) {
+        candidates.push({
+          dateTime: parsedLeadDate,
+          agentName: fallbackAgentName,
+        });
+      }
+    }
+
+    return candidates;
+  });
 }
 
 function mapSalesforceCase(record) {
@@ -342,54 +423,580 @@ function clearReasonsByStatus(item) {
   };
 }
 
-async function fetchFirstContacts(startDate, endDate, phoneNumbers = []) {
-  if (!phoneNumbers.length) {
-    return new Map();
+async function fetchFirstContactForCase({ caseCreatedAt, phoneNumber }) {
+  const normalizedPhone = normalizePhone(phoneNumber);
+
+  if (!normalizedPhone || !caseCreatedAt?.isValid) {
+    return {
+      firstContact: null,
+      timedOut: false,
+      failed: false,
+    };
   }
 
-  const pool = await sqlServerPool.getPool();
-  const callsByPhone = new Map();
+  try {
+    const payload = await searchVicidialLeadByPhone(normalizedPhone, {
+      resolveRecordingLocations: false,
+      timeoutMs: VICIDIAL_LOOKUP_TIMEOUT_MS,
+    });
+    const candidateContacts = collectVicidialCandidateContacts(payload.records);
+    const earliestValidContact = candidateContacts
+      .filter((item) => item.dateTime.toMillis() >= caseCreatedAt.toMillis())
+      .sort(
+        (left, right) => left.dateTime.toMillis() - right.dateTime.toMillis(),
+      )[0];
 
-  const phoneChunks = chunkArray(phoneNumbers, SQL_PHONE_CHUNK_SIZE);
-
-  for (const phoneChunk of phoneChunks) {
-    const query = buildTimeToLeadFirstContactQuery(
-      startDate,
-      endDate,
-      phoneChunk,
-    );
-
-    if (!query) {
-      continue;
+    if (!earliestValidContact) {
+      return {
+        firstContact: null,
+        firstContactAgentName: null,
+        timedOut: false,
+        failed: false,
+      };
     }
 
-    const result = await pool.request().query(query);
-    const rows = result.recordset || [];
+    return {
+      firstContact: earliestValidContact.dateTime,
+      firstContactAgentName: earliestValidContact.agentName || null,
+      timedOut: false,
+      failed: false,
+    };
+  } catch (error) {
+    const timedOut =
+      error.code === "ETIMEOUT" ||
+      String(error.message || "")
+        .toLowerCase()
+        .includes("timeout");
 
-    rows.forEach((row) => {
-      const phone = normalizePhone(row.CleanANI);
-      const contactTimestamp = row.ContactTimestamp
-        ? DateTime.fromJSDate(new Date(row.ContactTimestamp), {
-            zone: LIMA_TIMEZONE,
-          })
-        : null;
+    logger.warn("TimeToLeadService -> Vicidial lookup skipped", {
+      timedOut,
+      message: error.message,
+      phoneNumber: normalizedPhone,
+    });
 
-      if (!phone || !contactTimestamp?.isValid) {
-        return;
-      }
+    return {
+      firstContact: null,
+      firstContactAgentName: null,
+      timedOut,
+      failed: !timedOut,
+      errorMessage: error.message,
+    };
+  }
+}
 
-      if (!callsByPhone.has(phone)) {
-        callsByPhone.set(phone, []);
-      }
+function getSnapshotBaseUpdateFields() {
+  return [
+    "case_created_at",
+    "case_created_date",
+    "full_name",
+    "phone_number",
+    "email",
+    "status",
+    "substatus",
+    "reason_for_dq",
+    "reason_for_doesnt_meet_criteria",
+    "reason_for_spam",
+    "date_sent",
+    "ethnicity",
+    "origin",
+    "case_type",
+    "reason_for_rejection",
+    "owner_id",
+    "owner_name",
+    "week_label",
+    "has_valid_phone",
+    "business_hours_eligible",
+    "first_contact_at",
+    "first_contact_agent_name",
+    "response_delay",
+    "response_delay_minutes",
+    "range_time",
+    "match_source",
+    "match_status",
+    "match_confidence",
+    "has_potential_phone_reuse",
+    "pending_minutes",
+    "synced_at",
+    "updated_at",
+  ];
+}
 
-      callsByPhone.get(phone).push(contactTimestamp);
+function buildSnapshotBaseRow({ item, syncedAt, hasPotentialPhoneReuse }) {
+  const hasValidPhone = Boolean(item.phoneNumber);
+  const businessHoursEligible =
+    item.dateReceived.hour >= DEFAULT_BUSINESS_START_HOUR &&
+    item.dateReceived.hour < DEFAULT_BUSINESS_END_HOUR;
+
+  return {
+    case_number: item.caseNumber,
+    case_created_at: item.dateReceived.toJSDate(),
+    case_created_date: item.dateReceived.toISODate(),
+    full_name: item.fullName,
+    phone_number: item.phoneNumber,
+    email: item.email,
+    status: item.status,
+    substatus: item.substatus,
+    reason_for_dq: item.reasonForDQ,
+    reason_for_doesnt_meet_criteria: item.reasonForDoesntMeetCriteria,
+    reason_for_spam: item.reasonForSpam,
+    date_sent: item.dateSent,
+    ethnicity: item.ethnicity,
+    origin: item.origin,
+    case_type: item.type,
+    reason_for_rejection: item.reasonForRejection,
+    owner_id: item.ownerId,
+    owner_name: item.ownerName,
+    week_label: computeWeekLabel(item.dateReceived),
+    has_valid_phone: hasValidPhone,
+    business_hours_eligible: businessHoursEligible,
+    first_contact_at: null,
+    first_contact_agent_name: null,
+    response_delay: null,
+    response_delay_minutes: null,
+    range_time: null,
+    match_source: hasValidPhone ? "vicidial" : null,
+    match_status: hasValidPhone ? "pending_lookup" : "invalid_phone",
+    match_confidence: null,
+    has_potential_phone_reuse: hasPotentialPhoneReuse,
+    pending_minutes: hasValidPhone
+      ? roundMetric(syncedAt.diff(item.dateReceived, "minutes").minutes)
+      : null,
+    synced_at: syncedAt.toJSDate(),
+    created_at: syncedAt.toJSDate(),
+    updated_at: syncedAt.toJSDate(),
+  };
+}
+
+function normalizeBatchLimit(
+  limit,
+  defaultValue = DEFAULT_METRICS_REFRESH_LIMIT,
+) {
+  const parsed = Number(limit);
+
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return defaultValue;
+  }
+
+  return Math.min(Math.floor(parsed), MAX_METRICS_REFRESH_LIMIT);
+}
+
+function buildTimeToLeadCaseSyncResult({
+  fetched,
+  synced,
+  startDate,
+  endDate,
+}) {
+  return {
+    phase: "salesforce_cases",
+    fetched,
+    synced,
+    startDate,
+    endDate,
+  };
+}
+
+async function syncTimeToLeadSnapshots({ startDate, endDate }) {
+  await ensureTimeToLeadSnapshotTable();
+
+  logger.info("TimeToLeadService -> syncTimeToLeadSnapshots() started", {
+    startDate,
+    endDate,
+    mode: "salesforce_cases_only",
+  });
+
+  const window = buildDateWindow(startDate, endDate);
+  const sf = await authenticateSalesforce();
+
+  const soql = buildTimeToLeadCasesQuery({
+    startDateTimeUtc: window.start.toUTC().toFormat("yyyy-LL-dd'T'HH:mm:ss'Z'"),
+    endDateTimeUtc: window.endExclusive
+      .toUTC()
+      .toFormat("yyyy-LL-dd'T'HH:mm:ss'Z'"),
+  });
+
+  const records = await runSoqlQueryAll(sf, soql);
+  const rawItems = records
+    .map(mapSalesforceCase)
+    .map(clearReasonsByStatus)
+    .filter((item) => item.dateReceived);
+
+  const syncedAt = DateTime.now().setZone(LIMA_TIMEZONE);
+  const phoneCaseCounts = rawItems.reduce((accumulator, item) => {
+    if (!item.phoneNumber) {
+      return accumulator;
+    }
+
+    accumulator.set(
+      item.phoneNumber,
+      (accumulator.get(item.phoneNumber) || 0) + 1,
+    );
+    return accumulator;
+  }, new Map());
+
+  const rows = rawItems.map((item) => ({
+    ...buildSnapshotBaseRow({
+      item,
+      syncedAt,
+      hasPotentialPhoneReuse: Boolean(
+        item.phoneNumber && (phoneCaseCounts.get(item.phoneNumber) || 0) > 1,
+      ),
+    }),
+  }));
+
+  const caseNumbers = rows.map((row) => row.case_number).filter(Boolean);
+
+  if (caseNumbers.length) {
+    await TimeToLeadSnapshot.destroy({
+      where: {
+        case_created_date: {
+          [Op.gte]: window.start.toISODate(),
+          [Op.lte]: window.end.toISODate(),
+        },
+        case_number: {
+          [Op.notIn]: caseNumbers,
+        },
+      },
+    });
+  } else {
+    await TimeToLeadSnapshot.destroy({
+      where: {
+        case_created_date: {
+          [Op.gte]: window.start.toISODate(),
+          [Op.lte]: window.end.toISODate(),
+        },
+      },
     });
   }
 
-  return callsByPhone;
+  if (rows.length) {
+    await TimeToLeadSnapshot.bulkCreate(rows, {
+      updateOnDuplicate: getSnapshotBaseUpdateFields(),
+    });
+  }
+
+  const result = buildTimeToLeadCaseSyncResult({
+    fetched: records.length,
+    synced: rows.length,
+    startDate: window.start.toISODate(),
+    endDate: window.end.toISODate(),
+  });
+
+  logger.success("TimeToLeadService -> syncTimeToLeadSnapshots() completed", {
+    ...result,
+  });
+
+  return result;
+}
+
+async function syncRecentTimeToLeadSnapshots(daysBack = 1) {
+  const totalDays = Math.max(0, Number(daysBack) || 0);
+  const nowInLima = DateTime.now().setZone(LIMA_TIMEZONE).startOf("day");
+  const results = [];
+
+  for (let offset = totalDays; offset >= 0; offset -= 1) {
+    const targetDate = nowInLima.minus({ days: offset }).toISODate();
+    results.push(
+      await syncTimeToLeadSnapshots({
+        startDate: targetDate,
+        endDate: targetDate,
+      }),
+    );
+  }
+
+  return results;
+}
+
+async function refreshTimeToLeadSnapshotMetrics({
+  startDate,
+  endDate,
+  limit = DEFAULT_METRICS_REFRESH_LIMIT,
+  force = false,
+}) {
+  await ensureTimeToLeadSnapshotTable();
+
+  logger.info(
+    "TimeToLeadService -> refreshTimeToLeadSnapshotMetrics() started",
+    {
+      startDate,
+      endDate,
+      limit,
+      force,
+    },
+  );
+
+  const window = buildDateWindow(startDate, endDate);
+  const batchLimit = normalizeBatchLimit(limit);
+  const where = {
+    case_created_date: {
+      [Op.gte]: window.start.toISODate(),
+      [Op.lte]: window.end.toISODate(),
+    },
+    has_valid_phone: true,
+  };
+
+  if (!force) {
+    where.first_contact_at = {
+      [Op.is]: null,
+    };
+    where.match_status = "pending_lookup";
+  }
+
+  const candidateRows = await TimeToLeadSnapshot.findAll({
+    where,
+    attributes: [
+      "case_number",
+      "case_created_at",
+      "phone_number",
+      "has_potential_phone_reuse",
+    ],
+    raw: true,
+    order: [["case_created_at", "ASC"]],
+    limit: batchLimit,
+  });
+
+  if (!candidateRows.length) {
+    return {
+      phase: "metrics_refresh",
+      processed: 0,
+      matched: 0,
+      unmatched: 0,
+      startDate: window.start.toISODate(),
+      endDate: window.end.toISODate(),
+      limit: batchLimit,
+      force,
+    };
+  }
+
+  const phoneCaseCounts = candidateRows.reduce((accumulator, row) => {
+    if (!row.phone_number) {
+      return accumulator;
+    }
+
+    accumulator.set(
+      row.phone_number,
+      (accumulator.get(row.phone_number) || 0) + 1,
+    );
+    return accumulator;
+  }, new Map());
+
+  const lookupSyncedAt = DateTime.now().setZone(LIMA_TIMEZONE);
+  let matched = 0;
+  let unmatched = 0;
+  let lookupTimeouts = 0;
+  let lookupFailures = 0;
+
+  await mapWithConcurrency(candidateRows, LOOKUP_CONCURRENCY, async (row) => {
+    const caseCreatedAt = toLimaDateTime(row.case_created_at);
+
+    if (!caseCreatedAt?.isValid) {
+      unmatched += 1;
+      lookupFailures += 1;
+      return;
+    }
+
+    const lookupResult = await fetchFirstContactForCase({
+      caseCreatedAt,
+      phoneNumber: row.phone_number,
+    });
+    const firstContact = lookupResult.firstContact;
+    const firstContactAgentName = lookupResult.firstContactAgentName;
+
+    const responseDelay = computeResponseDelay(firstContact, caseCreatedAt);
+    const responseDelayMinutes = responseDelayToMinutes(responseDelay);
+    const hasPotentialPhoneReuse =
+      (phoneCaseCounts.get(row.phone_number) || 0) > 1;
+    let matchConfidence = null;
+
+    if (firstContact) {
+      matchConfidence = hasPotentialPhoneReuse ? "medium" : "high";
+    }
+
+    if (firstContact) {
+      matched += 1;
+    } else if (lookupResult.timedOut) {
+      lookupTimeouts += 1;
+      unmatched += 1;
+    } else if (lookupResult.failed) {
+      lookupFailures += 1;
+      unmatched += 1;
+    } else {
+      unmatched += 1;
+    }
+
+    let matchStatus = "no_first_call_found";
+    if (firstContact) {
+      matchStatus = "matched";
+    } else if (lookupResult.timedOut) {
+      matchStatus = "lookup_timeout";
+    } else if (lookupResult.failed) {
+      matchStatus = "lookup_failed";
+    }
+
+    await TimeToLeadSnapshot.update(
+      {
+        first_contact_at: firstContact ? firstContact.toJSDate() : null,
+        first_contact_agent_name: firstContactAgentName,
+        response_delay: responseDelay,
+        response_delay_minutes: roundMetric(responseDelayMinutes),
+        range_time: computeRangeTime(responseDelayMinutes),
+        match_source: "vicidial",
+        match_status: matchStatus,
+        match_confidence: matchConfidence,
+        has_potential_phone_reuse: hasPotentialPhoneReuse,
+        pending_minutes: firstContact
+          ? null
+          : roundMetric(lookupSyncedAt.diff(caseCreatedAt, "minutes").minutes),
+        synced_at: lookupSyncedAt.toJSDate(),
+      },
+      {
+        where: {
+          case_number: row.case_number,
+        },
+      },
+    );
+  });
+
+  const result = {
+    phase: "metrics_refresh",
+    processed: candidateRows.length,
+    matched,
+    unmatched,
+    lookupTimeouts,
+    lookupFailures,
+    startDate: window.start.toISODate(),
+    endDate: window.end.toISODate(),
+    limit: batchLimit,
+    force,
+  };
+
+  logger.success(
+    "TimeToLeadService -> refreshTimeToLeadSnapshotMetrics() completed",
+    result,
+  );
+
+  return result;
+}
+
+async function refreshTimeToLeadSnapshotMetricsBatches({
+  startDate,
+  endDate,
+  limit = DEFAULT_METRICS_REFRESH_LIMIT,
+  maxBatches = 1,
+}) {
+  const totalBatches = Math.max(1, Number(maxBatches) || 1);
+  const batches = [];
+
+  for (let batchIndex = 0; batchIndex < totalBatches; batchIndex += 1) {
+    const result = await refreshTimeToLeadSnapshotMetrics({
+      startDate,
+      endDate,
+      limit,
+      force: false,
+    });
+
+    batches.push(result);
+
+    if (!result.processed || result.processed < result.limit) {
+      break;
+    }
+  }
+
+  return {
+    phase: "metrics_refresh_batches",
+    batches,
+    totalBatches: batches.length,
+    processed: batches.reduce((sum, item) => sum + (item.processed || 0), 0),
+    matched: batches.reduce((sum, item) => sum + (item.matched || 0), 0),
+    unmatched: batches.reduce((sum, item) => sum + (item.unmatched || 0), 0),
+    lookupTimeouts: batches.reduce(
+      (sum, item) => sum + (item.lookupTimeouts || 0),
+      0,
+    ),
+    lookupFailures: batches.reduce(
+      (sum, item) => sum + (item.lookupFailures || 0),
+      0,
+    ),
+    startDate,
+    endDate,
+    limit,
+    maxBatches: totalBatches,
+  };
+}
+
+async function refreshRecentTimeToLeadSnapshotMetrics({
+  daysBack = 1,
+  limit = 25,
+  force = false,
+}) {
+  const totalDays = Math.max(0, Number(daysBack) || 0);
+  const nowInLima = DateTime.now().setZone(LIMA_TIMEZONE).startOf("day");
+  const results = [];
+
+  for (let offset = totalDays; offset >= 0; offset -= 1) {
+    const targetDate = nowInLima.minus({ days: offset }).toISODate();
+    results.push(
+      await refreshTimeToLeadSnapshotMetrics({
+        startDate: targetDate,
+        endDate: targetDate,
+        limit,
+        force,
+      }),
+    );
+  }
+
+  return results;
+}
+
+function toLimaDateTime(value) {
+  if (!value) return null;
+  return DateTime.fromJSDate(new Date(value), { zone: LIMA_TIMEZONE });
+}
+
+function mapSnapshotRowToCase(row, nowInLima) {
+  const caseCreatedAt = toLimaDateTime(row.case_created_at);
+  const firstContactAt = toLimaDateTime(row.first_contact_at);
+  const pendingMinutes = firstContactAt
+    ? null
+    : roundMetric(nowInLima.diff(caseCreatedAt, "minutes").minutes);
+
+  return {
+    caseNumber: row.case_number,
+    fullName: row.full_name,
+    phoneNumber: row.phone_number,
+    email: row.email,
+    status: row.status,
+    substatus: row.substatus,
+    reasonForDQ: row.reason_for_dq,
+    reasonForDoesntMeetCriteria: row.reason_for_doesnt_meet_criteria,
+    reasonForSpam: row.reason_for_spam,
+    dateSent: row.date_sent,
+    ethnicity: row.ethnicity,
+    origin: row.origin,
+    type: row.case_type,
+    reasonForRejection: row.reason_for_rejection,
+    ownerId: row.owner_id,
+    ownerName: row.owner_name,
+    dateReceived: caseCreatedAt?.toFormat("yyyy-LL-dd HH:mm:ss") || null,
+    firstContact: firstContactAt?.toFormat("yyyy-LL-dd HH:mm:ss") || null,
+    firstContactAgentName: row.first_contact_agent_name,
+    responseDelay: row.response_delay,
+    responseDelayMinutes:
+      row.response_delay_minutes === null
+        ? null
+        : Number(row.response_delay_minutes),
+    rangeTime: row.range_time,
+    week: row.week_label,
+    matchSource: row.match_source,
+    matchStatus: row.match_status,
+    matchConfidence: row.match_confidence,
+    hasPotentialPhoneReuse: Boolean(row.has_potential_phone_reuse),
+    pendingMinutes,
+  };
 }
 
 async function getTimeToLead({ startDate, endDate, businessHoursOnly = true }) {
+  await ensureTimeToLeadSnapshotTable();
+
   logger.info("TimeToLeadService -> getTimeToLead() started", {
     startDate,
     endDate,
@@ -398,123 +1005,53 @@ async function getTimeToLead({ startDate, endDate, businessHoursOnly = true }) {
 
   try {
     const window = buildDateWindow(startDate, endDate);
-    const sf = await authenticateSalesforce();
-
-    const soql = buildTimeToLeadCasesQuery({
-      startDateTimeUtc: window.start
-        .toUTC()
-        .toFormat("yyyy-LL-dd'T'HH:mm:ss'Z'"),
-      endDateTimeUtc: window.endExclusive
-        .toUTC()
-        .toFormat("yyyy-LL-dd'T'HH:mm:ss'Z'"),
+    const rows = await TimeToLeadSnapshot.findAll({
+      where: {
+        case_created_date: {
+          [Op.gte]: window.start.toISODate(),
+          [Op.lte]: window.end.toISODate(),
+        },
+      },
+      raw: true,
+      order: [["case_created_at", "DESC"]],
     });
 
-    const records = await runSoqlQueryAll(sf, soql);
+    const lastSyncedAt = rows.reduce((latest, row) => {
+      if (!row.synced_at) return latest;
+      if (!latest) return row.synced_at;
+      return new Date(row.synced_at) > new Date(latest)
+        ? row.synced_at
+        : latest;
+    }, null);
 
-    const rawItems = records.map(mapSalesforceCase).map(clearReasonsByStatus);
-
-    const excludedMissingCreatedDate = rawItems.filter(
-      (item) => !item.dateReceived,
+    const excludedMissingCreatedDate = 0;
+    const excludedMissingPhone = rows.filter(
+      (row) => !row.has_valid_phone,
     ).length;
-    const itemsWithValidDate = rawItems.filter((item) => item.dateReceived);
-    const excludedMissingPhone = itemsWithValidDate.filter(
-      (item) => !item.phoneNumber,
-    ).length;
+    const validPhoneRows = rows.filter((row) => row.has_valid_phone);
 
-    let items = itemsWithValidDate.filter((item) => item.phoneNumber);
-
+    let eligibleRows = validPhoneRows;
     let excludedOutsideBusinessHours = 0;
+
     if (businessHoursOnly) {
-      const itemsBeforeBusinessHoursFilter = items.length;
-      items = items.filter(
-        (item) =>
-          item.dateReceived.hour >= DEFAULT_BUSINESS_START_HOUR &&
-          item.dateReceived.hour < DEFAULT_BUSINESS_END_HOUR,
+      excludedOutsideBusinessHours = validPhoneRows.filter(
+        (row) => !row.business_hours_eligible,
+      ).length;
+      eligibleRows = validPhoneRows.filter(
+        (row) => row.business_hours_eligible,
       );
-      excludedOutsideBusinessHours =
-        itemsBeforeBusinessHoursFilter - items.length;
     }
 
-    const relevantPhones = [...new Set(items.map((item) => item.phoneNumber))];
-
-    logger.info("TimeToLeadService -> fetching SQL first contacts", {
-      startDate: window.start.toISODate(),
-      endDate: window.end.toISODate(),
-      phoneCount: relevantPhones.length,
-      chunkSize: SQL_PHONE_CHUNK_SIZE,
-    });
-
-    const firstContactByPhone = await fetchFirstContacts(
-      window.start.toISODate(),
-      window.end.toISODate(),
-      relevantPhones,
+    const nowInLima = DateTime.now().setZone(LIMA_TIMEZONE);
+    const mappedCases = eligibleRows.map((row) =>
+      mapSnapshotRowToCase(row, nowInLima),
     );
 
-    const phoneCaseCounts = items.reduce((accumulator, item) => {
-      accumulator.set(
-        item.phoneNumber,
-        (accumulator.get(item.phoneNumber) || 0) + 1,
-      );
-      return accumulator;
-    }, new Map());
-
-    const nowInLima = window.nowInLima;
-
-    const enrichedItems = items.map((item) => {
-      const firstContact = selectFirstContactAfterCase(
-        firstContactByPhone.get(item.phoneNumber) || [],
-        item.dateReceived,
-      );
-      const responseDelay = computeResponseDelay(
-        firstContact,
-        item.dateReceived,
-      );
-      const responseDelayMinutes = responseDelayToMinutes(responseDelay);
-      const hasPotentialPhoneReuse =
-        (phoneCaseCounts.get(item.phoneNumber) || 0) > 1;
-      let matchConfidence = null;
-      if (firstContact) {
-        matchConfidence = hasPotentialPhoneReuse ? "medium" : "high";
-      }
-
-      return {
-        caseNumber: item.caseNumber,
-        fullName: item.fullName,
-        phoneNumber: item.phoneNumber,
-        email: item.email,
-        status: item.status,
-        substatus: item.substatus,
-        reasonForDQ: item.reasonForDQ,
-        reasonForDoesntMeetCriteria: item.reasonForDoesntMeetCriteria,
-        reasonForSpam: item.reasonForSpam,
-        dateSent: item.dateSent,
-        ethnicity: item.ethnicity,
-        origin: item.origin,
-        type: item.type,
-        reasonForRejection: item.reasonForRejection,
-        ownerId: item.ownerId,
-        ownerName: item.ownerName,
-        dateReceived: item.dateReceived.toFormat("yyyy-LL-dd HH:mm:ss"),
-        firstContact: firstContact
-          ? firstContact.toFormat("yyyy-LL-dd HH:mm:ss")
-          : null,
-        responseDelay,
-        responseDelayMinutes: roundMetric(responseDelayMinutes),
-        rangeTime: computeRangeTime(responseDelayMinutes),
-        week: computeWeekLabel(item.dateReceived),
-        matchSource: "phone",
-        matchStatus: firstContact ? "matched" : "no_first_call_found",
-        matchConfidence,
-        hasPotentialPhoneReuse,
-        pendingMinutes: firstContact
-          ? null
-          : roundMetric(nowInLima.diff(item.dateReceived, "minutes").minutes),
-      };
-    });
-
-    const completedItems = enrichedItems.filter((item) => item.firstContact);
-    const pendingItems = enrichedItems
-      .filter((item) => !item.firstContact)
+    const completedItems = mappedCases.filter(
+      (item) => item.firstContact && item.responseDelay !== null,
+    );
+    const pendingItems = mappedCases
+      .filter((item) => !item.firstContact || item.responseDelay === null)
       .map((item) => ({
         caseNumber: item.caseNumber,
         fullName: item.fullName,
@@ -536,6 +1073,7 @@ async function getTimeToLead({ startDate, endDate, businessHoursOnly = true }) {
         hasPotentialPhoneReuse: item.hasPotentialPhoneReuse,
       }))
       .sort((left, right) => right.waitingMinutes - left.waitingMinutes);
+
     const responseDelayValues = completedItems
       .map((item) => item.responseDelayMinutes)
       .filter((value) => value !== null && !Number.isNaN(value));
@@ -572,10 +1110,18 @@ async function getTimeToLead({ startDate, endDate, businessHoursOnly = true }) {
         businessHoursOnly,
         timezone: LIMA_TIMEZONE,
       },
+      meta: {
+        source: "snapshot",
+        lastSyncedAt: lastSyncedAt
+          ? DateTime.fromJSDate(new Date(lastSyncedAt), {
+              zone: LIMA_TIMEZONE,
+            }).toISO()
+          : null,
+      },
       summary: {
         totals: {
-          salesforceCasesFetched: records.length,
-          eligibleAfterFilters: items.length,
+          salesforceCasesFetched: rows.length,
+          eligibleAfterFilters: eligibleRows.length,
           completedWithFirstContact: completedItems.length,
           pendingWithoutFirstContact: pendingItems.length,
           potentialPhoneReuseCases: matchedPhoneReuseCount,
@@ -604,8 +1150,8 @@ async function getTimeToLead({ startDate, endDate, businessHoursOnly = true }) {
           }),
         },
         matching: {
-          source: "phone",
-          eligibleCasesReviewed: items.length,
+          source: "vicidial",
+          eligibleCasesReviewed: eligibleRows.length,
           matchedCases: completedItems.length,
           unmatchedCases: pendingItems.length,
           completedCasesWithPotentialPhoneReuse: matchedPhoneReuseCount,
@@ -629,6 +1175,7 @@ async function getTimeToLead({ startDate, endDate, businessHoursOnly = true }) {
     logger.success("TimeToLeadService -> getTimeToLead() completed", {
       total: result.total,
       pendingFirstCall: pendingItems.length,
+      source: result.meta.source,
     });
 
     return result;
@@ -643,4 +1190,10 @@ async function getTimeToLead({ startDate, endDate, businessHoursOnly = true }) {
 
 module.exports = {
   getTimeToLead,
+  syncTimeToLeadSnapshots,
+  syncRecentTimeToLeadSnapshots,
+  refreshTimeToLeadSnapshotMetrics,
+  refreshTimeToLeadSnapshotMetricsBatches,
+  refreshRecentTimeToLeadSnapshotMetrics,
+  ensureTimeToLeadSnapshotTable,
 };

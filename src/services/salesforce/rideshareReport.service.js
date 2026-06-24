@@ -9,10 +9,16 @@ const {
 const {
   authenticateSalesforce,
 } = require("../../services/salesforce/auth.service");
-const { runSoqlQuery } = require("../../services/salesforce/client.service");
+const {
+  runSoqlQuery,
+  runSoqlQueryAll,
+} = require("../../services/salesforce/client.service");
 
 const {
   buildMonitoringCasesQuery,
+  buildDailyInflowCasesQuery,
+  buildDailyOutflowCasesQuery,
+  buildLeadOpportunityCaseNumbersQuery,
 } = require("../../services/salesforce/queries/case.query");
 const {
   buildUsersQuery,
@@ -20,6 +26,7 @@ const {
 
 const {
   mapMonitoringCase,
+  mapOperationalFlowCase,
 } = require("../../services/salesforce/mappers/case.mapper");
 const {
   mapUsersName,
@@ -33,6 +40,164 @@ const {
 const {
   ActiveAssignmentsDaily,
 } = require("../../services/caseAssignments.service");
+
+const DEFAULT_CASE_OWNER = "Marketing Digital";
+const LEAD_OPPORTUNITY_CASE_NUMBER_BATCH_SIZE = 100;
+
+function buildUsersMap(userRecords) {
+  return new Map(
+    userRecords
+      .map(mapUsersName)
+      .filter(Boolean)
+      .map((user) => [user.id, user.name]),
+  );
+}
+
+function normalizeDailyFlowParams({ date, type }) {
+  const normalizedDate = String(date || "").trim();
+  const normalizedType = String(type || "").trim();
+  const resolvedDate = normalizedDate || getPeruDateKey(0);
+
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(resolvedDate)) {
+    throw Object.assign(new Error("date is required in YYYY-MM-DD format"), {
+      statusCode: 400,
+    });
+  }
+
+  return {
+    date: resolvedDate,
+    type: normalizedType || null,
+  };
+}
+
+function chunkItems(items, size) {
+  const chunks = [];
+
+  for (let index = 0; index < items.length; index += size) {
+    chunks.push(items.slice(index, index + size));
+  }
+
+  return chunks;
+}
+
+async function getLeadOpportunityCaseNumberSet(sf, caseRecords, caseType) {
+  const caseNumbers = caseRecords
+    .map((record) => record.CaseNumber)
+    .filter(Boolean);
+
+  if (!caseNumbers.length) {
+    return new Set();
+  }
+
+  const chunks = chunkItems(
+    caseNumbers,
+    LEAD_OPPORTUNITY_CASE_NUMBER_BATCH_SIZE,
+  );
+  const results = await Promise.all(
+    chunks.map((chunk) =>
+      runSoqlQueryAll(
+        sf,
+        buildLeadOpportunityCaseNumbersQuery(chunk, caseType),
+      ),
+    ),
+  );
+
+  return new Set(
+    results
+      .flat()
+      .map((record) => record.Lead__r?.CaseNumber)
+      .filter(Boolean),
+  );
+}
+
+async function getDailyOperationalFlow({ date, type, flowType }) {
+  const params = normalizeDailyFlowParams({ date, type });
+  const isInflow = flowType === "inflow";
+
+  logger.info(
+    `RideshareReportService → getDailyOperationalFlow() | flowType=${flowType} date=${params.date} type=${params.type || "all"}`,
+  );
+
+  const sf = await authenticateSalesforce();
+  const query = isInflow
+    ? buildDailyInflowCasesQuery(params.date, params.type)
+    : buildDailyOutflowCasesQuery(params.date, params.type);
+
+  const [caseRecords, userRecords] = await Promise.all([
+    runSoqlQueryAll(sf, query),
+    runSoqlQuery(sf, buildUsersQuery()),
+  ]);
+
+  let eligibleCaseRecords = caseRecords;
+  let leadOpportunityValidation = null;
+
+  if (!isInflow) {
+    const leadOpportunityCaseNumbers = await getLeadOpportunityCaseNumberSet(
+      sf,
+      caseRecords,
+      params.type,
+    );
+
+    eligibleCaseRecords = caseRecords.filter((record) =>
+      leadOpportunityCaseNumbers.has(record.CaseNumber),
+    );
+
+    leadOpportunityValidation = {
+      required: true,
+      source: "Lead_de_oportunidad__c",
+      matched: eligibleCaseRecords.length,
+      excludedWithoutLeadOpportunity:
+        caseRecords.length - eligibleCaseRecords.length,
+    };
+  }
+
+  const usersMap = buildUsersMap(userRecords);
+  const data = eligibleCaseRecords.map((record) =>
+    mapOperationalFlowCase(
+      record,
+      usersMap.get(record.OwnerId) ?? DEFAULT_CASE_OWNER,
+    ),
+  );
+
+  logger.success(
+    `RideshareReportService → getDailyOperationalFlow() success | flowType=${flowType} total=${data.length}`,
+  );
+
+  return {
+    total: data.length,
+    flowType,
+    date: params.date,
+    type: params.type || "all",
+    basedOn: isInflow
+      ? {
+          rule: "Case created during the selected Salesforce day",
+          dateField: "CreatedDate",
+          filters: [
+            "CreatedDate inside selected day",
+            params.type ? "Type equals requested type" : "All case types",
+          ],
+        }
+      : {
+          rule: "Case sent during the selected Salesforce day",
+          dateField: "Sent_Date2__c",
+          filters: [
+            "Sent_Date2__c inside selected day",
+            params.type ? "Type equals requested type" : "All case types",
+            "CaseNumber exists in Lead_de_oportunidad__c with Lead__r.Substatus__c = Signed",
+          ],
+        },
+    leadOpportunityValidation,
+    data,
+  };
+}
+
+async function getDailyInflowReport(params) {
+  return getDailyOperationalFlow({ ...params, flowType: "inflow" });
+}
+
+async function getDailyOutflowReport(params) {
+  return getDailyOperationalFlow({ ...params, flowType: "outflow" });
+}
 
 function normalizeSFPhone(phone) {
   if (!phone) return null;
@@ -192,4 +357,6 @@ async function getRideshareReport(token) {
 
 module.exports = {
   getRideshareReport,
+  getDailyInflowReport,
+  getDailyOutflowReport,
 };

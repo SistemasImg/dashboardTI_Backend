@@ -25,6 +25,7 @@ const VendorWeeklyGoal = require("./vendorWeeklyGoal");
 const VendorCategoryLog = require("./vendorCategoryLog");
 const VendorTopReward = require("./vendorTopReward");
 const FinanceInvoice = require("./financeInvoice");
+const TimeToLeadSnapshot = require("./timeToLeadSnapshot");
 
 // ============================
 // ROLES ↔ USERS
@@ -257,4 +258,5 @@ module.exports = {
   VendorCategoryLog,
   VendorTopReward,
   FinanceInvoice,
+  TimeToLeadSnapshot,
 };

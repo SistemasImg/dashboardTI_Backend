@@ -74,15 +74,10 @@ exports.generateCasesExcel = async (cases) => {
     const worksheet = workbook.addWorksheet("Cases");
 
     const includeDisqualificationReasons = (cases || []).some((caseItem) => {
+      const currentCase = caseItem || {};
       return (
-        Object.prototype.hasOwnProperty.call(
-          caseItem || {},
-          "Reason_for_DQ__c",
-        ) ||
-        Object.prototype.hasOwnProperty.call(
-          caseItem || {},
-          "Reason_for_Doesn_t_meet_criteria__c",
-        )
+        Object.hasOwn(currentCase, "Reason_for_DQ__c") ||
+        Object.hasOwn(currentCase, "Reason_for_Doesn_t_meet_criteria__c")
       );
     });
 

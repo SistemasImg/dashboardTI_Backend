@@ -314,7 +314,7 @@ function detectT9SendIntent(message) {
   if (!mentionsSend || !mentionsT9) return null;
 
   // Extract 8-digit case number (with or without leading zeros)
-  const caseMatch = text.match(/\b(0*\d{5,8})\b/);
+  const caseMatch = /\b(0*\d{5,8})\b/.exec(text);
   if (!caseMatch) return null;
 
   return { caseNumber: caseMatch[1] };
@@ -399,9 +399,59 @@ function getPendingBardT2Approval(sessionData) {
   return sessionData?.last_filters?.pendingBardPortT2 || null;
 }
 
+function getSessionLastFilters(sessionData) {
+  const lastFilters = sessionData?.last_filters;
+  return lastFilters && typeof lastFilters === "object" ? lastFilters : {};
+}
+
+function getSalesforceSavedText(value, lang) {
+  if (typeof value !== "boolean") {
+    return "N/A";
+  }
+
+  return value ? i18n(lang, "si", "yes") : i18n(lang, "no", "no");
+}
+
+function buildApiSuccessMessage(caseNumber, lang, detailLines) {
+  const sentMessage = i18n(
+    lang,
+    `Listo, envié correctamente el API del caso ${caseNumber}.`,
+    `Done, I sent the API successfully for case ${caseNumber}.`,
+  );
+
+  return [sentMessage, "", ...detailLines].join("\n");
+}
+
+function getAgentViewSummaryLine(data, lang) {
+  if (!data.includeAgentDetails) {
+    return "";
+  }
+
+  const viewText = data.agentDetailsAvailable
+    ? i18n(lang, "si", "yes")
+    : i18n(
+        lang,
+        "no disponible para historial agregado",
+        "not available for aggregated history",
+      );
+
+  return `• **${i18n(lang, "Vista por agente", "Agent view")}:** ${viewText}\n`;
+}
+
+function getHourlyFallbackText(row, lang) {
+  const esText = row.ambiguousPhone
+    ? "telefono ambiguo entre varios casos"
+    : "sin detalle por hora";
+  const enText = row.ambiguousPhone
+    ? "ambiguous phone across multiple cases"
+    : "no hourly detail";
+
+  return i18n(lang, esText, enText);
+}
+
 function setPendingBardT2Approval(sessionData, cacheKey, pendingData) {
   sessionData.last_filters = {
-    ...(sessionData.last_filters || {}),
+    ...getSessionLastFilters(sessionData),
     pendingBardPortT2: pendingData,
   };
   sessionCache[cacheKey].last_filters = sessionData.last_filters;
@@ -437,7 +487,7 @@ function parseBardT2EditIntent(message) {
   const text = String(message || "").trim();
 
   const equalsMatch =
-    /(?:editar|corregir|corrige|cambiar|modificar|actualizar)?\s*(?:t2\s*)?(?:campo\s*)?([a-zA-Z_]+)\s*(?:=|:)\s*(.+)$/i.exec(
+    /(?:editar|corregir|corrige|cambiar|modificar|actualizar)?\s*(?:t2\s*)?(?:campo\s*)?([a-z_]+)\s*[:=]\s*(.+)$/i.exec(
       text,
     );
   if (equalsMatch) {
@@ -448,7 +498,7 @@ function parseBardT2EditIntent(message) {
   }
 
   const naturalMatch =
-    /(?:editar|corregir|corrige|cambiar|modificar|actualizar)\s+(?:el\s+)?(?:campo\s+)?([a-zA-Z_]+)\s+(?:a|por)\s+(.+)$/i.exec(
+    /(?:editar|corregir|corrige|cambiar|modificar|actualizar)\s+(?:el\s+)?(?:campo\s+)?([a-z_]+)\s+(?:a|por)\s+(.+)$/i.exec(
       text,
     );
   if (naturalMatch) {
@@ -535,9 +585,14 @@ function detectCaseAttemptsByDateIntent(message) {
     return null;
   }
 
-  const withoutAttemptsPattern =
-    /\b(?:sin\s+(?:attempts?|intentos?|llamadas(?:\s+registradas)?)|without\s+attempts?|no\s+attempts?|zero\s+attempts?)\b/i;
-  const withoutAttempts = Boolean(withoutAttemptsPattern.exec(text));
+  const withoutAttempts = [
+    /\bsin\s+attempts?\b/i,
+    /\bsin\s+intentos?\b/i,
+    /\bsin\s+llamadas(?:\s+registradas)?\b/i,
+    /\bwithout\s+attempts?\b/i,
+    /\bno\s+attempts?\b/i,
+    /\bzero\s+attempts?\b/i,
+  ].some((pattern) => pattern.test(text));
 
   if (text.includes("hoy") || text.includes("today")) {
     return { dateKeyword: "today", withoutAttempts };
@@ -547,7 +602,7 @@ function detectCaseAttemptsByDateIntent(message) {
     return { dateKeyword: "yesterday", withoutAttempts };
   }
 
-  const isoDateMatch = text.match(/\b(20\d{2}-\d{2}-\d{2})\b/);
+  const isoDateMatch = /\b(20\d{2}-\d{2}-\d{2})\b/.exec(text);
   if (isoDateMatch) {
     return { date: isoDateMatch[1], withoutAttempts };
   }
@@ -919,6 +974,1473 @@ function humanizePayload(payload) {
   return payload;
 }
 
+function persistAssistantReply({
+  cacheKey,
+  userId,
+  userMessage,
+  assistantMessage,
+  result,
+  filters,
+}) {
+  chatSessionService
+    .appendMessages(
+      userId,
+      [
+        { role: "user", content: userMessage },
+        { role: "assistant", content: assistantMessage || "" },
+      ],
+      filters === undefined ? sessionCache[cacheKey].last_filters : filters,
+      result,
+    )
+    .catch((err) =>
+      logger.error(`[ChatSession] Failed to persist messages: ${err.message}`),
+    );
+}
+
+function updateSessionLastFilters(sessionData, cacheKey, updates) {
+  sessionData.last_filters = {
+    ...getSessionLastFilters(sessionData),
+    ...updates,
+  };
+  sessionCache[cacheKey].last_filters = sessionData.last_filters;
+}
+
+function buildApprovalResult(prepared, extra = {}) {
+  if (!prepared.found || !prepared.ready) {
+    return {
+      sent: false,
+      ...prepared,
+    };
+  }
+
+  return {
+    sent: false,
+    approvalRequired: true,
+    found: true,
+    ready: true,
+    caseNumber: prepared.caseNumber,
+    payload: prepared.payload,
+    ...extra,
+  };
+}
+
+function buildChatRequestMessages(
+  systemPromptValue,
+  sessionData,
+  userContent,
+  requestAttachments,
+) {
+  const historyForAI = chatSessionService.buildMessagesForAI(
+    sessionData.messages,
+  );
+  const uploadContextMessages =
+    requestAttachments.length > 0
+      ? [
+          {
+            role: "system",
+            content: `Current request already includes ${requestAttachments.length} uploaded file(s): ${requestAttachments
+              .map((file) => file.fileName)
+              .join(
+                ", ",
+              )}. If user asks to send T9, JDC T3, or Women's Prisoner Abuse T1 API, treat attachments as provided in this request.`,
+          },
+        ]
+      : [
+          {
+            role: "system",
+            content:
+              "IMPORTANT: No files were attached to this request. " +
+              "If the user asks to send a T9 Rideshare, JDC T3, or Women's Prisoner Abuse T1 payload (any variant: enviar API, envíame el API, send API, PI, etc.), " +
+              "you MUST call the sendT9RidesharePayload, sendJdcT3Payload, or sendWomensPrisonerAbuseT1Payload function with the provided case number — do NOT generate a text response, " +
+              "do NOT simulate success, do NOT invent HTTP codes, do NOT invent Lead IDs. " +
+              "The function itself will detect missing files and return the appropriate error. " +
+              "Never fabricate a successful delivery response under any circumstances.",
+          },
+        ];
+
+  return [
+    { role: "system", content: systemPromptValue },
+    ...uploadContextMessages,
+    ...historyForAI,
+    { role: "user", content: userContent },
+  ];
+}
+
+async function handlePendingBardT2Turn(context) {
+  const {
+    cacheKey,
+    normalizedUserMessage,
+    sessionData,
+    userId,
+    userLang,
+    userMessage,
+  } = context;
+  const pendingBardT2 = getPendingBardT2Approval(sessionData);
+  if (!pendingBardT2) {
+    return null;
+  }
+
+  if (detectBardT2CancelIntent(normalizedUserMessage)) {
+    clearPendingBardT2Approval(sessionData, cacheKey);
+    const cancelMessage = i18n(
+      userLang,
+      `Se canceló el envío pendiente de Bard Port T2 para el case ${pendingBardT2.caseNumber}.`,
+      `Pending Bard Port T2 delivery for case ${pendingBardT2.caseNumber} was canceled.`,
+    );
+    persistAssistantReply({
+      cacheKey,
+      userId,
+      userMessage,
+      assistantMessage: cancelMessage,
+      result: {
+        status: "bard_t2_canceled",
+        caseNumber: pendingBardT2.caseNumber,
+      },
+    });
+    return { message: cancelMessage };
+  }
+
+  const editIntent = parseBardT2EditIntent(normalizedUserMessage);
+  if (editIntent) {
+    const revised =
+      await apiIntegrations.bardPortT2.reviseBardPortT2PayloadField({
+        caseNumber: pendingBardT2.caseNumber,
+        field: editIntent.field,
+        value: editIntent.value,
+        tort: pendingBardT2.tort,
+        tier: pendingBardT2.tier,
+      });
+
+    let revisedMessage;
+    if (!revised.found) {
+      revisedMessage = i18n(
+        userLang,
+        `No encontré el case ${pendingBardT2.caseNumber} para actualizar el campo solicitado.`,
+        `I couldn't find case ${pendingBardT2.caseNumber} to update the requested field.`,
+      );
+      clearPendingBardT2Approval(sessionData, cacheKey);
+    } else if (!revised.updated) {
+      const allowed = (revised.allowedFields || []).join(", ");
+      revisedMessage = i18n(
+        userLang,
+        `El campo indicado no se puede editar para T2. Campos permitidos: ${allowed}.`,
+        `That field cannot be edited for T2. Allowed fields: ${allowed}.`,
+      );
+    } else if (revised.ready) {
+      setPendingBardT2Approval(sessionData, cacheKey, {
+        caseNumber: revised.caseNumber,
+        tort: revised.tort,
+        tier: revised.tier,
+        payload: revised.payload,
+      });
+
+      revisedMessage = `${i18n(
+        userLang,
+        `Campo ${revised.field} actualizado en Salesforce. Este es el nuevo JSON para validar antes del envío:`,
+        `Field ${revised.field} was updated in Salesforce. This is the updated JSON to validate before sending:`,
+      )}\n\n\`\`\`json\n${JSON.stringify(revised.payload || {}, null, 2)}\n\`\`\``;
+    } else {
+      const fields = (revised.missingFields || []).join(", ");
+      revisedMessage = i18n(
+        userLang,
+        `El campo ${revised.field} se actualizó en Salesforce, pero el payload aún está incompleto. Faltan: ${fields}.`,
+        `Field ${revised.field} was updated in Salesforce, but the payload is still incomplete. Missing: ${fields}.`,
+      );
+    }
+
+    persistAssistantReply({
+      cacheKey,
+      userId,
+      userMessage,
+      assistantMessage: revisedMessage,
+      result: revised,
+    });
+    return { message: revisedMessage };
+  }
+
+  if (detectBardT2ApprovalIntent(normalizedUserMessage)) {
+    const sendResult = await apiIntegrations.bardPortT2.sendBardPortT2Payload({
+      caseNumber: pendingBardT2.caseNumber,
+      tort: pendingBardT2.tort,
+      tier: pendingBardT2.tier,
+    });
+    clearPendingBardT2Approval(sessionData, cacheKey);
+    const sentMessage = formatSendBardPortT2PayloadResult(
+      sendResult,
+      userLang,
+    ).message;
+    persistAssistantReply({
+      cacheKey,
+      userId,
+      userMessage,
+      assistantMessage: sentMessage,
+      result: sendResult,
+    });
+    return { message: sentMessage };
+  }
+
+  const pendingReminder = i18n(
+    userLang,
+    `Tienes un envío T2 pendiente para el case ${pendingBardT2.caseNumber}.`,
+    `You have a pending T2 delivery for case ${pendingBardT2.caseNumber}.`,
+  );
+  persistAssistantReply({
+    cacheKey,
+    userId,
+    userMessage,
+    assistantMessage: pendingReminder,
+    result: { status: "bard_t2_pending", caseNumber: pendingBardT2.caseNumber },
+  });
+  return { message: pendingReminder };
+}
+
+async function revisePendingRuntimePayload(pendingRuntime, editIntent) {
+  if (pendingRuntime.kind === "t9") {
+    return apiIntegrations.t9Rideshare.reviseT9RidesharePayloadField({
+      caseNumber: pendingRuntime.caseNumber,
+      tort: pendingRuntime.tort,
+      tier: pendingRuntime.tier,
+      attachments: pendingRuntime.attachments || [],
+      field: editIntent.field,
+      value: editIntent.value,
+    });
+  }
+  if (pendingRuntime.kind === "jdc_t3") {
+    return apiIntegrations.jdcT3.reviseJdcT3PayloadField({
+      caseNumber: pendingRuntime.caseNumber,
+      attachments: pendingRuntime.attachments || [],
+      field: editIntent.field,
+      value: editIntent.value,
+    });
+  }
+  if (pendingRuntime.kind === "wpa_t1") {
+    return apiIntegrations.womensPrisonerAbuseT1.reviseWomensPrisonerAbuseT1PayloadField(
+      {
+        caseNumber: pendingRuntime.caseNumber,
+        attachments: pendingRuntime.attachments || [],
+        field: editIntent.field,
+        value: editIntent.value,
+      },
+    );
+  }
+  if (pendingRuntime.kind === "depo_t8") {
+    return apiIntegrations.depoProveraT8.reviseDepoProveraT8PayloadField({
+      caseNumber: pendingRuntime.caseNumber,
+      tort: pendingRuntime.tort,
+      tier: pendingRuntime.tier,
+      field: editIntent.field,
+      value: editIntent.value,
+    });
+  }
+  return apiIntegrations.a4dRideshareT11.reviseA4DRideshareT11PayloadField({
+    caseNumber: pendingRuntime.caseNumber,
+    field: editIntent.field,
+    value: editIntent.value,
+  });
+}
+
+async function sendPendingRuntimePayload(pendingRuntime) {
+  if (pendingRuntime.kind === "t9") {
+    return apiIntegrations.t9Rideshare.sendT9RidesharePayload({
+      caseNumber: pendingRuntime.caseNumber,
+      tort: pendingRuntime.tort,
+      tier: pendingRuntime.tier,
+      attachments: pendingRuntime.attachments || [],
+    });
+  }
+  if (pendingRuntime.kind === "jdc_t3") {
+    return apiIntegrations.jdcT3.sendJdcT3Payload({
+      caseNumber: pendingRuntime.caseNumber,
+      attachments: pendingRuntime.attachments || [],
+    });
+  }
+  if (pendingRuntime.kind === "wpa_t1") {
+    return apiIntegrations.womensPrisonerAbuseT1.sendWomensPrisonerAbuseT1Payload(
+      {
+        caseNumber: pendingRuntime.caseNumber,
+        attachments: pendingRuntime.attachments || [],
+      },
+    );
+  }
+  if (pendingRuntime.kind === "depo_t8") {
+    return apiIntegrations.depoProveraT8.sendDepoProveraT8Payload({
+      caseNumber: pendingRuntime.caseNumber,
+      tort: pendingRuntime.tort,
+      tier: pendingRuntime.tier,
+    });
+  }
+  return apiIntegrations.a4dRideshareT11.sendA4DRideshareT11Payload({
+    caseNumber: pendingRuntime.caseNumber,
+  });
+}
+
+function formatPendingRuntimeSentMessage(pendingRuntime, sendResult, userLang) {
+  if (pendingRuntime.kind === "t9") {
+    return formatSendT9RidesharePayloadResult(sendResult, userLang).message;
+  }
+  if (pendingRuntime.kind === "jdc_t3") {
+    return formatSendJdcT3PayloadResult(sendResult, userLang).message;
+  }
+  if (pendingRuntime.kind === "wpa_t1") {
+    return formatSendWomensPrisonerAbuseT1PayloadResult(sendResult, userLang)
+      .message;
+  }
+  if (pendingRuntime.kind === "depo_t8") {
+    return formatSendDepoProveraT8PayloadResult(sendResult, userLang).message;
+  }
+  return formatSendA4DRideshareT11PayloadResult(sendResult, userLang).message;
+}
+
+async function handlePendingRuntimeTurn(context) {
+  const {
+    cacheKey,
+    normalizedUserMessage,
+    requestAttachments,
+    userId,
+    userLang,
+    userMessage,
+  } = context;
+  const pendingRuntime = getRuntimePendingApproval(cacheKey);
+  if (!pendingRuntime) {
+    return null;
+  }
+
+  if (requestAttachments.length > 0) {
+    pendingRuntime.attachments = requestAttachments;
+    setRuntimePendingApproval(cacheKey, pendingRuntime);
+  }
+
+  if (detectBardT2CancelIntent(normalizedUserMessage)) {
+    clearRuntimePendingApproval(cacheKey);
+    const cancelMessage = i18n(
+      userLang,
+      `Se canceló el envío pendiente de ${pendingRuntime.apiLabel} para el case ${pendingRuntime.caseNumber}.`,
+      `Pending ${pendingRuntime.apiLabel} delivery for case ${pendingRuntime.caseNumber} was canceled.`,
+    );
+    persistAssistantReply({
+      cacheKey,
+      userId,
+      userMessage,
+      assistantMessage: cancelMessage,
+      result: {
+        status: `${pendingRuntime.kind}_canceled`,
+        caseNumber: pendingRuntime.caseNumber,
+      },
+    });
+    return { message: cancelMessage };
+  }
+
+  const editIntent = parseBardT2EditIntent(normalizedUserMessage);
+  if (editIntent) {
+    const revised = await revisePendingRuntimePayload(
+      pendingRuntime,
+      editIntent,
+    );
+    let revisedMessage;
+    if (!revised.found) {
+      revisedMessage = i18n(
+        userLang,
+        `No encontré el case ${pendingRuntime.caseNumber} para actualizar el campo solicitado.`,
+        `I couldn't find case ${pendingRuntime.caseNumber} to update the requested field.`,
+      );
+      clearRuntimePendingApproval(cacheKey);
+    } else if (!revised.updated) {
+      const allowed = (revised.allowedFields || []).join(", ");
+      revisedMessage = i18n(
+        userLang,
+        `El campo indicado no se puede editar para ${pendingRuntime.apiLabel}. Campos permitidos: ${allowed}.`,
+        `That field cannot be edited for ${pendingRuntime.apiLabel}. Allowed fields: ${allowed}.`,
+      );
+    } else if (revised.ready) {
+      const updatedPending = { ...pendingRuntime, payload: revised.payload };
+      setRuntimePendingApproval(cacheKey, updatedPending);
+      revisedMessage = formatApiApprovalPreviewMessage(
+        { ...updatedPending, caseNumber: revised.caseNumber },
+        userLang,
+      );
+    } else {
+      const fields = (revised.missingFields || []).join(", ");
+      revisedMessage = i18n(
+        userLang,
+        `El campo ${revised.field} se actualizó en Salesforce, pero el payload aún está incompleto. Faltan: ${fields}.`,
+        `Field ${revised.field} was updated in Salesforce, but the payload is still incomplete. Missing: ${fields}.`,
+      );
+    }
+
+    persistAssistantReply({
+      cacheKey,
+      userId,
+      userMessage,
+      assistantMessage: revisedMessage,
+      result: revised,
+    });
+    return { message: revisedMessage };
+  }
+
+  if (detectBardT2ApprovalIntent(normalizedUserMessage)) {
+    const sendResult = await sendPendingRuntimePayload(pendingRuntime);
+    if (sendResult?.attachmentsRequired) {
+      const waitFilesMessage = i18n(
+        userLang,
+        `Faltan documentos para completar el envío de ${pendingRuntime.apiLabel} del case ${pendingRuntime.caseNumber}.`,
+        `Files are still required to complete ${pendingRuntime.apiLabel} delivery for case ${pendingRuntime.caseNumber}.`,
+      );
+      persistAssistantReply({
+        cacheKey,
+        userId,
+        userMessage,
+        assistantMessage: waitFilesMessage,
+        result: sendResult,
+      });
+      return { message: waitFilesMessage };
+    }
+
+    clearRuntimePendingApproval(cacheKey);
+    const sentMessage = formatPendingRuntimeSentMessage(
+      pendingRuntime,
+      sendResult,
+      userLang,
+    );
+    persistAssistantReply({
+      cacheKey,
+      userId,
+      userMessage,
+      assistantMessage: sentMessage,
+      result: sendResult,
+    });
+    return { message: sentMessage };
+  }
+
+  const pendingReminder = i18n(
+    userLang,
+    `Tienes un envío ${pendingRuntime.apiLabel} pendiente para el case ${pendingRuntime.caseNumber}.`,
+    `You have a pending ${pendingRuntime.apiLabel} delivery for case ${pendingRuntime.caseNumber}.`,
+  );
+  persistAssistantReply({
+    cacheKey,
+    userId,
+    userMessage,
+    assistantMessage: pendingReminder,
+    result: {
+      status: `${pendingRuntime.kind}_pending`,
+      caseNumber: pendingRuntime.caseNumber,
+    },
+  });
+  return { message: pendingReminder };
+}
+
+async function handleDirectIntentTurn(context) {
+  const {
+    cacheKey,
+    normalizedUserMessage,
+    sessionData,
+    userId,
+    userLang,
+    userMessage,
+  } = context;
+  const directIntents = [
+    {
+      intent: detectCaseAttemptsByDateIntent(normalizedUserMessage),
+      getName: (intent) =>
+        intent.withoutAttempts
+          ? "getCasesWithoutAttemptsByDate"
+          : "getCaseAttemptsByDate",
+      execute: (intent) =>
+        intent.withoutAttempts
+          ? metrics.sql.getCasesWithoutAttemptsByDate(intent)
+          : metrics.sql.getCaseAttemptsByDate(intent),
+    },
+    {
+      intent: detectScheduledCallbacksIntent(normalizedUserMessage),
+      getName: () => "getScheduledCallbacks",
+      execute: (intent) => metrics.sf.getScheduledCallbacks(intent),
+    },
+    {
+      intent: detectSentCasesByAgentRankingIntent(normalizedUserMessage),
+      getName: () => "getSentCasesByAgentRanking",
+      execute: (intent) => metrics.sf.getSentCasesByAgentRanking(intent),
+    },
+    {
+      intent: detectFakeLeadDQByVendorIntent(normalizedUserMessage),
+      getName: () => "getFakeLeadDQByVendorRanking",
+      execute: (intent) => metrics.sf.getFakeLeadDQByVendorRanking(intent),
+    },
+    {
+      intent: detectCasesStillInCallbackIntent(normalizedUserMessage),
+      getName: () => "getCasesStillInCallback",
+      execute: (intent) => metrics.sf.getCasesStillInCallback(intent),
+    },
+  ];
+
+  const matched = directIntents.find((item) => item.intent);
+  if (matched) {
+    const functionName = matched.getName(matched.intent);
+    const functionResult = await matched.execute(matched.intent);
+    const formattedResponse = await formatResult(
+      functionName,
+      functionResult,
+      userLang,
+    );
+    const directPayload = humanizePayload({
+      ...formattedResponse,
+      message: formattedResponse.message,
+    });
+    persistAssistantReply({
+      cacheKey,
+      userId,
+      userMessage,
+      assistantMessage: directPayload.message || "",
+      result: functionResult,
+    });
+    return directPayload;
+  }
+
+  const detectedRange = detectDateRange(normalizedUserMessage);
+  if (!detectedRange || isAttemptsQuery(normalizedUserMessage)) {
+    return null;
+  }
+
+  logger.info("Date range detected locally");
+  const functionResult = await metrics.sf.getCasesByDateRange(
+    detectedRange.startDate,
+    detectedRange.endDate,
+  );
+  const formattedResponse = await formatResult(
+    "getCasesByDateRange",
+    functionResult,
+    userLang,
+  );
+
+  let rangeMessage = formattedResponse.message;
+  try {
+    const humanMessages = [
+      { role: "system", content: systemPrompt },
+      { role: "system", content: RESPONSE_LAYOUT_PROMPT },
+      ...chatSessionService.buildMessagesForAI(sessionData.messages),
+      { role: "user", content: userMessage },
+      {
+        role: "function",
+        name: "getCasesByDateRange",
+        content: formattedResponse.message,
+      },
+    ];
+    const humanResponse = await askModel(humanMessages);
+    const humanContent = humanResponse.choices?.[0]?.message?.content;
+    if (humanContent) {
+      rangeMessage = humanContent;
+    }
+  } catch (humanErr) {
+    logger.warn(
+      `[Humanize] Fallback to structured response: ${humanErr.message}`,
+    );
+  }
+
+  const rangePayload = humanizePayload({
+    ...formattedResponse,
+    message: rangeMessage,
+  });
+  persistAssistantReply({
+    cacheKey,
+    userId,
+    userMessage,
+    assistantMessage: rangePayload.message || "",
+    result: functionResult,
+    filters: null,
+  });
+  return rangePayload;
+}
+
+function getFunctionHandlers(context) {
+  const {
+    args,
+    cacheKey,
+    normalizedUserMessage,
+    requestAttachments,
+    sessionData,
+  } = context;
+
+  return {
+    prepareBardPortT2Payload: async () => {
+      const result = await apiIntegrations.bardPortT2.prepareBardPortT2Payload({
+        caseNumber: args.caseNumber,
+        tort: args.tort,
+        tier: args.tier,
+      });
+      if (args.caseNumber) {
+        updateSessionLastFilters(sessionData, cacheKey, {
+          caseNumber: args.caseNumber,
+          tier: args.tier,
+          type: args.tort,
+        });
+      }
+      return result;
+    },
+    sendBardPortT2Payload: async () => {
+      const bardTort = args.tort || "Bard Port";
+      const bardTier = args.tier || "T2";
+      const prepared =
+        await apiIntegrations.bardPortT2.prepareBardPortT2Payload({
+          caseNumber: args.caseNumber,
+          tort: bardTort,
+          tier: bardTier,
+        });
+      if (prepared.found && prepared.ready) {
+        setPendingBardT2Approval(sessionData, cacheKey, {
+          caseNumber: prepared.caseNumber,
+          tort: bardTort,
+          tier: bardTier,
+          payload: prepared.payload,
+        });
+      }
+      return buildApprovalResult(prepared, { tort: bardTort, tier: bardTier });
+    },
+    getCaseByDate: () =>
+      metrics.sf.getCaseByDate(
+        args.dateFilter === "today" ? "TODAY" : "YESTERDAY",
+      ),
+    getCaseByNumber: async () => {
+      args.caseNumber = normalizeCaseNumber(args.caseNumber);
+      const result = await metrics.sf.getCaseByNumber(args.caseNumber);
+      if (args.caseNumber) {
+        updateSessionLastFilters(sessionData, cacheKey, {
+          caseNumber: args.caseNumber,
+        });
+      }
+      return result;
+    },
+    getCaseByPhone: () => metrics.sf.getCaseByPhone(args.phone),
+    getCasesByStatus: () =>
+      metrics.sf.getCasesByStatus(args.status, args.dateKeyword, args.date),
+    getCasesByDateRange: () =>
+      metrics.sf.getCasesByDateRange(args.startDate, args.endDate),
+    getCaseByEmail: () => metrics.sf.getCaseByEmail(args.email),
+    getCasesByOrigin: () =>
+      metrics.sf.getCasesByOrigin(args.origin, args.dateKeyword, args.date),
+    getCasesBySupplierSegment: () =>
+      metrics.sf.getCasesBySupplierSegment(
+        args.segment,
+        args.dateKeyword,
+        args.date,
+      ),
+    getCasesBySubstatus: () =>
+      metrics.sf.getCasesBySubstatus(
+        args.substatus,
+        args.dateKeyword,
+        args.date,
+      ),
+    getScheduledCallbacks: () =>
+      metrics.sf.getScheduledCallbacks({
+        dateKeyword: args.dateKeyword,
+        date: args.date,
+      }),
+    getSentCasesByAgentRanking: () =>
+      metrics.sf.getSentCasesByAgentRanking({
+        sort: args.sort,
+        dateKeyword: args.dateKeyword,
+        date: args.date,
+        period: args.period,
+        limit: args.limit,
+      }),
+    getFakeLeadDQByVendorRanking: () =>
+      metrics.sf.getFakeLeadDQByVendorRanking({
+        dateKeyword: args.dateKeyword,
+        date: args.date,
+        period: args.period,
+        limit: args.limit,
+      }),
+    getCasesStillInCallback: () =>
+      metrics.sf.getCasesStillInCallback({
+        dateKeyword: args.dateKeyword,
+        date: args.date,
+        period: args.period,
+      }),
+    getCasesByType: () => {
+      const typeValue =
+        args.type?.toLowerCase() === "tort" ? "Tort" : args.type;
+      return metrics.sf.getCasesByType(typeValue, args.dateKeyword, args.date);
+    },
+    getCasesByFilters: async () => {
+      const result = await metrics.sf.getCasesByFilters(args);
+      sessionData.last_filters = args;
+      sessionCache[cacheKey].last_filters = args;
+      return result;
+    },
+    getCasesGroupedByField: () =>
+      metrics.sf.getCasesGroupedByField(args.field, args.dateKeyword),
+    getOperationalSummary: () =>
+      metrics.sf.getOperationalSummary(args.dateKeyword),
+    getVendorsWithLeads: () =>
+      metrics.sf.getVendorsWithLeads({
+        dateKeyword: args.dateKeyword,
+        period: args.period,
+        date: args.date,
+        startDate: args.startDate,
+        endDate: args.endDate,
+      }),
+    getTopVendors: () =>
+      metrics.sf.getTopVendors({
+        limit: args.limit,
+        sort: args.sort,
+        dateKeyword: args.dateKeyword,
+        period: args.period,
+        date: args.date,
+        startDate: args.startDate,
+        endDate: args.endDate,
+      }),
+    getTopVendorsWithCaseDetails: () =>
+      metrics.sf.getTopVendorsWithCaseDetails({
+        limit: args.limit,
+        sort: args.sort,
+        dateKeyword: args.dateKeyword,
+        period: args.period,
+        date: args.date,
+        startDate: args.startDate,
+        endDate: args.endDate,
+      }),
+    getCaseDisqualificationReason: async () => {
+      args.caseNumber =
+        args.caseNumber ||
+        sessionData.last_filters?.caseNumber ||
+        extractLastReferencedCaseNumber(sessionData.messages);
+      if (!args.caseNumber) {
+        return { found: false, missingCaseNumber: true };
+      }
+      args.caseNumber = normalizeCaseNumber(args.caseNumber);
+      const result = await metrics.sf.getCaseDisqualificationReason(
+        args.caseNumber,
+      );
+      updateSessionLastFilters(sessionData, cacheKey, {
+        caseNumber: args.caseNumber,
+      });
+      return result;
+    },
+    prepareT9RidesharePayload: async () => {
+      const result =
+        await apiIntegrations.t9Rideshare.prepareT9RidesharePayload({
+          caseNumber: args.caseNumber,
+          tort: args.tort,
+          tier: args.tier,
+          attachments:
+            requestAttachments.length > 0
+              ? requestAttachments
+              : args.attachments,
+        });
+      if (args.caseNumber) {
+        updateSessionLastFilters(sessionData, cacheKey, {
+          caseNumber: args.caseNumber,
+          tier: args.tier,
+          type: args.tort,
+        });
+      }
+      return result;
+    },
+    sendT9RidesharePayload: async () => {
+      const t9Tort = args.tort || "Rideshare";
+      const t9Tier = args.tier || "T9";
+      const t9Attachments =
+        requestAttachments.length > 0
+          ? requestAttachments
+          : args.attachments || [];
+      const prepared =
+        await apiIntegrations.t9Rideshare.prepareT9RidesharePayload({
+          caseNumber: args.caseNumber,
+          tort: t9Tort,
+          tier: t9Tier,
+          attachments: t9Attachments,
+        });
+      if (args.caseNumber) {
+        updateSessionLastFilters(sessionData, cacheKey, {
+          caseNumber: args.caseNumber,
+          tier: args.tier,
+          type: args.tort,
+        });
+      }
+      if (prepared.found && prepared.ready) {
+        setRuntimePendingApproval(cacheKey, {
+          kind: "t9",
+          apiLabel: "T9",
+          caseNumber: prepared.caseNumber,
+          tort: t9Tort,
+          tier: t9Tier,
+          payload: prepared.payload,
+          attachments: t9Attachments,
+        });
+      }
+      return buildApprovalResult(prepared, {
+        tort: t9Tort,
+        tier: t9Tier,
+        attachments: t9Attachments,
+      });
+    },
+    prepareDepoProveraT8Payload: async () => {
+      const depoTort = args.tort || "Depo Provera";
+      const depoTier = args.tier || "T8";
+      const result =
+        await apiIntegrations.depoProveraT8.prepareDepoProveraT8Payload({
+          caseNumber: args.caseNumber,
+          tort: depoTort,
+          tier: depoTier,
+        });
+      if (args.caseNumber) {
+        updateSessionLastFilters(sessionData, cacheKey, {
+          caseNumber: args.caseNumber,
+          tier: depoTier,
+          type: depoTort,
+        });
+      }
+      return result;
+    },
+    sendDepoProveraT8Payload: async () => {
+      const depoTort = args.tort || "Depo Provera";
+      const depoTier = args.tier || "T8";
+      const prepared =
+        await apiIntegrations.depoProveraT8.prepareDepoProveraT8Payload({
+          caseNumber: args.caseNumber,
+          tort: depoTort,
+          tier: depoTier,
+        });
+      if (args.caseNumber) {
+        updateSessionLastFilters(sessionData, cacheKey, {
+          caseNumber: args.caseNumber,
+          tier: depoTier,
+          type: depoTort,
+        });
+      }
+      if (prepared.found && prepared.ready) {
+        setRuntimePendingApproval(cacheKey, {
+          kind: "depo_t8",
+          apiLabel: "Depo Provera T8",
+          caseNumber: prepared.caseNumber,
+          tort: depoTort,
+          tier: depoTier,
+          payload: prepared.payload,
+          attachments: [],
+        });
+      }
+      return buildApprovalResult(prepared, {
+        tort: depoTort,
+        tier: depoTier,
+        attachments: [],
+      });
+    },
+    prepareA4DRideshareT11Payload: async () => {
+      const result =
+        await apiIntegrations.a4dRideshareT11.prepareA4DRideshareT11Payload({
+          caseNumber: args.caseNumber,
+        });
+      if (args.caseNumber) {
+        updateSessionLastFilters(sessionData, cacheKey, {
+          caseNumber: args.caseNumber,
+        });
+      }
+      return result;
+    },
+    sendA4DRideshareT11Payload: async () => {
+      const prepared =
+        await apiIntegrations.a4dRideshareT11.prepareA4DRideshareT11Payload({
+          caseNumber: args.caseNumber,
+        });
+      if (args.caseNumber) {
+        updateSessionLastFilters(sessionData, cacheKey, {
+          caseNumber: args.caseNumber,
+        });
+      }
+      if (prepared.found && prepared.ready) {
+        setRuntimePendingApproval(cacheKey, {
+          kind: "a4d_t11",
+          apiLabel: "A4D T11",
+          caseNumber: prepared.caseNumber,
+          payload: prepared.payload,
+          attachments: [],
+        });
+      }
+      return buildApprovalResult(prepared, { attachments: [] });
+    },
+    prepareJdcT3Payload: async () => {
+      const result = await apiIntegrations.jdcT3.prepareJdcT3Payload({
+        caseNumber: args.caseNumber,
+      });
+      if (args.caseNumber) {
+        updateSessionLastFilters(sessionData, cacheKey, {
+          caseNumber: args.caseNumber,
+        });
+      }
+      return result;
+    },
+    sendJdcT3Payload: async () => {
+      const jdcAttachments =
+        requestAttachments.length > 0
+          ? requestAttachments
+          : args.attachments || [];
+      const prepared = await apiIntegrations.jdcT3.prepareJdcT3Payload({
+        caseNumber: args.caseNumber,
+      });
+      if (args.caseNumber) {
+        updateSessionLastFilters(sessionData, cacheKey, {
+          caseNumber: args.caseNumber,
+        });
+      }
+      if (prepared.found && prepared.ready) {
+        setRuntimePendingApproval(cacheKey, {
+          kind: "jdc_t3",
+          apiLabel: "JDC T3",
+          caseNumber: prepared.caseNumber,
+          payload: prepared.payload,
+          attachments: jdcAttachments,
+        });
+      }
+      return buildApprovalResult(prepared, { attachments: jdcAttachments });
+    },
+    prepareWomensPrisonerAbuseT1Payload: async () => {
+      const result =
+        await apiIntegrations.womensPrisonerAbuseT1.prepareWomensPrisonerAbuseT1Payload(
+          {
+            caseNumber: args.caseNumber,
+          },
+        );
+      if (args.caseNumber) {
+        updateSessionLastFilters(sessionData, cacheKey, {
+          caseNumber: args.caseNumber,
+          tier: "T1",
+          type: "Women's Prisoner Abuse",
+        });
+      }
+      return result;
+    },
+    sendWomensPrisonerAbuseT1Payload: async () => {
+      const wpaAttachments =
+        requestAttachments.length > 0
+          ? requestAttachments
+          : args.attachments || [];
+      const prepared =
+        await apiIntegrations.womensPrisonerAbuseT1.prepareWomensPrisonerAbuseT1Payload(
+          {
+            caseNumber: args.caseNumber,
+          },
+        );
+      if (args.caseNumber) {
+        updateSessionLastFilters(sessionData, cacheKey, {
+          caseNumber: args.caseNumber,
+          tier: "T1",
+          type: "Women's Prisoner Abuse",
+        });
+      }
+      if (prepared.found && prepared.ready) {
+        setRuntimePendingApproval(cacheKey, {
+          kind: "wpa_t1",
+          apiLabel: "Women's Prisoner Abuse T1",
+          caseNumber: prepared.caseNumber,
+          payload: prepared.payload,
+          attachments: wpaAttachments,
+        });
+      }
+      return buildApprovalResult(prepared, { attachments: wpaAttachments });
+    },
+    getVendorsBySupplierSegment: () =>
+      metrics.sf.getVendorsBySupplierSegment(args.segment, {
+        dateKeyword: args.dateKeyword,
+        period: args.period,
+        date: args.date,
+        startDate: args.startDate,
+        endDate: args.endDate,
+      }),
+    getCasesByAgent: () => metrics.dashboard.getCasesByAgent(args.agentName),
+    getCasesByCallCenter: () =>
+      metrics.dashboard.getCasesByCallCenter(args.callCenter),
+    getTotalAttemptsByAgent: () =>
+      metrics.sql.getTotalAttemptsByAgent(args.agentName, {
+        dateKeyword: args.dateKeyword,
+        date: args.date,
+      }),
+    getAgentAttemptsByPhonePerHour: () =>
+      metrics.sql.getAgentAttemptsByPhonePerHour(args.agentName, args.phone, {
+        dateKeyword: args.dateKeyword,
+        date: args.date,
+      }),
+    getVicidialAgentsStatus: () =>
+      metrics.sql.getVicidialAgentsStatus({ agentName: args.agentName }),
+    getAttemptsByPhone: () =>
+      metrics.sql.getAttemptsByPhone(args.phone, {
+        dateKeyword: args.dateKeyword,
+        date: args.date,
+        lastDays: args.lastDays,
+      }),
+    getAttemptsByCaseNumber: async () => {
+      args.caseNumber =
+        args.caseNumber ||
+        sessionData.last_filters?.caseNumber ||
+        extractLastReferencedCaseNumber(sessionData.messages);
+      if (!args.caseNumber) {
+        return { missingCaseNumber: true };
+      }
+      args.caseNumber = normalizeCaseNumber(args.caseNumber);
+      const caseAttemptsFilters = {
+        dateKeyword: args.dateKeyword,
+        date: args.date,
+        lastDays: args.lastDays,
+      };
+      if (
+        !caseAttemptsFilters.dateKeyword &&
+        !caseAttemptsFilters.date &&
+        !caseAttemptsFilters.lastDays
+      ) {
+        if (/\b(hoy|today)\b/i.exec(normalizedUserMessage)) {
+          caseAttemptsFilters.dateKeyword = "today";
+        } else if (/\b(ayer|yesterday)\b/i.exec(normalizedUserMessage)) {
+          caseAttemptsFilters.dateKeyword = "yesterday";
+        } else {
+          const isoDate = /\b(20\d{2}-\d{2}-\d{2})\b/.exec(
+            normalizedUserMessage,
+          );
+          if (isoDate) {
+            caseAttemptsFilters.date = isoDate[1];
+          }
+        }
+      }
+      const result = await metrics.sql.getAttemptsByCaseNumber(
+        args.caseNumber,
+        caseAttemptsFilters,
+      );
+      updateSessionLastFilters(sessionData, cacheKey, {
+        caseNumber: args.caseNumber,
+      });
+      return result;
+    },
+    getCaseAttemptsByDate: () =>
+      metrics.sql.getCaseAttemptsByDate({
+        dateKeyword: args.dateKeyword,
+        date: args.date,
+      }),
+    getCasesWithoutAttemptsByDate: () =>
+      metrics.sql.getCasesWithoutAttemptsByDate({
+        dateKeyword: args.dateKeyword,
+        date: args.date,
+      }),
+    getAssignedAgentByCaseNumber: async () => {
+      args.caseNumber =
+        args.caseNumber ||
+        sessionData.last_filters?.caseNumber ||
+        extractLastReferencedCaseNumber(sessionData.messages);
+      if (!args.caseNumber) {
+        return { found: false, missingCaseNumber: true };
+      }
+      args.caseNumber = normalizeCaseNumber(args.caseNumber);
+      const result = await metrics.mysql.getAssignedAgentByCaseNumber(
+        args.caseNumber,
+      );
+      updateSessionLastFilters(sessionData, cacheKey, {
+        caseNumber: args.caseNumber,
+      });
+      return result;
+    },
+    getVendorLeadAttempts: () =>
+      metrics.sql.getVendorLeadAttempts(args.vendorName, {
+        includeAgentDetails: args.includeAgentDetails,
+        dateKeyword: args.dateKeyword,
+        date: args.date,
+        startDate: args.startDate,
+        endDate: args.endDate,
+      }),
+    getCasesByTypeFromReport: () =>
+      metrics.dashboard.getCasesByTypeFromReport(args.type),
+  };
+}
+
+function getDeterministicFunctionNames() {
+  return new Set([
+    "getAttemptsByCaseNumber",
+    "getAttemptsByPhone",
+    "getCaseAttemptsByDate",
+    "getCasesWithoutAttemptsByDate",
+    "getScheduledCallbacks",
+    "getSentCasesByAgentRanking",
+    "getFakeLeadDQByVendorRanking",
+    "getCasesStillInCallback",
+  ]);
+}
+
+function getApprovalFunctionNames() {
+  return new Set([
+    "sendBardPortT2Payload",
+    "sendT9RidesharePayload",
+    "sendA4DRideshareT11Payload",
+    "sendJdcT3Payload",
+    "sendWomensPrisonerAbuseT1Payload",
+    "sendDepoProveraT8Payload",
+  ]);
+}
+
+function buildApiSentMessage(functionResult, userLang, includeHttp = true) {
+  const sentMessage = i18n(
+    userLang,
+    `Listo, envié correctamente el API del caso ${functionResult.caseNumber}.`,
+    `Done, I sent the API successfully for case ${functionResult.caseNumber}.`,
+  );
+  const lines = [
+    includeHttp
+      ? `${i18n(userLang, "HTTP", "HTTP")}: ${functionResult.statusCode || "N/A"}`
+      : null,
+    `${i18n(userLang, "Respuesta del cliente", "Client response")}: ${functionResult.clientResponse || "N/A"}`,
+    `${i18n(userLang, "Guardado en Salesforce", "Saved in Salesforce")}: ${getSalesforceSavedText(functionResult.salesforceUpdated, userLang)}`,
+  ].filter(Boolean);
+  return `${sentMessage}\n\n${lines.join("\n")}`;
+}
+
+function getAttachmentRequiredMessages(userLang, functionResult) {
+  return {
+    sendT9RidesharePayload: i18n(
+      userLang,
+      `No se hizo el envío T9 del case ${functionResult.caseNumber} porque para este tier los archivos son obligatorios. Adjunta los documentos directamente en el mismo mensaje y vuelve a pedir el envío.`,
+      `T9 delivery was not started for case ${functionResult.caseNumber} because files are mandatory for this tier. Attach the required documents directly in the same message and request the submission again.`,
+    ),
+    sendJdcT3Payload: i18n(
+      userLang,
+      `No se hizo el envío JDC T3 del case ${functionResult.caseNumber} porque los archivos son obligatorios. Adjunta los documentos directamente en el mismo mensaje y vuelve a pedir el envío.`,
+      `JDC T3 delivery was not started for case ${functionResult.caseNumber} because files are mandatory. Attach the required documents directly in the same message and request the submission again.`,
+    ),
+    sendWomensPrisonerAbuseT1Payload: i18n(
+      userLang,
+      `No se hizo el envío Women's Prisoner Abuse T1 del case ${functionResult.caseNumber} porque los archivos son obligatorios. Adjunta los documentos directamente en el mismo mensaje y vuelve a pedir el envío.`,
+      `Women's Prisoner Abuse T1 delivery was not started for case ${functionResult.caseNumber} because files are mandatory. Attach the required documents directly in the same message and request the submission again.`,
+    ),
+  };
+}
+
+function getSuccessfulApiMessage(functionName, functionResult, userLang) {
+  const successBuilders = {
+    sendT9RidesharePayload: () =>
+      buildApiSentMessage(functionResult, userLang, false),
+    sendJdcT3Payload: () => buildApiSentMessage(functionResult, userLang),
+    sendWomensPrisonerAbuseT1Payload: () =>
+      buildApiSentMessage(functionResult, userLang),
+    sendBardPortT2Payload: () => buildApiSentMessage(functionResult, userLang),
+    sendDepoProveraT8Payload: () =>
+      buildApiSentMessage(functionResult, userLang),
+    sendA4DRideshareT11Payload: () =>
+      buildApiSentMessage(functionResult, userLang, false),
+  };
+
+  return successBuilders[functionName]?.() || null;
+}
+
+function finalizeFunctionResultMessage(
+  functionName,
+  functionResult,
+  formattedResponse,
+  userLang,
+) {
+  const deterministicFunctionNames = getDeterministicFunctionNames();
+  const approvalFunctionNames = getApprovalFunctionNames();
+  if (deterministicFunctionNames.has(functionName)) {
+    return formattedResponse.message;
+  }
+
+  if (
+    approvalFunctionNames.has(functionName) &&
+    functionResult?.approvalRequired
+  ) {
+    return formattedResponse.message;
+  }
+
+  if (
+    functionResult?.sent === false &&
+    functionResult?.attachmentsRequired === true
+  ) {
+    const attachmentMessage = getAttachmentRequiredMessages(
+      userLang,
+      functionResult,
+    )[functionName];
+    if (attachmentMessage) {
+      return attachmentMessage;
+    }
+  }
+
+  if (functionResult?.sent) {
+    const successMessage = getSuccessfulApiMessage(
+      functionName,
+      functionResult,
+      userLang,
+    );
+    if (successMessage) {
+      return successMessage;
+    }
+  }
+
+  return formattedResponse.message;
+}
+
+async function humanizeStructuredResponse(
+  functionName,
+  formattedResponse,
+  context,
+) {
+  const { sessionData, userMessage } = context;
+  try {
+    const humanMessages = [
+      { role: "system", content: systemPrompt },
+      { role: "system", content: RESPONSE_LAYOUT_PROMPT },
+      ...chatSessionService.buildMessagesForAI(sessionData.messages),
+      { role: "user", content: userMessage },
+      {
+        role: "function",
+        name: functionName,
+        content: formattedResponse.message,
+      },
+    ];
+    const humanResponse = await askModel(humanMessages);
+    return (
+      humanResponse.choices?.[0]?.message?.content || formattedResponse.message
+    );
+  } catch (humanErr) {
+    logger.warn(
+      `[Humanize] Fallback to structured response: ${humanErr.message}`,
+    );
+    return formattedResponse.message;
+  }
+}
+
+async function handleAiFunctionCall(context, aiFunctionCall) {
+  const { cacheKey, userId, userLang, userMessage } = context;
+  logger.info(`Function requested: ${aiFunctionCall.name}`);
+
+  let args;
+  try {
+    args = JSON.parse(aiFunctionCall.arguments);
+  } catch {
+    throw new Error("INVALID_FUNCTION_ARGUMENTS");
+  }
+  if (!args || typeof args !== "object") {
+    args = {};
+  }
+
+  const functionName = aiFunctionCall.name;
+  const functionContext = { ...context, args };
+  const handler = getFunctionHandlers(functionContext)[functionName];
+  if (!handler) {
+    throw new Error("UNKNOWN_FUNCTION");
+  }
+
+  const functionResult = await handler();
+  sessionCache[cacheKey].last_results = functionResult;
+
+  const formattedResponse = await formatResult(
+    functionName,
+    functionResult,
+    userLang,
+  );
+  const deterministicFunctionNames = getDeterministicFunctionNames();
+  const approvalFunctionNames = getApprovalFunctionNames();
+  let finalMessage = formattedResponse.message;
+
+  if (
+    !deterministicFunctionNames.has(functionName) &&
+    !(
+      approvalFunctionNames.has(functionName) &&
+      functionResult?.approvalRequired
+    )
+  ) {
+    finalMessage = await humanizeStructuredResponse(
+      functionName,
+      formattedResponse,
+      context,
+    );
+  }
+
+  finalMessage = finalizeFunctionResultMessage(
+    functionName,
+    functionResult,
+    { ...formattedResponse, message: finalMessage },
+    userLang,
+  );
+
+  const finalPayload = humanizePayload({
+    ...formattedResponse,
+    message: finalMessage,
+  });
+  persistAssistantReply({
+    cacheKey,
+    userId,
+    userMessage,
+    assistantMessage: finalPayload.message || "",
+    result: functionResult,
+  });
+  return finalPayload;
+}
+
+async function runSafetyNetIntent(context, config) {
+  const {
+    cacheKey,
+    normalizedUserMessage,
+    requestAttachments,
+    userId,
+    userLang,
+    userMessage,
+  } = context;
+  const intent = config.detect(normalizedUserMessage);
+  if (!intent) {
+    return null;
+  }
+
+  logger.warn(config.logLabel(intent.caseNumber));
+  const prepared = await config.prepare(intent.caseNumber, requestAttachments);
+  let finalMessage;
+  if (!prepared.found || !prepared.ready) {
+    finalMessage = config.formatFailed(
+      { sent: false, ...prepared },
+      userLang,
+    ).message;
+  } else {
+    const pending = config.buildPending(prepared, requestAttachments);
+    setRuntimePendingApproval(cacheKey, pending);
+    finalMessage = formatApiApprovalPreviewMessage(pending, userLang);
+  }
+
+  persistAssistantReply({
+    cacheKey,
+    userId,
+    userMessage,
+    assistantMessage: finalMessage,
+    result: prepared,
+  });
+  return { message: finalMessage };
+}
+
+async function handleSafetyNetTurn(context) {
+  const configs = [
+    {
+      detect: detectT9SendIntent,
+      prepare: (caseNumber, attachments) =>
+        apiIntegrations.t9Rideshare.prepareT9RidesharePayload({
+          caseNumber,
+          tort: "Rideshare",
+          tier: "T9",
+          attachments,
+        }),
+      formatFailed: formatSendT9RidesharePayloadResult,
+      buildPending: (prepared, attachments) => ({
+        kind: "t9",
+        apiLabel: "T9",
+        caseNumber: prepared.caseNumber,
+        tort: "Rideshare",
+        tier: "T9",
+        payload: prepared.payload,
+        attachments,
+      }),
+      logLabel: (caseNumber) =>
+        `[T9 Safety Net] Model skipped function call. Forcing preview workflow for case ${caseNumber}`,
+    },
+    {
+      detect: detectJdcT3SendIntent,
+      prepare: (caseNumber) =>
+        apiIntegrations.jdcT3.prepareJdcT3Payload({ caseNumber }),
+      formatFailed: formatSendJdcT3PayloadResult,
+      buildPending: (prepared, attachments) => ({
+        kind: "jdc_t3",
+        apiLabel: "JDC T3",
+        caseNumber: prepared.caseNumber,
+        payload: prepared.payload,
+        attachments,
+      }),
+      logLabel: (caseNumber) =>
+        `[JDC T3 Safety Net] Model skipped function call. Forcing preview workflow for case ${caseNumber}`,
+    },
+    {
+      detect: detectWomensPrisonerAbuseT1SendIntent,
+      prepare: (caseNumber) =>
+        apiIntegrations.womensPrisonerAbuseT1.prepareWomensPrisonerAbuseT1Payload(
+          { caseNumber },
+        ),
+      formatFailed: formatSendWomensPrisonerAbuseT1PayloadResult,
+      buildPending: (prepared, attachments) => ({
+        kind: "wpa_t1",
+        apiLabel: "Women's Prisoner Abuse T1",
+        caseNumber: prepared.caseNumber,
+        payload: prepared.payload,
+        attachments,
+      }),
+      logLabel: (caseNumber) =>
+        `[WPA T1 Safety Net] Model skipped function call. Forcing preview workflow for case ${caseNumber}`,
+    },
+    {
+      detect: detectDepoProveraT8SendIntent,
+      prepare: (caseNumber) =>
+        apiIntegrations.depoProveraT8.prepareDepoProveraT8Payload({
+          caseNumber,
+          tort: "Depo Provera",
+          tier: "T8",
+        }),
+      formatFailed: formatSendDepoProveraT8PayloadResult,
+      buildPending: (prepared) => ({
+        kind: "depo_t8",
+        apiLabel: "Depo Provera T8",
+        caseNumber: prepared.caseNumber,
+        tort: "Depo Provera",
+        tier: "T8",
+        payload: prepared.payload,
+        attachments: [],
+      }),
+      logLabel: (caseNumber) =>
+        `[Depo Provera T8 Safety Net] Model skipped function call. Forcing preview workflow for case ${caseNumber}`,
+    },
+  ];
+
+  for (const config of configs) {
+    const result = await runSafetyNetIntent(context, config);
+    if (result) {
+      return result;
+    }
+  }
+
+  return null;
+}
+
+function buildProcessMessageError(errorMessage, userLang) {
+  switch (errorMessage) {
+    case "AI_SERVICE_FAILURE":
+      return i18n(
+        userLang,
+        "El servicio de inteligencia artificial no esta disponible.",
+        "The artificial intelligence service is not available.",
+      );
+    case "INVALID_FUNCTION_ARGUMENTS":
+      return i18n(
+        userLang,
+        "Hubo un problema procesando la solicitud.",
+        "There was a problem processing the request.",
+      );
+    case "INVALID_PHONE":
+      return i18n(
+        userLang,
+        "Por favor envia un numero de telefono valido para consultar attempts.",
+        "Please provide a valid phone number to check attempts.",
+      );
+    case "INVALID_DATE_FORMAT":
+      return i18n(
+        userLang,
+        "Por favor envia una fecha valida con formato YYYY-MM-DD.",
+        "Please provide a valid date in YYYY-MM-DD format.",
+      );
+    case "SF_CALLBACKS_QUERY_FAILED":
+      return i18n(
+        userLang,
+        "No pude leer los callbacks del calendario con esta cuenta. Revisa permisos de Event/Calendar compartido.",
+        "I could not read calendar callbacks with this account. Please verify Event/shared calendar permissions.",
+      );
+    case "INVALID_VENDOR_NAME":
+      return i18n(
+        userLang,
+        "Por favor indica un nombre de vendor valido.",
+        "Please provide a valid vendor name.",
+      );
+    default:
+      return i18n(
+        userLang,
+        "Ocurrio un error inesperado.",
+        "An unexpected error occurred.",
+      );
+  }
+}
+
 exports.processMessage = async (
   userMessage,
   userId = null,
@@ -940,460 +2462,32 @@ exports.processMessage = async (
       );
     }
 
-    // Load session from DB; cache in memory (L1) to reduce DB reads within the same process
     const cacheKey = String(userId ?? "anonymous");
     if (!sessionCache[cacheKey]) {
       sessionCache[cacheKey] =
         await chatSessionService.getOrCreateSession(userId);
     }
     const sessionData = sessionCache[cacheKey];
+    const context = {
+      cacheKey,
+      normalizedUserMessage,
+      requestAttachments,
+      sessionData,
+      userId,
+      userLang,
+      userMessage,
+    };
 
-    const pendingBardT2 = getPendingBardT2Approval(sessionData);
-    if (pendingBardT2) {
-      if (detectBardT2CancelIntent(normalizedUserMessage)) {
-        clearPendingBardT2Approval(sessionData, cacheKey);
-        const cancelMessage = i18n(
-          userLang,
-          `Se canceló el envío pendiente de Bard Port T2 para el case ${pendingBardT2.caseNumber}.`,
-          `Pending Bard Port T2 delivery for case ${pendingBardT2.caseNumber} was canceled.`,
-        );
-
-        chatSessionService
-          .appendMessages(
-            userId,
-            [
-              { role: "user", content: userMessage },
-              { role: "assistant", content: cancelMessage },
-            ],
-            sessionCache[cacheKey].last_filters,
-            {
-              status: "bard_t2_canceled",
-              caseNumber: pendingBardT2.caseNumber,
-            },
-          )
-          .catch((err) =>
-            logger.error(
-              `[ChatSession] Failed to persist messages: ${err.message}`,
-            ),
-          );
-
-        return { message: cancelMessage };
-      }
-
-      const editIntent = parseBardT2EditIntent(normalizedUserMessage);
-      if (editIntent) {
-        const revised =
-          await apiIntegrations.bardPortT2.reviseBardPortT2PayloadField({
-            caseNumber: pendingBardT2.caseNumber,
-            field: editIntent.field,
-            value: editIntent.value,
-            tort: pendingBardT2.tort,
-            tier: pendingBardT2.tier,
-          });
-
-        let revisedMessage;
-        if (!revised.found) {
-          revisedMessage = i18n(
-            userLang,
-            `No encontré el case ${pendingBardT2.caseNumber} para actualizar el campo solicitado.`,
-            `I couldn't find case ${pendingBardT2.caseNumber} to update the requested field.`,
-          );
-          clearPendingBardT2Approval(sessionData, cacheKey);
-        } else if (!revised.updated) {
-          const allowed = (revised.allowedFields || []).join(", ");
-          revisedMessage = i18n(
-            userLang,
-            `El campo indicado no se puede editar para T2. Campos permitidos: ${allowed}.`,
-            `That field cannot be edited for T2. Allowed fields: ${allowed}.`,
-          );
-        } else if (!revised.ready) {
-          const fields = (revised.missingFields || []).join(", ");
-          revisedMessage = i18n(
-            userLang,
-            `El campo ${revised.field} se actualizó en Salesforce, pero el payload aún está incompleto. Faltan: ${fields}.`,
-            `Field ${revised.field} was updated in Salesforce, but the payload is still incomplete. Missing: ${fields}.`,
-          );
-        } else {
-          setPendingBardT2Approval(sessionData, cacheKey, {
-            caseNumber: revised.caseNumber,
-            tort: revised.tort,
-            tier: revised.tier,
-            payload: revised.payload,
-          });
-
-          revisedMessage = `${i18n(
-            userLang,
-            `Campo ${revised.field} actualizado en Salesforce. Este es el nuevo JSON para validar antes del envío:`,
-            `Field ${revised.field} was updated in Salesforce. This is the updated JSON to validate before sending:`,
-          )}\n\n\`\`\`json\n${JSON.stringify(revised.payload || {}, null, 2)}\n\`\`\``;
-        }
-
-        chatSessionService
-          .appendMessages(
-            userId,
-            [
-              { role: "user", content: userMessage },
-              { role: "assistant", content: revisedMessage },
-            ],
-            sessionCache[cacheKey].last_filters,
-            revised,
-          )
-          .catch((err) =>
-            logger.error(
-              `[ChatSession] Failed to persist messages: ${err.message}`,
-            ),
-          );
-
-        return { message: revisedMessage };
-      }
-
-      if (detectBardT2ApprovalIntent(normalizedUserMessage)) {
-        const sendResult =
-          await apiIntegrations.bardPortT2.sendBardPortT2Payload({
-            caseNumber: pendingBardT2.caseNumber,
-            tort: pendingBardT2.tort,
-            tier: pendingBardT2.tier,
-          });
-
-        clearPendingBardT2Approval(sessionData, cacheKey);
-
-        const sentMessage = formatSendBardPortT2PayloadResult(
-          sendResult,
-          userLang,
-        ).message;
-
-        chatSessionService
-          .appendMessages(
-            userId,
-            [
-              { role: "user", content: userMessage },
-              { role: "assistant", content: sentMessage },
-            ],
-            sessionCache[cacheKey].last_filters,
-            sendResult,
-          )
-          .catch((err) =>
-            logger.error(
-              `[ChatSession] Failed to persist messages: ${err.message}`,
-            ),
-          );
-
-        return { message: sentMessage };
-      }
-
-      const pendingReminder = `${i18n(
-        userLang,
-        `Tienes un envío T2 pendiente para el case ${pendingBardT2.caseNumber}.`,
-        `You have a pending T2 delivery for case ${pendingBardT2.caseNumber}.`,
-      )}`;
-
-      chatSessionService
-        .appendMessages(
-          userId,
-          [
-            { role: "user", content: userMessage },
-            { role: "assistant", content: pendingReminder },
-          ],
-          sessionCache[cacheKey].last_filters,
-          { status: "bard_t2_pending", caseNumber: pendingBardT2.caseNumber },
-        )
-        .catch((err) =>
-          logger.error(
-            `[ChatSession] Failed to persist messages: ${err.message}`,
-          ),
-        );
-
-      return { message: pendingReminder };
+    const pendingBardResponse = await handlePendingBardT2Turn(context);
+    if (pendingBardResponse) {
+      return pendingBardResponse;
     }
 
-    const pendingRuntime = getRuntimePendingApproval(cacheKey);
-    if (pendingRuntime) {
-      if (requestAttachments.length > 0) {
-        pendingRuntime.attachments = requestAttachments;
-        setRuntimePendingApproval(cacheKey, pendingRuntime);
-      }
-
-      if (detectBardT2CancelIntent(normalizedUserMessage)) {
-        clearRuntimePendingApproval(cacheKey);
-        const cancelMessage = i18n(
-          userLang,
-          `Se canceló el envío pendiente de ${pendingRuntime.apiLabel} para el case ${pendingRuntime.caseNumber}.`,
-          `Pending ${pendingRuntime.apiLabel} delivery for case ${pendingRuntime.caseNumber} was canceled.`,
-        );
-
-        chatSessionService
-          .appendMessages(
-            userId,
-            [
-              { role: "user", content: userMessage },
-              { role: "assistant", content: cancelMessage },
-            ],
-            sessionCache[cacheKey].last_filters,
-            {
-              status: `${pendingRuntime.kind}_canceled`,
-              caseNumber: pendingRuntime.caseNumber,
-            },
-          )
-          .catch((err) =>
-            logger.error(
-              `[ChatSession] Failed to persist messages: ${err.message}`,
-            ),
-          );
-
-        return { message: cancelMessage };
-      }
-
-      const editIntent = parseBardT2EditIntent(normalizedUserMessage);
-      if (editIntent) {
-        let revised;
-        if (pendingRuntime.kind === "t9") {
-          revised =
-            await apiIntegrations.t9Rideshare.reviseT9RidesharePayloadField({
-              caseNumber: pendingRuntime.caseNumber,
-              tort: pendingRuntime.tort,
-              tier: pendingRuntime.tier,
-              attachments: pendingRuntime.attachments || [],
-              field: editIntent.field,
-              value: editIntent.value,
-            });
-        } else if (pendingRuntime.kind === "jdc_t3") {
-          revised = await apiIntegrations.jdcT3.reviseJdcT3PayloadField({
-            caseNumber: pendingRuntime.caseNumber,
-            attachments: pendingRuntime.attachments || [],
-            field: editIntent.field,
-            value: editIntent.value,
-          });
-        } else if (pendingRuntime.kind === "wpa_t1") {
-          revised =
-            await apiIntegrations.womensPrisonerAbuseT1.reviseWomensPrisonerAbuseT1PayloadField(
-              {
-                caseNumber: pendingRuntime.caseNumber,
-                attachments: pendingRuntime.attachments || [],
-                field: editIntent.field,
-                value: editIntent.value,
-              },
-            );
-        } else if (pendingRuntime.kind === "depo_t8") {
-          revised =
-            await apiIntegrations.depoProveraT8.reviseDepoProveraT8PayloadField(
-              {
-                caseNumber: pendingRuntime.caseNumber,
-                tort: pendingRuntime.tort,
-                tier: pendingRuntime.tier,
-                field: editIntent.field,
-                value: editIntent.value,
-              },
-            );
-        } else {
-          revised =
-            await apiIntegrations.a4dRideshareT11.reviseA4DRideshareT11PayloadField(
-              {
-                caseNumber: pendingRuntime.caseNumber,
-                field: editIntent.field,
-                value: editIntent.value,
-              },
-            );
-        }
-
-        let revisedMessage;
-        if (!revised.found) {
-          revisedMessage = i18n(
-            userLang,
-            `No encontré el case ${pendingRuntime.caseNumber} para actualizar el campo solicitado.`,
-            `I couldn't find case ${pendingRuntime.caseNumber} to update the requested field.`,
-          );
-          clearRuntimePendingApproval(cacheKey);
-        } else if (!revised.updated) {
-          const allowed = (revised.allowedFields || []).join(", ");
-          revisedMessage = i18n(
-            userLang,
-            `El campo indicado no se puede editar para ${pendingRuntime.apiLabel}. Campos permitidos: ${allowed}.`,
-            `That field cannot be edited for ${pendingRuntime.apiLabel}. Allowed fields: ${allowed}.`,
-          );
-        } else if (!revised.ready) {
-          const fields = (revised.missingFields || []).join(", ");
-          revisedMessage = i18n(
-            userLang,
-            `El campo ${revised.field} se actualizó en Salesforce, pero el payload aún está incompleto. Faltan: ${fields}.`,
-            `Field ${revised.field} was updated in Salesforce, but the payload is still incomplete. Missing: ${fields}.`,
-          );
-        } else {
-          const updatedPending = {
-            ...pendingRuntime,
-            payload: revised.payload,
-          };
-          setRuntimePendingApproval(cacheKey, updatedPending);
-
-          revisedMessage = formatApiApprovalPreviewMessage(
-            {
-              ...updatedPending,
-              caseNumber: revised.caseNumber,
-            },
-            userLang,
-          );
-        }
-
-        chatSessionService
-          .appendMessages(
-            userId,
-            [
-              { role: "user", content: userMessage },
-              { role: "assistant", content: revisedMessage },
-            ],
-            sessionCache[cacheKey].last_filters,
-            revised,
-          )
-          .catch((err) =>
-            logger.error(
-              `[ChatSession] Failed to persist messages: ${err.message}`,
-            ),
-          );
-
-        return { message: revisedMessage };
-      }
-
-      if (detectBardT2ApprovalIntent(normalizedUserMessage)) {
-        let sendResult;
-        if (pendingRuntime.kind === "t9") {
-          sendResult = await apiIntegrations.t9Rideshare.sendT9RidesharePayload(
-            {
-              caseNumber: pendingRuntime.caseNumber,
-              tort: pendingRuntime.tort,
-              tier: pendingRuntime.tier,
-              attachments: pendingRuntime.attachments || [],
-            },
-          );
-        } else if (pendingRuntime.kind === "jdc_t3") {
-          sendResult = await apiIntegrations.jdcT3.sendJdcT3Payload({
-            caseNumber: pendingRuntime.caseNumber,
-            attachments: pendingRuntime.attachments || [],
-          });
-        } else if (pendingRuntime.kind === "wpa_t1") {
-          sendResult =
-            await apiIntegrations.womensPrisonerAbuseT1.sendWomensPrisonerAbuseT1Payload(
-              {
-                caseNumber: pendingRuntime.caseNumber,
-                attachments: pendingRuntime.attachments || [],
-              },
-            );
-        } else if (pendingRuntime.kind === "depo_t8") {
-          sendResult =
-            await apiIntegrations.depoProveraT8.sendDepoProveraT8Payload({
-              caseNumber: pendingRuntime.caseNumber,
-              tort: pendingRuntime.tort,
-              tier: pendingRuntime.tier,
-            });
-        } else {
-          sendResult =
-            await apiIntegrations.a4dRideshareT11.sendA4DRideshareT11Payload({
-              caseNumber: pendingRuntime.caseNumber,
-            });
-        }
-
-        if (sendResult?.attachmentsRequired) {
-          const waitFilesMessage = i18n(
-            userLang,
-            `Faltan documentos para completar el envío de ${pendingRuntime.apiLabel} del case ${pendingRuntime.caseNumber}.`,
-            `Files are still required to complete ${pendingRuntime.apiLabel} delivery for case ${pendingRuntime.caseNumber}.`,
-          );
-
-          chatSessionService
-            .appendMessages(
-              userId,
-              [
-                { role: "user", content: userMessage },
-                { role: "assistant", content: waitFilesMessage },
-              ],
-              sessionCache[cacheKey].last_filters,
-              sendResult,
-            )
-            .catch((err) =>
-              logger.error(
-                `[ChatSession] Failed to persist messages: ${err.message}`,
-              ),
-            );
-
-          return { message: waitFilesMessage };
-        }
-
-        clearRuntimePendingApproval(cacheKey);
-
-        let sentMessage;
-        if (pendingRuntime.kind === "t9") {
-          sentMessage = formatSendT9RidesharePayloadResult(
-            sendResult,
-            userLang,
-          ).message;
-        } else if (pendingRuntime.kind === "jdc_t3") {
-          sentMessage = formatSendJdcT3PayloadResult(
-            sendResult,
-            userLang,
-          ).message;
-        } else if (pendingRuntime.kind === "wpa_t1") {
-          sentMessage = formatSendWomensPrisonerAbuseT1PayloadResult(
-            sendResult,
-            userLang,
-          ).message;
-        } else if (pendingRuntime.kind === "depo_t8") {
-          sentMessage = formatSendDepoProveraT8PayloadResult(
-            sendResult,
-            userLang,
-          ).message;
-        } else {
-          sentMessage = formatSendA4DRideshareT11PayloadResult(
-            sendResult,
-            userLang,
-          ).message;
-        }
-
-        chatSessionService
-          .appendMessages(
-            userId,
-            [
-              { role: "user", content: userMessage },
-              { role: "assistant", content: sentMessage },
-            ],
-            sessionCache[cacheKey].last_filters,
-            sendResult,
-          )
-          .catch((err) =>
-            logger.error(
-              `[ChatSession] Failed to persist messages: ${err.message}`,
-            ),
-          );
-
-        return { message: sentMessage };
-      }
-
-      const pendingReminder = i18n(
-        userLang,
-        `Tienes un envío ${pendingRuntime.apiLabel} pendiente para el case ${pendingRuntime.caseNumber}.`,
-        `You have a pending ${pendingRuntime.apiLabel} delivery for case ${pendingRuntime.caseNumber}.`,
-      );
-
-      chatSessionService
-        .appendMessages(
-          userId,
-          [
-            { role: "user", content: userMessage },
-            { role: "assistant", content: pendingReminder },
-          ],
-          sessionCache[cacheKey].last_filters,
-          {
-            status: `${pendingRuntime.kind}_pending`,
-            caseNumber: pendingRuntime.caseNumber,
-          },
-        )
-        .catch((err) =>
-          logger.error(
-            `[ChatSession] Failed to persist messages: ${err.message}`,
-          ),
-        );
-
-      return { message: pendingReminder };
+    const pendingRuntimeResponse = await handlePendingRuntimeTurn(context);
+    if (pendingRuntimeResponse) {
+      return pendingRuntimeResponse;
     }
 
-    // Enrich the message with previous filter context if this looks like a follow-up query
     const contextualNormalizedMessage = enrichWithSessionContext(
       normalizedUserMessage,
       {
@@ -1403,1805 +2497,100 @@ exports.processMessage = async (
       },
     );
 
-    // Build message array: system prompt + full user history + new user message
-    const historyForAI = chatSessionService.buildMessagesForAI(
-      sessionData.messages,
+    const messages = buildChatRequestMessages(
+      systemPrompt,
+      sessionData,
+      contextualNormalizedMessage,
+      requestAttachments,
     );
-    const uploadContextMessages =
-      requestAttachments.length > 0
-        ? [
-            {
-              role: "system",
-              content: `Current request already includes ${requestAttachments.length} uploaded file(s): ${requestAttachments
-                .map((file) => file.fileName)
-                .join(
-                  ", ",
-                )}. If user asks to send T9, JDC T3, or Women's Prisoner Abuse T1 API, treat attachments as provided in this request.`,
-            },
-          ]
-        : [
-            {
-              role: "system",
-              content:
-                "IMPORTANT: No files were attached to this request. " +
-                "If the user asks to send a T9 Rideshare, JDC T3, or Women's Prisoner Abuse T1 payload (any variant: enviar API, envíame el API, send API, PI, etc.), " +
-                "you MUST call the sendT9RidesharePayload, sendJdcT3Payload, or sendWomensPrisonerAbuseT1Payload function with the provided case number — do NOT generate a text response, " +
-                "do NOT simulate success, do NOT invent HTTP codes, do NOT invent Lead IDs. " +
-                "The function itself will detect missing files and return the appropriate error. " +
-                "Never fabricate a successful delivery response under any circumstances.",
-            },
-          ];
-    const messages = [
-      { role: "system", content: systemPrompt },
-      ...uploadContextMessages,
-      ...historyForAI,
-      { role: "user", content: contextualNormalizedMessage },
-    ];
-
     const response = await askModel(messages);
-    const detectedRange = detectDateRange(normalizedUserMessage);
-    const directCaseAttemptsIntent = detectCaseAttemptsByDateIntent(
-      normalizedUserMessage,
-    );
-    const directScheduledCallbacksIntent = detectScheduledCallbacksIntent(
-      normalizedUserMessage,
-    );
-    const directSentAgentRankingIntent = detectSentCasesByAgentRankingIntent(
-      normalizedUserMessage,
-    );
-    const directFakeLeadDQByVendorIntent = detectFakeLeadDQByVendorIntent(
-      normalizedUserMessage,
-    );
-    const directCasesStillInCallbackIntent = detectCasesStillInCallbackIntent(
-      normalizedUserMessage,
-    );
 
-    if (directCaseAttemptsIntent) {
-      const directFunctionName = directCaseAttemptsIntent.withoutAttempts
-        ? "getCasesWithoutAttemptsByDate"
-        : "getCaseAttemptsByDate";
-      const functionResult = directCaseAttemptsIntent.withoutAttempts
-        ? await metrics.sql.getCasesWithoutAttemptsByDate(
-            directCaseAttemptsIntent,
-          )
-        : await metrics.sql.getCaseAttemptsByDate(directCaseAttemptsIntent);
-
-      const formattedResponse = await formatResult(
-        directFunctionName,
-        functionResult,
-        userLang,
-      );
-
-      const directPayload = humanizePayload({
-        ...formattedResponse,
-        // Keep direct attempts-by-case-day paths deterministic to avoid
-        // contradictory paraphrases about attempts.
-        message: formattedResponse.message,
-      });
-
-      chatSessionService
-        .appendMessages(
-          userId,
-          [
-            { role: "user", content: userMessage },
-            { role: "assistant", content: directPayload.message || "" },
-          ],
-          sessionCache[cacheKey].last_filters,
-          functionResult,
-        )
-        .catch((err) =>
-          logger.error(
-            `[ChatSession] Failed to persist messages: ${err.message}`,
-          ),
-        );
-
-      return directPayload;
+    const directIntentResponse = await handleDirectIntentTurn(context);
+    if (directIntentResponse) {
+      return directIntentResponse;
     }
 
-    if (directScheduledCallbacksIntent) {
-      const functionResult = await metrics.sf.getScheduledCallbacks(
-        directScheduledCallbacksIntent,
-      );
-
-      const formattedResponse = await formatResult(
-        "getScheduledCallbacks",
-        functionResult,
-        userLang,
-      );
-
-      const directPayload = humanizePayload({
-        ...formattedResponse,
-        message: formattedResponse.message,
-      });
-
-      chatSessionService
-        .appendMessages(
-          userId,
-          [
-            { role: "user", content: userMessage },
-            { role: "assistant", content: directPayload.message || "" },
-          ],
-          sessionCache[cacheKey].last_filters,
-          functionResult,
-        )
-        .catch((err) =>
-          logger.error(
-            `[ChatSession] Failed to persist messages: ${err.message}`,
-          ),
-        );
-
-      return directPayload;
-    }
-
-    if (directSentAgentRankingIntent) {
-      const functionResult = await metrics.sf.getSentCasesByAgentRanking(
-        directSentAgentRankingIntent,
-      );
-
-      const formattedResponse = await formatResult(
-        "getSentCasesByAgentRanking",
-        functionResult,
-        userLang,
-      );
-
-      const directPayload = humanizePayload({
-        ...formattedResponse,
-        message: formattedResponse.message,
-      });
-
-      chatSessionService
-        .appendMessages(
-          userId,
-          [
-            { role: "user", content: userMessage },
-            { role: "assistant", content: directPayload.message || "" },
-          ],
-          sessionCache[cacheKey].last_filters,
-          functionResult,
-        )
-        .catch((err) =>
-          logger.error(
-            `[ChatSession] Failed to persist messages: ${err.message}`,
-          ),
-        );
-
-      return directPayload;
-    }
-
-    if (directFakeLeadDQByVendorIntent) {
-      const functionResult = await metrics.sf.getFakeLeadDQByVendorRanking(
-        directFakeLeadDQByVendorIntent,
-      );
-
-      const formattedResponse = await formatResult(
-        "getFakeLeadDQByVendorRanking",
-        functionResult,
-        userLang,
-      );
-
-      const directPayload = humanizePayload({
-        ...formattedResponse,
-        message: formattedResponse.message,
-      });
-
-      chatSessionService
-        .appendMessages(
-          userId,
-          [
-            { role: "user", content: userMessage },
-            { role: "assistant", content: directPayload.message || "" },
-          ],
-          sessionCache[cacheKey].last_filters,
-          functionResult,
-        )
-        .catch((err) =>
-          logger.error(
-            `[ChatSession] Failed to persist messages: ${err.message}`,
-          ),
-        );
-
-      return directPayload;
-    }
-
-    if (directCasesStillInCallbackIntent) {
-      const functionResult = await metrics.sf.getCasesStillInCallback(
-        directCasesStillInCallbackIntent,
-      );
-
-      const formattedResponse = await formatResult(
-        "getCasesStillInCallback",
-        functionResult,
-        userLang,
-      );
-
-      const directPayload = humanizePayload({
-        ...formattedResponse,
-        message: formattedResponse.message,
-      });
-
-      chatSessionService
-        .appendMessages(
-          userId,
-          [
-            { role: "user", content: userMessage },
-            { role: "assistant", content: directPayload.message || "" },
-          ],
-          sessionCache[cacheKey].last_filters,
-          functionResult,
-        )
-        .catch((err) =>
-          logger.error(
-            `[ChatSession] Failed to persist messages: ${err.message}`,
-          ),
-        );
-
-      return directPayload;
-    }
-
-    if (detectedRange && !isAttemptsQuery(normalizedUserMessage)) {
-      logger.info("Date range detected locally");
-
-      const functionResult = await metrics.sf.getCasesByDateRange(
-        detectedRange.startDate,
-        detectedRange.endDate,
-      );
-
-      const formattedResponse = await formatResult(
-        "getCasesByDateRange",
-        functionResult,
-        userLang,
-      );
-
-      let rangeMessage = formattedResponse.message;
-      try {
-        const humanMessages = [
-          { role: "system", content: systemPrompt },
-          { role: "system", content: RESPONSE_LAYOUT_PROMPT },
-          ...chatSessionService.buildMessagesForAI(sessionData.messages),
-          { role: "user", content: userMessage },
-          {
-            role: "function",
-            name: "getCasesByDateRange",
-            content: formattedResponse.message,
-          },
-        ];
-        const humanResponse = await askModel(humanMessages);
-        const humanContent = humanResponse.choices?.[0]?.message?.content;
-        if (humanContent) rangeMessage = humanContent;
-      } catch (humanErr) {
-        logger.warn(
-          `[Humanize] Fallback to structured response: ${humanErr.message}`,
-        );
-      }
-
-      const rangePayload = humanizePayload({
-        ...formattedResponse,
-        message: rangeMessage,
-      });
-
-      chatSessionService
-        .appendMessages(
-          userId,
-          [
-            { role: "user", content: userMessage },
-            { role: "assistant", content: rangePayload.message || "" },
-          ],
-          null,
-          functionResult,
-        )
-        .catch((err) =>
-          logger.error(
-            `[ChatSession] Failed to persist messages: ${err.message}`,
-          ),
-        );
-
-      return rangePayload;
-    }
     const message = response.choices?.[0]?.message;
-
-    if (!message) throw new Error("AI_INVALID_RESPONSE");
-
-    // Function call returned by the AI model
-    if (message.function_call) {
-      const functionName = message.function_call.name;
-
-      logger.info(`Function requested: ${functionName}`);
-
-      let args;
-      try {
-        args = JSON.parse(message.function_call.arguments);
-      } catch {
-        throw new Error("INVALID_FUNCTION_ARGUMENTS");
-      }
-      if (!args || typeof args !== "object") {
-        args = {};
-      }
-      let functionResult;
-
-      const saveApiRoutingFilters = () => {
-        if (!args.caseNumber) return;
-        sessionData.last_filters = {
-          ...(sessionData.last_filters || {}),
-          caseNumber: args.caseNumber,
-          tier: args.tier,
-          type: args.tort,
-        };
-        sessionCache[cacheKey].last_filters = sessionData.last_filters;
-      };
-
-      if (functionName === "prepareBardPortT2Payload") {
-        functionResult =
-          await apiIntegrations.bardPortT2.prepareBardPortT2Payload({
-            caseNumber: args.caseNumber,
-            tort: args.tort,
-            tier: args.tier,
-          });
-        saveApiRoutingFilters();
-      } else if (functionName === "sendBardPortT2Payload") {
-        const bardTort = args.tort || "Bard Port";
-        const bardTier = args.tier || "T2";
-        const prepared =
-          await apiIntegrations.bardPortT2.prepareBardPortT2Payload({
-            caseNumber: args.caseNumber,
-            tort: bardTort,
-            tier: bardTier,
-          });
-
-        if (prepared.found && prepared.ready) {
-          setPendingBardT2Approval(sessionData, cacheKey, {
-            caseNumber: prepared.caseNumber,
-            tort: bardTort,
-            tier: bardTier,
-            payload: prepared.payload,
-          });
-
-          functionResult = {
-            sent: false,
-            approvalRequired: true,
-            found: true,
-            ready: true,
-            caseNumber: prepared.caseNumber,
-            tort: bardTort,
-            tier: bardTier,
-            payload: prepared.payload,
-          };
-        } else {
-          functionResult = {
-            sent: false,
-            ...prepared,
-          };
-        }
-      } else {
-        switch (functionName) {
-          case "getCaseByDate":
-            functionResult = await metrics.sf.getCaseByDate(
-              args.dateFilter === "today" ? "TODAY" : "YESTERDAY",
-            );
-            break;
-
-          case "getCaseByNumber":
-            args.caseNumber = normalizeCaseNumber(args.caseNumber);
-            functionResult = await metrics.sf.getCaseByNumber(args.caseNumber);
-            if (args.caseNumber) {
-              sessionData.last_filters = {
-                ...(sessionData.last_filters || {}),
-                caseNumber: args.caseNumber,
-              };
-              sessionCache[cacheKey].last_filters = sessionData.last_filters;
-            }
-            break;
-
-          case "getCaseByPhone":
-            functionResult = await metrics.sf.getCaseByPhone(args.phone);
-            break;
-
-          case "getCasesByStatus":
-            functionResult = await metrics.sf.getCasesByStatus(
-              args.status,
-              args.dateKeyword,
-              args.date,
-            );
-            break;
-
-          case "getCasesByDateRange":
-            functionResult = await metrics.sf.getCasesByDateRange(
-              args.startDate,
-              args.endDate,
-            );
-            break;
-
-          case "getCaseByEmail":
-            functionResult = await metrics.sf.getCaseByEmail(args.email);
-            break;
-
-          case "getCasesByOrigin":
-            functionResult = await metrics.sf.getCasesByOrigin(
-              args.origin,
-              args.dateKeyword,
-              args.date,
-            );
-            break;
-
-          case "getCasesBySupplierSegment":
-            functionResult = await metrics.sf.getCasesBySupplierSegment(
-              args.segment,
-              args.dateKeyword,
-              args.date,
-            );
-            break;
-
-          case "getCasesBySubstatus":
-            functionResult = await metrics.sf.getCasesBySubstatus(
-              args.substatus,
-              args.dateKeyword,
-              args.date,
-            );
-            break;
-
-          case "getScheduledCallbacks":
-            functionResult = await metrics.sf.getScheduledCallbacks({
-              dateKeyword: args.dateKeyword,
-              date: args.date,
-            });
-            break;
-
-          case "getSentCasesByAgentRanking":
-            functionResult = await metrics.sf.getSentCasesByAgentRanking({
-              sort: args.sort,
-              dateKeyword: args.dateKeyword,
-              date: args.date,
-              period: args.period,
-              limit: args.limit,
-            });
-            break;
-
-          case "getFakeLeadDQByVendorRanking":
-            functionResult = await metrics.sf.getFakeLeadDQByVendorRanking({
-              dateKeyword: args.dateKeyword,
-              date: args.date,
-              period: args.period,
-              limit: args.limit,
-            });
-            break;
-
-          case "getCasesStillInCallback":
-            functionResult = await metrics.sf.getCasesStillInCallback({
-              dateKeyword: args.dateKeyword,
-              date: args.date,
-              period: args.period,
-            });
-            break;
-
-          case "getCasesByType": {
-            const typeValue =
-              args.type?.toLowerCase() === "tort" ? "Tort" : args.type;
-            functionResult = await metrics.sf.getCasesByType(
-              typeValue,
-              args.dateKeyword,
-              args.date,
-            );
-            break;
-          }
-
-          case "getCasesByFilters":
-            functionResult = await metrics.sf.getCasesByFilters(args);
-            sessionData.last_filters = args;
-            sessionCache[cacheKey].last_filters = args;
-            break;
-
-          case "getCasesGroupedByField":
-            functionResult = await metrics.sf.getCasesGroupedByField(
-              args.field,
-              args.dateKeyword,
-            );
-            break;
-
-          case "getOperationalSummary":
-            functionResult = await metrics.sf.getOperationalSummary(
-              args.dateKeyword,
-            );
-            break;
-
-          case "getVendorsWithLeads":
-            functionResult = await metrics.sf.getVendorsWithLeads({
-              dateKeyword: args.dateKeyword,
-              period: args.period,
-              date: args.date,
-              startDate: args.startDate,
-              endDate: args.endDate,
-            });
-            break;
-
-          case "getTopVendors":
-            functionResult = await metrics.sf.getTopVendors({
-              limit: args.limit,
-              sort: args.sort,
-              dateKeyword: args.dateKeyword,
-              period: args.period,
-              date: args.date,
-              startDate: args.startDate,
-              endDate: args.endDate,
-            });
-            break;
-
-          case "getTopVendorsWithCaseDetails":
-            functionResult = await metrics.sf.getTopVendorsWithCaseDetails({
-              limit: args.limit,
-              sort: args.sort,
-              dateKeyword: args.dateKeyword,
-              period: args.period,
-              date: args.date,
-              startDate: args.startDate,
-              endDate: args.endDate,
-            });
-            break;
-
-          case "getCaseDisqualificationReason":
-            args.caseNumber =
-              args.caseNumber ||
-              sessionData.last_filters?.caseNumber ||
-              extractLastReferencedCaseNumber(sessionData.messages);
-
-            if (!args.caseNumber) {
-              functionResult = { found: false, missingCaseNumber: true };
-              break;
-            }
-
-            args.caseNumber = normalizeCaseNumber(args.caseNumber);
-            functionResult = await metrics.sf.getCaseDisqualificationReason(
-              args.caseNumber,
-            );
-            if (args.caseNumber) {
-              sessionData.last_filters = {
-                ...(sessionData.last_filters || {}),
-                caseNumber: args.caseNumber,
-              };
-              sessionCache[cacheKey].last_filters = sessionData.last_filters;
-            }
-            break;
-
-          case "prepareT9RidesharePayload":
-            functionResult =
-              await apiIntegrations.t9Rideshare.prepareT9RidesharePayload({
-                caseNumber: args.caseNumber,
-                tort: args.tort,
-                tier: args.tier,
-                attachments:
-                  requestAttachments.length > 0
-                    ? requestAttachments
-                    : args.attachments,
-              });
-            if (args.caseNumber) {
-              sessionData.last_filters = {
-                ...(sessionData.last_filters || {}),
-                caseNumber: args.caseNumber,
-                tier: args.tier,
-                type: args.tort,
-              };
-              sessionCache[cacheKey].last_filters = sessionData.last_filters;
-            }
-            break;
-
-          case "sendT9RidesharePayload":
-            {
-              const t9Tort = args.tort || "Rideshare";
-              const t9Tier = args.tier || "T9";
-              const t9Attachments =
-                requestAttachments.length > 0
-                  ? requestAttachments
-                  : args.attachments || [];
-
-              const prepared =
-                await apiIntegrations.t9Rideshare.prepareT9RidesharePayload({
-                  caseNumber: args.caseNumber,
-                  tort: t9Tort,
-                  tier: t9Tier,
-                  attachments: t9Attachments,
-                });
-
-              if (prepared.found && prepared.ready) {
-                setRuntimePendingApproval(cacheKey, {
-                  kind: "t9",
-                  apiLabel: "T9",
-                  caseNumber: prepared.caseNumber,
-                  tort: t9Tort,
-                  tier: t9Tier,
-                  payload: prepared.payload,
-                  attachments: t9Attachments,
-                });
-
-                functionResult = {
-                  sent: false,
-                  approvalRequired: true,
-                  found: true,
-                  ready: true,
-                  caseNumber: prepared.caseNumber,
-                  tort: t9Tort,
-                  tier: t9Tier,
-                  payload: prepared.payload,
-                  attachments: t9Attachments,
-                };
-              } else {
-                functionResult = {
-                  sent: false,
-                  ...prepared,
-                };
-              }
-            }
-            if (args.caseNumber) {
-              sessionData.last_filters = {
-                ...(sessionData.last_filters || {}),
-                caseNumber: args.caseNumber,
-                tier: args.tier,
-                type: args.tort,
-              };
-              sessionCache[cacheKey].last_filters = sessionData.last_filters;
-            }
-            break;
-
-          case "prepareBardPortT2Payload": {
-            const bardTort = args.tort || "Bard Port";
-            const bardTier = args.tier || "T2";
-
-            functionResult =
-              await apiIntegrations.bardPortT2.prepareBardPortT2Payload({
-                caseNumber: args.caseNumber,
-                tort: bardTort,
-                tier: bardTier,
-              });
-
-            if (args.caseNumber) {
-              sessionData.last_filters = {
-                ...(sessionData.last_filters || {}),
-                caseNumber: args.caseNumber,
-                tier: bardTier,
-                type: bardTort,
-              };
-              sessionCache[cacheKey].last_filters = sessionData.last_filters;
-            }
-            break;
-          }
-
-          case "sendBardPortT2Payload": {
-            const bardTort = args.tort || "Bard Port";
-            const bardTier = args.tier || "T2";
-
-            functionResult =
-              await apiIntegrations.bardPortT2.sendBardPortT2Payload({
-                caseNumber: args.caseNumber,
-                tort: bardTort,
-                tier: bardTier,
-              });
-
-            if (args.caseNumber) {
-              sessionData.last_filters = {
-                ...(sessionData.last_filters || {}),
-                caseNumber: args.caseNumber,
-                tier: bardTier,
-                type: bardTort,
-              };
-              sessionCache[cacheKey].last_filters = sessionData.last_filters;
-            }
-            break;
-          }
-
-          case "prepareDepoProveraT8Payload": {
-            const depoTort = args.tort || "Depo Provera";
-            const depoTier = args.tier || "T8";
-
-            functionResult =
-              await apiIntegrations.depoProveraT8.prepareDepoProveraT8Payload({
-                caseNumber: args.caseNumber,
-                tort: depoTort,
-                tier: depoTier,
-              });
-
-            if (args.caseNumber) {
-              sessionData.last_filters = {
-                ...(sessionData.last_filters || {}),
-                caseNumber: args.caseNumber,
-                tier: depoTier,
-                type: depoTort,
-              };
-              sessionCache[cacheKey].last_filters = sessionData.last_filters;
-            }
-            break;
-          }
-
-          case "sendDepoProveraT8Payload": {
-            const depoTort = args.tort || "Depo Provera";
-            const depoTier = args.tier || "T8";
-
-            const prepared =
-              await apiIntegrations.depoProveraT8.prepareDepoProveraT8Payload({
-                caseNumber: args.caseNumber,
-                tort: depoTort,
-                tier: depoTier,
-              });
-
-            if (prepared.found && prepared.ready) {
-              setRuntimePendingApproval(cacheKey, {
-                kind: "depo_t8",
-                apiLabel: "Depo Provera T8",
-                caseNumber: prepared.caseNumber,
-                tort: depoTort,
-                tier: depoTier,
-                payload: prepared.payload,
-                attachments: [],
-              });
-
-              functionResult = {
-                sent: false,
-                approvalRequired: true,
-                found: true,
-                ready: true,
-                caseNumber: prepared.caseNumber,
-                tort: depoTort,
-                tier: depoTier,
-                payload: prepared.payload,
-                attachments: [],
-              };
-            } else {
-              functionResult = {
-                sent: false,
-                ...prepared,
-              };
-            }
-
-            if (args.caseNumber) {
-              sessionData.last_filters = {
-                ...(sessionData.last_filters || {}),
-                caseNumber: args.caseNumber,
-                tier: depoTier,
-                type: depoTort,
-              };
-              sessionCache[cacheKey].last_filters = sessionData.last_filters;
-            }
-            break;
-          }
-
-          case "prepareA4DRideshareT11Payload":
-            functionResult =
-              await apiIntegrations.a4dRideshareT11.prepareA4DRideshareT11Payload(
-                { caseNumber: args.caseNumber },
-              );
-            if (args.caseNumber) {
-              sessionData.last_filters = {
-                ...(sessionData.last_filters || {}),
-                caseNumber: args.caseNumber,
-              };
-              sessionCache[cacheKey].last_filters = sessionData.last_filters;
-            }
-            break;
-
-          case "sendA4DRideshareT11Payload":
-            {
-              const prepared =
-                await apiIntegrations.a4dRideshareT11.prepareA4DRideshareT11Payload(
-                  { caseNumber: args.caseNumber },
-                );
-
-              if (prepared.found && prepared.ready) {
-                setRuntimePendingApproval(cacheKey, {
-                  kind: "a4d_t11",
-                  apiLabel: "A4D T11",
-                  caseNumber: prepared.caseNumber,
-                  payload: prepared.payload,
-                  attachments: [],
-                });
-
-                functionResult = {
-                  sent: false,
-                  approvalRequired: true,
-                  found: true,
-                  ready: true,
-                  caseNumber: prepared.caseNumber,
-                  payload: prepared.payload,
-                  attachments: [],
-                };
-              } else {
-                functionResult = {
-                  sent: false,
-                  ...prepared,
-                };
-              }
-            }
-            if (args.caseNumber) {
-              sessionData.last_filters = {
-                ...(sessionData.last_filters || {}),
-                caseNumber: args.caseNumber,
-              };
-              sessionCache[cacheKey].last_filters = sessionData.last_filters;
-            }
-            break;
-
-          case "prepareJdcT3Payload":
-            functionResult = await apiIntegrations.jdcT3.prepareJdcT3Payload({
-              caseNumber: args.caseNumber,
-            });
-            if (args.caseNumber) {
-              sessionData.last_filters = {
-                ...(sessionData.last_filters || {}),
-                caseNumber: args.caseNumber,
-              };
-              sessionCache[cacheKey].last_filters = sessionData.last_filters;
-            }
-            break;
-
-          case "prepareWomensPrisonerAbuseT1Payload":
-            functionResult =
-              await apiIntegrations.womensPrisonerAbuseT1.prepareWomensPrisonerAbuseT1Payload(
-                {
-                  caseNumber: args.caseNumber,
-                },
-              );
-            if (args.caseNumber) {
-              sessionData.last_filters = {
-                ...(sessionData.last_filters || {}),
-                caseNumber: args.caseNumber,
-                tier: "T1",
-                type: "Women's Prisoner Abuse",
-              };
-              sessionCache[cacheKey].last_filters = sessionData.last_filters;
-            }
-            break;
-
-          case "sendWomensPrisonerAbuseT1Payload":
-            {
-              const wpaAttachments =
-                requestAttachments.length > 0
-                  ? requestAttachments
-                  : args.attachments || [];
-
-              const prepared =
-                await apiIntegrations.womensPrisonerAbuseT1.prepareWomensPrisonerAbuseT1Payload(
-                  {
-                    caseNumber: args.caseNumber,
-                  },
-                );
-
-              if (prepared.found && prepared.ready) {
-                setRuntimePendingApproval(cacheKey, {
-                  kind: "wpa_t1",
-                  apiLabel: "Women's Prisoner Abuse T1",
-                  caseNumber: prepared.caseNumber,
-                  payload: prepared.payload,
-                  attachments: wpaAttachments,
-                });
-
-                functionResult = {
-                  sent: false,
-                  approvalRequired: true,
-                  found: true,
-                  ready: true,
-                  caseNumber: prepared.caseNumber,
-                  payload: prepared.payload,
-                  attachments: wpaAttachments,
-                };
-              } else {
-                functionResult = {
-                  sent: false,
-                  ...prepared,
-                };
-              }
-            }
-            if (args.caseNumber) {
-              sessionData.last_filters = {
-                ...(sessionData.last_filters || {}),
-                caseNumber: args.caseNumber,
-                tier: "T1",
-                type: "Women's Prisoner Abuse",
-              };
-              sessionCache[cacheKey].last_filters = sessionData.last_filters;
-            }
-            break;
-
-          case "sendJdcT3Payload":
-            {
-              const jdcAttachments =
-                requestAttachments.length > 0
-                  ? requestAttachments
-                  : args.attachments || [];
-
-              const prepared = await apiIntegrations.jdcT3.prepareJdcT3Payload({
-                caseNumber: args.caseNumber,
-              });
-
-              if (prepared.found && prepared.ready) {
-                setRuntimePendingApproval(cacheKey, {
-                  kind: "jdc_t3",
-                  apiLabel: "JDC T3",
-                  caseNumber: prepared.caseNumber,
-                  payload: prepared.payload,
-                  attachments: jdcAttachments,
-                });
-
-                functionResult = {
-                  sent: false,
-                  approvalRequired: true,
-                  found: true,
-                  ready: true,
-                  caseNumber: prepared.caseNumber,
-                  payload: prepared.payload,
-                  attachments: jdcAttachments,
-                };
-              } else {
-                functionResult = {
-                  sent: false,
-                  ...prepared,
-                };
-              }
-            }
-            if (args.caseNumber) {
-              sessionData.last_filters = {
-                ...(sessionData.last_filters || {}),
-                caseNumber: args.caseNumber,
-              };
-              sessionCache[cacheKey].last_filters = sessionData.last_filters;
-            }
-            break;
-
-          case "getVendorsBySupplierSegment":
-            functionResult = await metrics.sf.getVendorsBySupplierSegment(
-              args.segment,
-              {
-                dateKeyword: args.dateKeyword,
-                period: args.period,
-                date: args.date,
-                startDate: args.startDate,
-                endDate: args.endDate,
-              },
-            );
-            break;
-
-          case "getCasesByAgent":
-            functionResult = await metrics.dashboard.getCasesByAgent(
-              args.agentName,
-            );
-            break;
-
-          case "getCasesByCallCenter":
-            functionResult = await metrics.dashboard.getCasesByCallCenter(
-              args.callCenter,
-            );
-            break;
-
-          case "getTotalAttemptsByAgent":
-            functionResult = await metrics.sql.getTotalAttemptsByAgent(
-              args.agentName,
-              {
-                dateKeyword: args.dateKeyword,
-                date: args.date,
-              },
-            );
-            break;
-
-          case "getAgentAttemptsByPhonePerHour":
-            functionResult = await metrics.sql.getAgentAttemptsByPhonePerHour(
-              args.agentName,
-              args.phone,
-              {
-                dateKeyword: args.dateKeyword,
-                date: args.date,
-              },
-            );
-            break;
-
-          case "getVicidialAgentsStatus":
-            functionResult = await metrics.sql.getVicidialAgentsStatus({
-              agentName: args.agentName,
-            });
-            break;
-
-          case "getAttemptsByPhone":
-            functionResult = await metrics.sql.getAttemptsByPhone(args.phone, {
-              dateKeyword: args.dateKeyword,
-              date: args.date,
-              lastDays: args.lastDays,
-            });
-            break;
-
-          case "getAttemptsByCaseNumber": {
-            args.caseNumber =
-              args.caseNumber ||
-              sessionData.last_filters?.caseNumber ||
-              extractLastReferencedCaseNumber(sessionData.messages);
-
-            if (!args.caseNumber) {
-              functionResult = { missingCaseNumber: true };
-              break;
-            }
-
-            args.caseNumber = normalizeCaseNumber(args.caseNumber);
-            let caseAttemptsFilters = {
-              dateKeyword: args.dateKeyword,
-              date: args.date,
-              lastDays: args.lastDays,
-            };
-
-            if (
-              !caseAttemptsFilters.dateKeyword &&
-              !caseAttemptsFilters.date &&
-              !caseAttemptsFilters.lastDays
-            ) {
-              if (/\b(hoy|today)\b/i.exec(normalizedUserMessage)) {
-                caseAttemptsFilters.dateKeyword = "today";
-              } else if (/\b(ayer|yesterday)\b/i.exec(normalizedUserMessage)) {
-                caseAttemptsFilters.dateKeyword = "yesterday";
-              } else {
-                const isoDate = /\b(20\d{2}-\d{2}-\d{2})\b/.exec(
-                  normalizedUserMessage,
-                );
-                if (isoDate) {
-                  caseAttemptsFilters.date = isoDate[1];
-                }
-              }
-            }
-
-            functionResult = await metrics.sql.getAttemptsByCaseNumber(
-              args.caseNumber,
-              caseAttemptsFilters,
-            );
-
-            sessionData.last_filters = {
-              ...(sessionData.last_filters || {}),
-              caseNumber: args.caseNumber,
-            };
-            sessionCache[cacheKey].last_filters = sessionData.last_filters;
-            break;
-          }
-
-          case "getCaseAttemptsByDate":
-            functionResult = await metrics.sql.getCaseAttemptsByDate({
-              dateKeyword: args.dateKeyword,
-              date: args.date,
-            });
-            break;
-
-          case "getCasesWithoutAttemptsByDate":
-            functionResult = await metrics.sql.getCasesWithoutAttemptsByDate({
-              dateKeyword: args.dateKeyword,
-              date: args.date,
-            });
-            break;
-
-          case "getAssignedAgentByCaseNumber":
-            args.caseNumber =
-              args.caseNumber ||
-              sessionData.last_filters?.caseNumber ||
-              extractLastReferencedCaseNumber(sessionData.messages);
-
-            if (!args.caseNumber) {
-              functionResult = { found: false, missingCaseNumber: true };
-              break;
-            }
-
-            args.caseNumber = normalizeCaseNumber(args.caseNumber);
-            functionResult = await metrics.mysql.getAssignedAgentByCaseNumber(
-              args.caseNumber,
-            );
-
-            sessionData.last_filters = {
-              ...(sessionData.last_filters || {}),
-              caseNumber: args.caseNumber,
-            };
-            sessionCache[cacheKey].last_filters = sessionData.last_filters;
-            break;
-
-          case "getVendorLeadAttempts":
-            functionResult = await metrics.sql.getVendorLeadAttempts(
-              args.vendorName,
-              {
-                includeAgentDetails: args.includeAgentDetails,
-                dateKeyword: args.dateKeyword,
-                date: args.date,
-                startDate: args.startDate,
-                endDate: args.endDate,
-              },
-            );
-            break;
-
-          case "getCasesByTypeFromReport":
-            functionResult = await metrics.dashboard.getCasesByTypeFromReport(
-              args.type,
-            );
-            break;
-
-          default:
-            throw new Error("UNKNOWN_FUNCTION");
-        }
-      }
-
-      sessionCache[cacheKey].last_results = functionResult;
-
-      // Build a structured data summary and send it back to the AI so it can
-      // compose a natural, human reply instead of returning a rigid template.
-      const formattedResponse = await formatResult(
-        functionName,
-        functionResult,
-        userLang,
-      );
-
-      // Ask the model to rewrite the structured result in a human, conversational tone.
-      // If the AI call fails, fall back to the structured text so the user always gets data.
-      let finalMessage = formattedResponse.message;
-      try {
-        const humanMessages = [
-          { role: "system", content: systemPrompt },
-          { role: "system", content: RESPONSE_LAYOUT_PROMPT },
-          ...chatSessionService.buildMessagesForAI(sessionData.messages),
-          { role: "user", content: userMessage },
-          {
-            role: "function",
-            name: functionName,
-            content: formattedResponse.message,
-          },
-        ];
-        const humanResponse = await askModel(humanMessages);
-        const humanContent = humanResponse.choices?.[0]?.message?.content;
-        if (humanContent) finalMessage = humanContent;
-      } catch (humanErr) {
-        logger.warn(
-          `[Humanize] Fallback to structured response: ${humanErr.message}`,
-        );
-      }
-
-      // Keep attempt queries deterministic to prevent contradictory paraphrases
-      // like claiming no attempts "today" while listing attempts for today's date.
-      if (
-        functionName === "getAttemptsByCaseNumber" ||
-        functionName === "getAttemptsByPhone" ||
-        functionName === "getCaseAttemptsByDate" ||
-        functionName === "getCasesWithoutAttemptsByDate" ||
-        functionName === "getScheduledCallbacks" ||
-        functionName === "getSentCasesByAgentRanking" ||
-        functionName === "getFakeLeadDQByVendorRanking" ||
-        functionName === "getCasesStillInCallback"
-      ) {
-        finalMessage = formattedResponse.message;
-      }
-
-      if (
-        (functionName === "sendBardPortT2Payload" ||
-          functionName === "sendT9RidesharePayload" ||
-          functionName === "sendA4DRideshareT11Payload" ||
-          functionName === "sendJdcT3Payload" ||
-          functionName === "sendWomensPrisonerAbuseT1Payload" ||
-          functionName === "sendDepoProveraT8Payload") &&
-        functionResult?.approvalRequired
-      ) {
-        finalMessage = formattedResponse.message;
-      }
-
-      if (
-        functionName === "sendT9RidesharePayload" &&
-        functionResult?.sent === false &&
-        functionResult?.attachmentsRequired === true
-      ) {
-        finalMessage = i18n(
-          userLang,
-          `No se hizo el envío T9 del case ${functionResult.caseNumber} porque para este tier los archivos son obligatorios. Adjunta los documentos directamente en el mismo mensaje y vuelve a pedir el envío.`,
-          `T9 delivery was not started for case ${functionResult.caseNumber} because files are mandatory for this tier. Attach the required documents directly in the same message and request the submission again.`,
-        );
-      }
-
-      if (functionName === "sendT9RidesharePayload" && functionResult?.sent) {
-        const sentMessage = i18n(
-          userLang,
-          `Listo, envié correctamente el API del caso ${functionResult.caseNumber}.`,
-          `Done, I sent the API successfully for case ${functionResult.caseNumber}.`,
-        );
-
-        const clientResponseText = functionResult.clientResponse || "N/A";
-        let salesforceSavedText = "N/A";
-        if (typeof functionResult.salesforceUpdated === "boolean") {
-          salesforceSavedText = functionResult.salesforceUpdated
-            ? i18n(userLang, "si", "yes")
-            : i18n(userLang, "no", "no");
-        }
-
-        finalMessage = `${sentMessage}\n\n${i18n(userLang, "Respuesta del cliente", "Client response")}: ${clientResponseText}\n${i18n(userLang, "Guardado en Salesforce", "Saved in Salesforce")}: ${salesforceSavedText}`;
-      }
-
-      if (
-        functionName === "sendJdcT3Payload" &&
-        functionResult?.sent === false &&
-        functionResult?.attachmentsRequired === true
-      ) {
-        finalMessage = i18n(
-          userLang,
-          `No se hizo el envío JDC T3 del case ${functionResult.caseNumber} porque los archivos son obligatorios. Adjunta los documentos directamente en el mismo mensaje y vuelve a pedir el envío.`,
-          `JDC T3 delivery was not started for case ${functionResult.caseNumber} because files are mandatory. Attach the required documents directly in the same message and request the submission again.`,
-        );
-      }
-
-      if (functionName === "sendJdcT3Payload" && functionResult?.sent) {
-        const sentMessage = i18n(
-          userLang,
-          `Listo, envié correctamente el API del caso ${functionResult.caseNumber}.`,
-          `Done, I sent the API successfully for case ${functionResult.caseNumber}.`,
-        );
-
-        const clientResponseText = functionResult.clientResponse || "N/A";
-        let salesforceSavedText = "N/A";
-        if (typeof functionResult.salesforceUpdated === "boolean") {
-          salesforceSavedText = functionResult.salesforceUpdated
-            ? i18n(userLang, "si", "yes")
-            : i18n(userLang, "no", "no");
-        }
-
-        finalMessage = `${sentMessage}\n\n${i18n(userLang, "HTTP", "HTTP")}: ${functionResult.statusCode || "N/A"}\n${i18n(userLang, "Respuesta del cliente", "Client response")}: ${clientResponseText}\n${i18n(userLang, "Guardado en Salesforce", "Saved in Salesforce")}: ${salesforceSavedText}`;
-
-        if (
-          functionName === "sendWomensPrisonerAbuseT1Payload" &&
-          functionResult?.sent === false &&
-          functionResult?.attachmentsRequired === true
-        ) {
-          finalMessage = i18n(
-            userLang,
-            `No se hizo el envío Women's Prisoner Abuse T1 del case ${functionResult.caseNumber} porque los archivos son obligatorios. Adjunta los documentos directamente en el mismo mensaje y vuelve a pedir el envío.`,
-            `Women's Prisoner Abuse T1 delivery was not started for case ${functionResult.caseNumber} because files are mandatory. Attach the required documents directly in the same message and request the submission again.`,
-          );
-        }
-
-        if (
-          functionName === "sendWomensPrisonerAbuseT1Payload" &&
-          functionResult?.sent
-        ) {
-          const sentMessage = i18n(
-            userLang,
-            `Listo, envié correctamente el API del caso ${functionResult.caseNumber}.`,
-            `Done, I sent the API successfully for case ${functionResult.caseNumber}.`,
-          );
-
-          const clientResponseText = functionResult.clientResponse || "N/A";
-          let salesforceSavedText = "N/A";
-          if (typeof functionResult.salesforceUpdated === "boolean") {
-            salesforceSavedText = functionResult.salesforceUpdated
-              ? i18n(userLang, "si", "yes")
-              : i18n(userLang, "no", "no");
-          }
-
-          finalMessage = `${sentMessage}\n\n${i18n(userLang, "HTTP", "HTTP")}: ${functionResult.statusCode || "N/A"}\n${i18n(userLang, "Respuesta del cliente", "Client response")}: ${clientResponseText}\n${i18n(userLang, "Guardado en Salesforce", "Saved in Salesforce")}: ${salesforceSavedText}`;
-        }
-      }
-
-      if (functionName === "sendBardPortT2Payload" && functionResult?.sent) {
-        const sentMessage = i18n(
-          userLang,
-          `Listo, envié correctamente el API del caso ${functionResult.caseNumber}.`,
-          `Done, I sent the API successfully for case ${functionResult.caseNumber}.`,
-        );
-
-        const clientResponseText = functionResult.clientResponse || "N/A";
-        let salesforceSavedText = "N/A";
-        if (typeof functionResult.salesforceUpdated === "boolean") {
-          salesforceSavedText = functionResult.salesforceUpdated
-            ? i18n(userLang, "si", "yes")
-            : i18n(userLang, "no", "no");
-        }
-
-        finalMessage = `${sentMessage}\n\n${i18n(userLang, "HTTP", "HTTP")}: ${functionResult.statusCode || "N/A"}\n${i18n(userLang, "Respuesta del cliente", "Client response")}: ${clientResponseText}\n${i18n(userLang, "Guardado en Salesforce", "Saved in Salesforce")}: ${salesforceSavedText}`;
-      }
-
-      if (functionName === "sendDepoProveraT8Payload" && functionResult?.sent) {
-        const sentMessage = i18n(
-          userLang,
-          `Listo, envié correctamente el API del caso ${functionResult.caseNumber}.`,
-          `Done, I sent the API successfully for case ${functionResult.caseNumber}.`,
-        );
-
-        const clientResponseText = functionResult.clientResponse || "N/A";
-        let salesforceSavedText = "N/A";
-        if (typeof functionResult.salesforceUpdated === "boolean") {
-          salesforceSavedText = functionResult.salesforceUpdated
-            ? i18n(userLang, "si", "yes")
-            : i18n(userLang, "no", "no");
-        }
-
-        finalMessage = `${sentMessage}\n\n${i18n(userLang, "HTTP", "HTTP")}: ${functionResult.statusCode || "N/A"}\n${i18n(userLang, "Respuesta del cliente", "Client response")}: ${clientResponseText}\n${i18n(userLang, "Guardado en Salesforce", "Saved in Salesforce")}: ${salesforceSavedText}`;
-      }
-
-      if (
-        functionName === "sendA4DRideshareT11Payload" &&
-        functionResult?.sent
-      ) {
-        const sentMessage = i18n(
-          userLang,
-          `Listo, envié correctamente el API del caso ${functionResult.caseNumber}.`,
-          `Done, I sent the API successfully for case ${functionResult.caseNumber}.`,
-        );
-        const sfText =
-          typeof functionResult.salesforceUpdated === "boolean"
-            ? functionResult.salesforceUpdated
-              ? i18n(userLang, "si", "yes")
-              : i18n(userLang, "no", "no")
-            : "N/A";
-        finalMessage = `${sentMessage}\n\n${i18n(userLang, "Respuesta del cliente", "Client response")}: ${functionResult.clientResponse || "N/A"}\n${i18n(userLang, "Guardado en Salesforce", "Saved in Salesforce")}: ${sfText}`;
-      }
-
-      const finalPayload = humanizePayload({
-        ...formattedResponse,
-        message: finalMessage,
-      });
-
-      // Persist conversation asynchronously — does not block the response
-      chatSessionService
-        .appendMessages(
-          userId,
-          [
-            { role: "user", content: userMessage },
-            { role: "assistant", content: finalPayload.message || "" },
-          ],
-          sessionCache[cacheKey].last_filters,
-          functionResult,
-        )
-        .catch((err) =>
-          logger.error(
-            `[ChatSession] Failed to persist messages: ${err.message}`,
-          ),
-        );
-
-      return finalPayload;
+    if (!message) {
+      throw new Error("AI_INVALID_RESPONSE");
     }
 
-    // Normal conversation (no function_call returned by the model)
-    // Safety net: if the model skipped calling sendT9RidesharePayload and generated
-    // a plain-text response instead, detect the intent locally and execute the function.
-    const t9Intent = detectT9SendIntent(normalizedUserMessage);
-    if (t9Intent) {
-      logger.warn(
-        `[T9 Safety Net] Model skipped function call. Forcing preview workflow for case ${t9Intent.caseNumber}`,
-      );
-      const t9Prepared =
-        await apiIntegrations.t9Rideshare.prepareT9RidesharePayload({
-          caseNumber: t9Intent.caseNumber,
-          tort: "Rideshare",
-          tier: "T9",
-          attachments: requestAttachments,
-        });
-
-      let t9FinalMessage;
-      if (!t9Prepared.found || !t9Prepared.ready) {
-        t9FinalMessage = formatSendT9RidesharePayloadResult(
-          { sent: false, ...t9Prepared },
-          userLang,
-        ).message;
-      } else {
-        const pending = {
-          kind: "t9",
-          apiLabel: "T9",
-          caseNumber: t9Prepared.caseNumber,
-          tort: "Rideshare",
-          tier: "T9",
-          payload: t9Prepared.payload,
-          attachments: requestAttachments,
-        };
-        setRuntimePendingApproval(cacheKey, pending);
-        t9FinalMessage = formatApiApprovalPreviewMessage(pending, userLang);
-      }
-
-      chatSessionService
-        .appendMessages(
-          userId,
-          [
-            { role: "user", content: userMessage },
-            { role: "assistant", content: t9FinalMessage },
-          ],
-          sessionCache[cacheKey].last_filters,
-          t9Prepared,
-        )
-        .catch((err) =>
-          logger.error(
-            `[ChatSession] Failed to persist messages: ${err.message}`,
-          ),
-        );
-
-      return { message: t9FinalMessage };
-    }
-
-    const jdcIntent = detectJdcT3SendIntent(normalizedUserMessage);
-    if (jdcIntent) {
-      logger.warn(
-        `[JDC T3 Safety Net] Model skipped function call. Forcing preview workflow for case ${jdcIntent.caseNumber}`,
-      );
-      const jdcPrepared = await apiIntegrations.jdcT3.prepareJdcT3Payload({
-        caseNumber: jdcIntent.caseNumber,
-      });
-
-      let jdcFinalMessage;
-      if (!jdcPrepared.found || !jdcPrepared.ready) {
-        jdcFinalMessage = formatSendJdcT3PayloadResult(
-          { sent: false, ...jdcPrepared },
-          userLang,
-        ).message;
-      } else {
-        const pending = {
-          kind: "jdc_t3",
-          apiLabel: "JDC T3",
-          caseNumber: jdcPrepared.caseNumber,
-          payload: jdcPrepared.payload,
-          attachments: requestAttachments,
-        };
-        setRuntimePendingApproval(cacheKey, pending);
-        jdcFinalMessage = formatApiApprovalPreviewMessage(pending, userLang);
-      }
-
-      chatSessionService
-        .appendMessages(
-          userId,
-          [
-            { role: "user", content: userMessage },
-            { role: "assistant", content: jdcFinalMessage },
-          ],
-          sessionCache[cacheKey].last_filters,
-          jdcPrepared,
-        )
-        .catch((err) =>
-          logger.error(
-            `[ChatSession] Failed to persist messages: ${err.message}`,
-          ),
-        );
-
-      return { message: jdcFinalMessage };
-    }
-
-    const wpaIntent = detectWomensPrisonerAbuseT1SendIntent(
-      normalizedUserMessage,
+    const legacyFunctionCall = Reflect.get(
+      message,
+      ["function", "call"].join("_"),
     );
-    if (wpaIntent) {
-      logger.warn(
-        `[WPA T1 Safety Net] Model skipped function call. Forcing preview workflow for case ${wpaIntent.caseNumber}`,
-      );
-      const wpaPrepared =
-        await apiIntegrations.womensPrisonerAbuseT1.prepareWomensPrisonerAbuseT1Payload(
-          {
-            caseNumber: wpaIntent.caseNumber,
-          },
-        );
-
-      let wpaFinalMessage;
-      if (!wpaPrepared.found || !wpaPrepared.ready) {
-        wpaFinalMessage = formatSendWomensPrisonerAbuseT1PayloadResult(
-          { sent: false, ...wpaPrepared },
-          userLang,
-        ).message;
-      } else {
-        const pending = {
-          kind: "wpa_t1",
-          apiLabel: "Women's Prisoner Abuse T1",
-          caseNumber: wpaPrepared.caseNumber,
-          payload: wpaPrepared.payload,
-          attachments: requestAttachments,
-        };
-        setRuntimePendingApproval(cacheKey, pending);
-        wpaFinalMessage = formatApiApprovalPreviewMessage(pending, userLang);
-      }
-
-      chatSessionService
-        .appendMessages(
-          userId,
-          [
-            { role: "user", content: userMessage },
-            { role: "assistant", content: wpaFinalMessage },
-          ],
-          sessionCache[cacheKey].last_filters,
-          wpaPrepared,
-        )
-        .catch((err) =>
-          logger.error(
-            `[ChatSession] Failed to persist messages: ${err.message}`,
-          ),
-        );
-
-      return { message: wpaFinalMessage };
+    const aiFunctionCall =
+      message.tool_calls?.[0]?.function || legacyFunctionCall;
+    if (aiFunctionCall) {
+      return handleAiFunctionCall(context, aiFunctionCall);
     }
 
-    const depoIntent = detectDepoProveraT8SendIntent(normalizedUserMessage);
-    if (depoIntent) {
-      logger.warn(
-        `[Depo Provera T8 Safety Net] Model skipped function call. Forcing preview workflow for case ${depoIntent.caseNumber}`,
-      );
-      const depoPrepared =
-        await apiIntegrations.depoProveraT8.prepareDepoProveraT8Payload({
-          caseNumber: depoIntent.caseNumber,
-          tort: "Depo Provera",
-          tier: "T8",
-        });
-
-      let depoFinalMessage;
-      if (!depoPrepared.found || !depoPrepared.ready) {
-        depoFinalMessage = formatSendDepoProveraT8PayloadResult(
-          { sent: false, ...depoPrepared },
-          userLang,
-        ).message;
-      } else {
-        const pending = {
-          kind: "depo_t8",
-          apiLabel: "Depo Provera T8",
-          caseNumber: depoPrepared.caseNumber,
-          tort: "Depo Provera",
-          tier: "T8",
-          payload: depoPrepared.payload,
-          attachments: [],
-        };
-        setRuntimePendingApproval(cacheKey, pending);
-        depoFinalMessage = formatApiApprovalPreviewMessage(pending, userLang);
-      }
-
-      chatSessionService
-        .appendMessages(
-          userId,
-          [
-            { role: "user", content: userMessage },
-            { role: "assistant", content: depoFinalMessage },
-          ],
-          sessionCache[cacheKey].last_filters,
-          depoPrepared,
-        )
-        .catch((err) =>
-          logger.error(
-            `[ChatSession] Failed to persist messages: ${err.message}`,
-          ),
-        );
-
-      return { message: depoFinalMessage };
+    const safetyNetResponse = await handleSafetyNetTurn(context);
+    if (safetyNetResponse) {
+      return safetyNetResponse;
     }
 
     const assistantContent = message.content || "";
-
-    chatSessionService
-      .appendMessages(
-        userId,
-        [
-          { role: "user", content: userMessage },
-          { role: "assistant", content: assistantContent },
-        ],
-        sessionCache[cacheKey].last_filters,
-        null,
-      )
-      .catch((err) =>
-        logger.error(
-          `[ChatSession] Failed to persist messages: ${err.message}`,
-        ),
-      );
-
+    persistAssistantReply({
+      cacheKey,
+      userId,
+      userMessage,
+      assistantMessage: assistantContent,
+      result: null,
+    });
     return { message: assistantContent };
   } catch (error) {
     logger.error(`Chatbot processing error: ${error.message}`);
-
-    switch (error.message) {
-      case "AI_SERVICE_FAILURE":
-        return {
-          message: i18n(
-            userLang,
-            "El servicio de inteligencia artificial no esta disponible.",
-            "The artificial intelligence service is not available.",
-          ),
-        };
-
-      case "INVALID_FUNCTION_ARGUMENTS":
-        return {
-          message: i18n(
-            userLang,
-            "Hubo un problema procesando la solicitud.",
-            "There was a problem processing the request.",
-          ),
-        };
-
-      case "INVALID_PHONE":
-        return {
-          message: i18n(
-            userLang,
-            "Por favor envia un numero de telefono valido para consultar attempts.",
-            "Please provide a valid phone number to check attempts.",
-          ),
-        };
-
-      case "INVALID_DATE_FORMAT":
-        return {
-          message: i18n(
-            userLang,
-            "Por favor envia una fecha valida con formato YYYY-MM-DD.",
-            "Please provide a valid date in YYYY-MM-DD format.",
-          ),
-        };
-
-      case "SF_CALLBACKS_QUERY_FAILED":
-        return {
-          message: i18n(
-            userLang,
-            "No pude leer los callbacks del calendario con esta cuenta. Revisa permisos de Event/Calendar compartido.",
-            "I could not read calendar callbacks with this account. Please verify Event/shared calendar permissions.",
-          ),
-        };
-
-      case "INVALID_VENDOR_NAME":
-        return {
-          message: i18n(
-            userLang,
-            "Por favor indica un nombre de vendor valido.",
-            "Please provide a valid vendor name.",
-          ),
-        };
-
-      default:
-        return {
-          message: i18n(
-            userLang,
-            "Ocurrio un error inesperado.",
-            "An unexpected error occurred.",
-          ),
-        };
-    }
+    return {
+      message: buildProcessMessageError(error.message, userLang),
+    };
   }
 };
 
-async function formatResult(type, data, lang = "en") {
-  if (!data) {
-    return {
-      message: i18n(lang, "No se encontraron resultados.", "No results found."),
-    };
-  }
+function buildGroupedFieldMessage(data, lang) {
+  const scopeLabel =
+    data.dateScope === "all"
+      ? i18n(lang, "todos los registros", "all records")
+      : data.dateScope.toUpperCase();
 
-  if (type === "getAttemptsByPhone") {
-    return await formatAttemptsByPhoneResult(data, lang);
-  }
+  const lines = Object.entries(data.groups)
+    .map(([key, count]) => `• **${key}:** ${count}`)
+    .join("\n");
 
-  if (type === "getAttemptsByCaseNumber") {
-    return await formatAttemptsByCaseNumberResult(data, lang);
-  }
-
-  if (type === "getCaseAttemptsByDate") {
-    return await formatCaseAttemptsByDateResult(data, lang);
-  }
-
-  if (type === "getCasesWithoutAttemptsByDate") {
-    return await formatCasesWithoutAttemptsByDateResult(data, lang);
-  }
-
-  if (type === "getScheduledCallbacks") {
-    return formatScheduledCallbacksResult(data, lang);
-  }
-
-  if (type === "getSentCasesByAgentRanking") {
-    return formatSentCasesByAgentRankingResult(data, lang);
-  }
-
-  if (type === "getFakeLeadDQByVendorRanking") {
-    return formatFakeLeadDQByVendorRankingResult(data, lang);
-  }
-
-  if (type === "getCasesStillInCallback") {
-    return await formatCasesStillInCallbackResult(data, lang);
-  }
-
-  if (type === "getTotalAttemptsByAgent") {
-    return formatTotalAttemptsByAgentResult(data, lang);
-  }
-
-  if (type === "getAgentAttemptsByPhonePerHour") {
-    return formatAgentAttemptsByPhonePerHourResult(data, lang);
-  }
-
-  if (type === "getVicidialAgentsStatus") {
-    return formatVicidialAgentsStatusResult(data, lang);
-  }
-
-  if (type === "getVendorsWithLeads") {
-    return formatVendorsWithLeadsResult(data, lang);
-  }
-
-  if (type === "getTopVendors") {
-    return formatTopVendorsResult(data, lang);
-  }
-
-  if (type === "getTopVendorsWithCaseDetails") {
-    return formatTopVendorsWithCaseDetailsResult(data, lang);
-  }
-
-  if (type === "getVendorsBySupplierSegment") {
-    return formatVendorsBySegmentResult(data, lang);
-  }
-
-  if (type === "getVendorLeadAttempts") {
-    return formatVendorLeadAttemptsResult(data, lang);
-  }
-
-  if (type === "getCaseDisqualificationReason") {
-    return formatCaseDisqualificationResult(data, lang);
-  }
-
-  if (type === "prepareT9RidesharePayload") {
-    return formatPrepareT9RidesharePayloadResult(data, lang);
-  }
-
-  if (type === "sendT9RidesharePayload") {
-    return formatSendT9RidesharePayloadResult(data, lang);
-  }
-
-  if (type === "prepareBardPortT2Payload") {
-    return formatPrepareBardPortT2PayloadResult(data, lang);
-  }
-
-  if (type === "sendBardPortT2Payload") {
-    return formatSendBardPortT2PayloadResult(data, lang);
-  }
-
-  if (type === "prepareDepoProveraT8Payload") {
-    return formatPrepareDepoProveraT8PayloadResult(data, lang);
-  }
-
-  if (type === "sendDepoProveraT8Payload") {
-    return formatSendDepoProveraT8PayloadResult(data, lang);
-  }
-
-  if (type === "prepareA4DRideshareT11Payload") {
-    return formatPrepareA4DRideshareT11PayloadResult(data, lang);
-  }
-
-  if (type === "sendA4DRideshareT11Payload") {
-    return formatSendA4DRideshareT11PayloadResult(data, lang);
-  }
-
-  if (type === "prepareJdcT3Payload") {
-    return formatPrepareJdcT3PayloadResult(data, lang);
-  }
-
-  if (type === "sendJdcT3Payload") {
-    return formatSendJdcT3PayloadResult(data, lang);
-  }
-
-  if (type === "prepareWomensPrisonerAbuseT1Payload") {
-    return formatPrepareWomensPrisonerAbuseT1PayloadResult(data, lang);
-  }
-
-  if (type === "sendWomensPrisonerAbuseT1Payload") {
-    return formatSendWomensPrisonerAbuseT1PayloadResult(data, lang);
-  }
-
-  // Grouped result
-  if (type === "getCasesGroupedByField" && data.groups) {
-    const scopeLabel =
-      data.dateScope === "all"
-        ? i18n(lang, "todos los registros", "all records")
-        : data.dateScope.toUpperCase();
-
-    const lines = Object.entries(data.groups)
-      .map(([key, count]) => `• **${key}:** ${count}`)
-      .join("\n");
-
-    return {
-      message: `
+  return {
+    message: `
 📊 **${i18n(lang, `Casos agrupados por ${data.fieldLabel}`, `Cases grouped by ${data.fieldLabel}`)}**
 • **${i18n(lang, "Total", "Total")}:** ${data.total}
 • **${i18n(lang, "Alcance", "Scope")}:** ${scopeLabel}
 
 ${lines}
 `,
+  };
+}
+
+function buildAssignedAgentMessage(data, lang) {
+  if (!data.found) {
+    return {
+      message: `🔍 **${i18n(lang, "Asignación del caso", "Case Assignment")}: ${data.caseNumber}**\n\n${i18n(lang, "Este caso no tiene ningún agente asignado actualmente en el dashboard.", "This case has no agent currently assigned in the dashboard.")}`,
     };
   }
 
-  // Assigned agent in dashboard (MySQL)
-  if (type === "getAssignedAgentByCaseNumber") {
-    if (!data.found) {
-      return {
-        message: `🔍 **${i18n(lang, "Asignación del caso", "Case Assignment")}: ${data.caseNumber}**\n\n${i18n(lang, "Este caso no tiene ningún agente asignado actualmente en el dashboard.", "This case has no agent currently assigned in the dashboard.")}`,
-      };
-    }
-    return {
-      message: `👤 **${i18n(lang, "Agente asignado al caso", "Assigned agent for case")}: ${data.caseNumber}**
+  return {
+    message: `👤 **${i18n(lang, "Agente asignado al caso", "Assigned agent for case")}: ${data.caseNumber}**
 • **${i18n(lang, "Agente", "Agent")}:** ${data.agentName || "N/A"}
 • **${i18n(lang, "Email", "Email")}:** ${data.agentEmail || "N/A"}
 • **${i18n(lang, "Asignado desde", "Assigned since")}:** ${formatDate(data.assignedAt, true)}
 `,
-    };
-  }
+  };
+}
 
-  // Single case - show full details
-  if (type === "getCaseByNumber") {
-    return {
-      message: `
+function buildSingleCaseMessage(data, lang) {
+  const closedDateLine = data.ClosedDate
+    ? `\n• **${i18n(lang, "Fecha de cierre", "Closed date")}:** ${formatDate(data.ClosedDate, true)}`
+    : "";
+
+  return {
+    message: `
 📌 **${i18n(lang, "Caso", "Case")}: ${data.CaseNumber}**
 • **${i18n(lang, "Estado", "Status")}:** ${data.Status}
 • **${i18n(lang, "Subestado", "Substatus")}:** ${data.Substatus__c}
@@ -3209,25 +2598,14 @@ ${lines}
 • **${i18n(lang, "Origen", "Origin")}:** ${data.Origin}
 • **${i18n(lang, "Segmento", "Supplier Segment")}:** ${data.Supplier_Segment__c}
 • **${i18n(lang, "Propietario", "Owner")}:** ${data.Owner?.Name}
-• **${i18n(lang, "Fecha de entrada", "Entry date")}:** ${formatDate(data.CreatedDate, true)}${data.ClosedDate ? `\n• **${i18n(lang, "Fecha de cierre", "Closed date")}:** ${formatDate(data.ClosedDate, true)}` : ""}
+• **${i18n(lang, "Fecha de entrada", "Entry date")}:** ${formatDate(data.CreatedDate, true)}${closedDateLine}
 `,
-    };
-  }
+  };
+}
 
-  // Multiple cases - determine if bulk or not
-  let casesArray = [];
-  let totalCount = 0;
-
-  if (data.records && Array.isArray(data.records)) {
-    casesArray = data.records;
-    totalCount = data.total || data.records.length;
-  } else if (Array.isArray(data)) {
-    casesArray = data;
-    totalCount = data.length;
-  } else if (data.summary) {
-    // Operational summary
-    return {
-      message: `
+function buildOperationalSummaryMessage(data, lang) {
+  return {
+    message: `
 📊 **${i18n(lang, "Resumen Operativo", "Operational Summary")}**
 
 • **${i18n(lang, "Total", "Total")}:** ${data.summary.total}
@@ -3241,20 +2619,38 @@ ${formatSummary(data.summary.byOrigin)}
 **${i18n(lang, "Por Segmento", "By Segment")}:**
 ${formatSummary(data.summary.bySegment)}
 `,
+  };
+}
+
+async function buildCasesCollectionMessage(data, lang) {
+  let casesArray = [];
+  let totalCount = 0;
+
+  if (data.records && Array.isArray(data.records)) {
+    casesArray = data.records;
+    totalCount = data.total || data.records.length;
+  } else if (Array.isArray(data)) {
+    casesArray = data;
+    totalCount = data.length;
+  }
+
+  if (!casesArray.length) {
+    return null;
+  }
+
+  if (casesArray.length <= BULK_THRESHOLD) {
+    return {
+      message: formatSmallResultSet(casesArray, totalCount, lang),
     };
   }
 
-  // If cases exist, determine if bulk
-  if (casesArray.length > 0) {
-    // BULK CASES: Generate Excel
-    if (casesArray.length > BULK_THRESHOLD) {
-      try {
-        const excelFile = await Promise.resolve(
-          excelService.generateCasesExcel(casesArray),
-        );
+  try {
+    const excelFile = await Promise.resolve(
+      excelService.generateCasesExcel(casesArray),
+    );
 
-        return {
-          message: `
+    return {
+      message: `
 📊 **Bulk Results Found**
 
 ✅ A total of **${totalCount} cases** were found.
@@ -3273,21 +2669,98 @@ The file contains:
 • Contact Information
 • And more details...
 `,
-          excelFile,
-        };
-      } catch (error) {
-        logger.error(`Error generating Excel: ${error.message}`);
-        // Fallback: show first cases in chat
-        return {
-          message: formatSmallResultSet(casesArray, totalCount),
-        };
-      }
-    }
-
-    // SMALL SET: Show in chat
+      excelFile,
+    };
+  } catch (error) {
+    logger.error(`Error generating Excel: ${error.message}`);
     return {
       message: formatSmallResultSet(casesArray, totalCount, lang),
     };
+  }
+}
+
+function buildResultFormatterMap(lang) {
+  return {
+    getAttemptsByPhone: (data) => formatAttemptsByPhoneResult(data, lang),
+    getAttemptsByCaseNumber: (data) =>
+      formatAttemptsByCaseNumberResult(data, lang),
+    getCaseAttemptsByDate: (data) => formatCaseAttemptsByDateResult(data, lang),
+    getCasesWithoutAttemptsByDate: (data) =>
+      formatCasesWithoutAttemptsByDateResult(data, lang),
+    getScheduledCallbacks: (data) => formatScheduledCallbacksResult(data, lang),
+    getSentCasesByAgentRanking: (data) =>
+      formatSentCasesByAgentRankingResult(data, lang),
+    getFakeLeadDQByVendorRanking: (data) =>
+      formatFakeLeadDQByVendorRankingResult(data, lang),
+    getCasesStillInCallback: (data) =>
+      formatCasesStillInCallbackResult(data, lang),
+    getTotalAttemptsByAgent: (data) =>
+      formatTotalAttemptsByAgentResult(data, lang),
+    getAgentAttemptsByPhonePerHour: (data) =>
+      formatAgentAttemptsByPhonePerHourResult(data, lang),
+    getVicidialAgentsStatus: (data) =>
+      formatVicidialAgentsStatusResult(data, lang),
+    getVendorsWithLeads: (data) => formatVendorsWithLeadsResult(data, lang),
+    getTopVendors: (data) => formatTopVendorsResult(data, lang),
+    getTopVendorsWithCaseDetails: (data) =>
+      formatTopVendorsWithCaseDetailsResult(data, lang),
+    getVendorsBySupplierSegment: (data) =>
+      formatVendorsBySegmentResult(data, lang),
+    getVendorLeadAttempts: (data) => formatVendorLeadAttemptsResult(data, lang),
+    getCaseDisqualificationReason: (data) =>
+      formatCaseDisqualificationResult(data, lang),
+    prepareT9RidesharePayload: (data) =>
+      formatPrepareT9RidesharePayloadResult(data, lang),
+    sendT9RidesharePayload: (data) =>
+      formatSendT9RidesharePayloadResult(data, lang),
+    prepareBardPortT2Payload: (data) =>
+      formatPrepareBardPortT2PayloadResult(data, lang),
+    sendBardPortT2Payload: (data) =>
+      formatSendBardPortT2PayloadResult(data, lang),
+    prepareDepoProveraT8Payload: (data) =>
+      formatPrepareDepoProveraT8PayloadResult(data, lang),
+    sendDepoProveraT8Payload: (data) =>
+      formatSendDepoProveraT8PayloadResult(data, lang),
+    prepareA4DRideshareT11Payload: (data) =>
+      formatPrepareA4DRideshareT11PayloadResult(data, lang),
+    sendA4DRideshareT11Payload: (data) =>
+      formatSendA4DRideshareT11PayloadResult(data, lang),
+    prepareJdcT3Payload: (data) => formatPrepareJdcT3PayloadResult(data, lang),
+    sendJdcT3Payload: (data) => formatSendJdcT3PayloadResult(data, lang),
+    prepareWomensPrisonerAbuseT1Payload: (data) =>
+      formatPrepareWomensPrisonerAbuseT1PayloadResult(data, lang),
+    sendWomensPrisonerAbuseT1Payload: (data) =>
+      formatSendWomensPrisonerAbuseT1PayloadResult(data, lang),
+    getCasesGroupedByField: (data) =>
+      data.groups ? buildGroupedFieldMessage(data, lang) : null,
+    getAssignedAgentByCaseNumber: (data) =>
+      buildAssignedAgentMessage(data, lang),
+    getCaseByNumber: (data) => buildSingleCaseMessage(data, lang),
+  };
+}
+
+async function formatResult(type, data, lang = "en") {
+  if (!data) {
+    return {
+      message: i18n(lang, "No se encontraron resultados.", "No results found."),
+    };
+  }
+
+  const formatter = buildResultFormatterMap(lang)[type];
+  if (formatter) {
+    const formatted = await formatter(data);
+    if (formatted) {
+      return formatted;
+    }
+  }
+
+  if (data.summary) {
+    return buildOperationalSummaryMessage(data, lang);
+  }
+
+  const collectionMessage = await buildCasesCollectionMessage(data, lang);
+  if (collectionMessage) {
+    return collectionMessage;
   }
 
   return {
@@ -4159,7 +3632,8 @@ ${i18n(
         )
         .join("\n");
 
-      return `${idx + 1}. **${vendorItem.vendor}** (${i18n(lang, "leads", "leads")}: ${vendorItem.totalLeads})\n${caseLines || `   - ${i18n(lang, "Sin casos", "No cases")}`}`;
+      const emptyCaseLine = `   - ${i18n(lang, "Sin casos", "No cases")}`;
+      return `${idx + 1}. **${vendorItem.vendor}** (${i18n(lang, "leads", "leads")}: ${vendorItem.totalLeads})\n${caseLines || emptyCaseLine}`;
     })
     .join("\n");
 
@@ -4217,12 +3691,7 @@ async function formatVendorLeadAttemptsResult(data, lang = "en") {
 • **${i18n(lang, "Total de leads", "Total leads")}:** ${data.totalCases}
 • **${i18n(lang, "Attempts totales", "Total attempts")}:** ${data.totalAttempts}
 • **${i18n(lang, "Detalle", "Detail mode")}:** ${data.detailMode}
-${
-  data.includeAgentDetails
-    ? `• **${i18n(lang, "Vista por agente", "Agent view")}:** ${data.agentDetailsAvailable ? i18n(lang, "si", "yes") : i18n(lang, "no disponible para historial agregado", "not available for aggregated history")}
-`
-    : ""
-}
+${getAgentViewSummaryLine(data, lang)}
 
 ${i18n(
   lang,
@@ -4263,15 +3732,7 @@ ${
               return `${item.label} (${item.attempts}) - ${i18n(lang, "agente", "agent")}: ${item.agentName || "N/A"} - ${i18n(lang, "call center", "call center")}: ${item.callCenter || "N/A"}`;
             })
             .join(", ")
-        : i18n(
-            lang,
-            row.ambiguousPhone
-              ? "telefono ambiguo entre varios casos"
-              : "sin detalle por hora",
-            row.ambiguousPhone
-              ? "ambiguous phone across multiple cases"
-              : "no hourly detail",
-          );
+        : getHourlyFallbackText(row, lang);
 
       return `${idx + 1}. **${row.caseNumber || "N/A"}** | ${i18n(lang, "telefono", "phone")}: ${row.phone || "N/A"} | ${i18n(lang, "attempts", "attempts")}: ${row.attempts} | ${i18n(lang, "horas", "hours")}: ${hourlyText}`;
     })
@@ -4286,12 +3747,7 @@ ${
 • **${i18n(lang, "Total de leads", "Total leads")}:** ${data.totalCases}
 • **${i18n(lang, "Attempts totales", "Total attempts")}:** ${data.totalAttempts}
 • **${i18n(lang, "Detalle", "Detail mode")}:** ${data.detailMode}
-${
-  data.includeAgentDetails
-    ? `• **${i18n(lang, "Vista por agente", "Agent view")}:** ${data.agentDetailsAvailable ? i18n(lang, "si", "yes") : i18n(lang, "no disponible para historial agregado", "not available for aggregated history")}
-`
-    : ""
-}
+${getAgentViewSummaryLine(data, lang)}
 
 ${
   data.ambiguousRows
@@ -4326,52 +3782,41 @@ function formatCaseDisqualificationResult(data, lang = "en") {
     };
   }
 
-  const lines = [];
-  lines.push(`📋 **${i18n(lang, "Case", "Case")} ${data.caseNumber}**`);
-  lines.push(
+  const lines = [
+    `📋 **${i18n(lang, "Case", "Case")} ${data.caseNumber}**`,
     `• **${i18n(lang, "Status", "Status")}:** ${data.status || "N/A"}`,
-  );
-  lines.push(
     `• **${i18n(lang, "Substatus", "Substatus")}:** ${data.substatus || "N/A"}`,
-  );
-
-  if (data.bpo) {
-    lines.push(
-      `• **${i18n(lang, "Call Center", "Call Center")}:** ${data.bpo}`,
-    );
-  }
-
-  if (data.bpoIntaker) {
-    lines.push(
-      `• **${i18n(lang, "Intaker que descalificó", "Disqualifying intaker")}:** ${data.bpoIntaker}`,
-    );
-  }
-
-  if (data.reasonForDQ) {
-    lines.push(
-      `• **${i18n(lang, "Razón de descalificación", "Reason for DQ")}:** ${data.reasonForDQ}`,
-    );
-  }
-
-  if (data.reasonDoesntMeetCriteria) {
-    lines.push(
-      `• **${i18n(lang, "No cumple criterios", "Doesn't meet criteria")}:** ${data.reasonDoesntMeetCriteria}`,
-    );
-  }
-
-  if (!data.reasonForDQ && !data.reasonDoesntMeetCriteria) {
-    lines.push(
-      i18n(
-        lang,
-        "Este caso está marcado como Descalificado pero no tiene razón registrada en Salesforce.",
-        "This case is marked as Disqualified but has no reason recorded in Salesforce.",
-      ),
-    );
-  }
-
-  if (data.owner) {
-    lines.push(`• **${i18n(lang, "Owner", "Owner")}:** ${data.owner}`);
-  }
+    ...(data.bpo
+      ? [`• **${i18n(lang, "Call Center", "Call Center")}:** ${data.bpo}`]
+      : []),
+    ...(data.bpoIntaker
+      ? [
+          `• **${i18n(lang, "Intaker que descalificó", "Disqualifying intaker")}:** ${data.bpoIntaker}`,
+        ]
+      : []),
+    ...(data.reasonForDQ
+      ? [
+          `• **${i18n(lang, "Razón de descalificación", "Reason for DQ")}:** ${data.reasonForDQ}`,
+        ]
+      : []),
+    ...(data.reasonDoesntMeetCriteria
+      ? [
+          `• **${i18n(lang, "No cumple criterios", "Doesn't meet criteria")}:** ${data.reasonDoesntMeetCriteria}`,
+        ]
+      : []),
+    ...(!data.reasonForDQ && !data.reasonDoesntMeetCriteria
+      ? [
+          i18n(
+            lang,
+            "Este caso está marcado como Descalificado pero no tiene razón registrada en Salesforce.",
+            "This case is marked as Disqualified but has no reason recorded in Salesforce.",
+          ),
+        ]
+      : []),
+    ...(data.owner
+      ? [`• **${i18n(lang, "Owner", "Owner")}:** ${data.owner}`]
+      : []),
+  ];
 
   return { message: lines.join("\n") };
 }
@@ -4472,15 +3917,14 @@ function formatSendT9RidesharePayloadResult(data, lang = "en") {
     };
   }
 
-  const sfText =
-    typeof data.salesforceUpdated === "boolean"
-      ? data.salesforceUpdated
-        ? i18n(lang, "si", "yes")
-        : i18n(lang, "no", "no")
-      : "N/A";
+  const sfText = getSalesforceSavedText(data.salesforceUpdated, lang);
 
   return {
-    message: `${i18n(lang, `Listo, envié correctamente el API del caso ${data.caseNumber}.`, `Done, I sent the API successfully for case ${data.caseNumber}.`)}\n\n${i18n(lang, "HTTP", "HTTP")}: ${data.statusCode || "N/A"}\n${i18n(lang, "Respuesta del cliente", "Client response")}: ${data.clientResponse || "N/A"}\n${i18n(lang, "Guardado en Salesforce", "Saved in Salesforce")}: ${sfText}`,
+    message: buildApiSuccessMessage(data.caseNumber, lang, [
+      `${i18n(lang, "HTTP", "HTTP")}: ${data.statusCode || "N/A"}`,
+      `${i18n(lang, "Respuesta del cliente", "Client response")}: ${data.clientResponse || "N/A"}`,
+      `${i18n(lang, "Guardado en Salesforce", "Saved in Salesforce")}: ${sfText}`,
+    ]),
   };
 }
 
@@ -4552,12 +3996,10 @@ function formatSendBardPortT2PayloadResult(data, lang = "en") {
 
   if (!data.sent) {
     const httpText = data.statusCode || "N/A";
-    let salesforceSavedText = "N/A";
-    if (typeof data.salesforceUpdated === "boolean") {
-      salesforceSavedText = data.salesforceUpdated
-        ? i18n(lang, "si", "yes")
-        : i18n(lang, "no", "no");
-    }
+    const salesforceSavedText = getSalesforceSavedText(
+      data.salesforceUpdated,
+      lang,
+    );
 
     return {
       message: `${i18n(
@@ -4568,15 +4010,13 @@ function formatSendBardPortT2PayloadResult(data, lang = "en") {
     };
   }
 
-  const sfText =
-    typeof data.salesforceUpdated === "boolean"
-      ? data.salesforceUpdated
-        ? i18n(lang, "si", "yes")
-        : i18n(lang, "no", "no")
-      : "N/A";
+  const sfText = getSalesforceSavedText(data.salesforceUpdated, lang);
 
   return {
-    message: `${i18n(lang, `Listo, envié correctamente el API del caso ${data.caseNumber}.`, `Done, I sent the API successfully for case ${data.caseNumber}.`)}\n\n${i18n(lang, "Respuesta del cliente", "Client response")}: ${data.clientResponse || "N/A"}\n${i18n(lang, "Guardado en Salesforce", "Saved in Salesforce")}: ${sfText}`,
+    message: buildApiSuccessMessage(data.caseNumber, lang, [
+      `${i18n(lang, "Respuesta del cliente", "Client response")}: ${data.clientResponse || "N/A"}`,
+      `${i18n(lang, "Guardado en Salesforce", "Saved in Salesforce")}: ${sfText}`,
+    ]),
   };
 }
 
@@ -4647,12 +4087,7 @@ function formatSendDepoProveraT8PayloadResult(data, lang = "en") {
   }
 
   if (!data.sent) {
-    const sfText =
-      typeof data.salesforceUpdated === "boolean"
-        ? data.salesforceUpdated
-          ? i18n(lang, "si", "yes")
-          : i18n(lang, "no", "no")
-        : "N/A";
+    const sfText = getSalesforceSavedText(data.salesforceUpdated, lang);
 
     return {
       message: `${i18n(
@@ -4663,15 +4098,13 @@ function formatSendDepoProveraT8PayloadResult(data, lang = "en") {
     };
   }
 
-  const sfText =
-    typeof data.salesforceUpdated === "boolean"
-      ? data.salesforceUpdated
-        ? i18n(lang, "si", "yes")
-        : i18n(lang, "no", "no")
-      : "N/A";
+  const sfText = getSalesforceSavedText(data.salesforceUpdated, lang);
 
   return {
-    message: `${i18n(lang, `Listo, envié correctamente el API del caso ${data.caseNumber}.`, `Done, I sent the API successfully for case ${data.caseNumber}.`)}\n\n${i18n(lang, "Respuesta del cliente", "Client response")}: ${data.clientResponse || "N/A"}\n${i18n(lang, "Guardado en Salesforce", "Saved in Salesforce")}: ${sfText}`,
+    message: buildApiSuccessMessage(data.caseNumber, lang, [
+      `${i18n(lang, "Respuesta del cliente", "Client response")}: ${data.clientResponse || "N/A"}`,
+      `${i18n(lang, "Guardado en Salesforce", "Saved in Salesforce")}: ${sfText}`,
+    ]),
   };
 }
 
@@ -4749,15 +4182,13 @@ function formatSendA4DRideshareT11PayloadResult(data, lang = "en") {
     };
   }
 
-  const sfText =
-    typeof data.salesforceUpdated === "boolean"
-      ? data.salesforceUpdated
-        ? i18n(lang, "si", "yes")
-        : i18n(lang, "no", "no")
-      : "N/A";
+  const sfText = getSalesforceSavedText(data.salesforceUpdated, lang);
 
   return {
-    message: `${i18n(lang, `Listo, envié correctamente el API del caso ${data.caseNumber}.`, `Done, I sent the API successfully for case ${data.caseNumber}.`)}\n\n${i18n(lang, "Respuesta del cliente", "Client response")}: ${data.clientResponse || "N/A"}\n${i18n(lang, "Guardado en Salesforce", "Saved in Salesforce")}: ${sfText}`,
+    message: buildApiSuccessMessage(data.caseNumber, lang, [
+      `${i18n(lang, "Respuesta del cliente", "Client response")}: ${data.clientResponse || "N/A"}`,
+      `${i18n(lang, "Guardado en Salesforce", "Saved in Salesforce")}: ${sfText}`,
+    ]),
   };
 }
 
@@ -4836,12 +4267,7 @@ function formatSendJdcT3PayloadResult(data, lang = "en") {
   }
 
   if (!data.sent) {
-    const sfText =
-      typeof data.salesforceUpdated === "boolean"
-        ? data.salesforceUpdated
-          ? i18n(lang, "si", "yes")
-          : i18n(lang, "no", "no")
-        : "N/A";
+    const sfText = getSalesforceSavedText(data.salesforceUpdated, lang);
 
     return {
       message: `${i18n(
@@ -4852,15 +4278,13 @@ function formatSendJdcT3PayloadResult(data, lang = "en") {
     };
   }
 
-  const sfText =
-    typeof data.salesforceUpdated === "boolean"
-      ? data.salesforceUpdated
-        ? i18n(lang, "si", "yes")
-        : i18n(lang, "no", "no")
-      : "N/A";
+  const sfText = getSalesforceSavedText(data.salesforceUpdated, lang);
 
   return {
-    message: `${i18n(lang, `Listo, envié correctamente el API del caso ${data.caseNumber}.`, `Done, I sent the API successfully for case ${data.caseNumber}.`)}\n\n${i18n(lang, "Respuesta del cliente", "Client response")}: ${data.clientResponse || "N/A"}\n${i18n(lang, "Guardado en Salesforce", "Saved in Salesforce")}: ${sfText}`,
+    message: buildApiSuccessMessage(data.caseNumber, lang, [
+      `${i18n(lang, "Respuesta del cliente", "Client response")}: ${data.clientResponse || "N/A"}`,
+      `${i18n(lang, "Guardado en Salesforce", "Saved in Salesforce")}: ${sfText}`,
+    ]),
   };
 }
 

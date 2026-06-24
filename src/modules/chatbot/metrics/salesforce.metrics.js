@@ -23,8 +23,10 @@ function normalizeOriginValue(origin) {
   return originAliases[normalizedInput] || origin;
 }
 
+const SOQL_SINGLE_QUOTE_ESCAPE = String.raw`\'`;
+
 function escapeSoqlString(value) {
-  return String(value || "").replaceAll("'", "\\'");
+  return String(value || "").replaceAll("'", SOQL_SINGLE_QUOTE_ESCAPE);
 }
 
 function normalizeSupplierSegmentValue(segment) {
@@ -52,7 +54,7 @@ function normalizeTierValue(tier) {
 
   const raw = String(tier).trim();
   const normalized = raw.toLowerCase().replaceAll(/\s+/g, "");
-  const match = normalized.match(/^tier(\d+)$/);
+  const match = /^tier(\d+)$/.exec(normalized);
 
   if (match?.[1]) return match[1];
   return raw;
@@ -66,6 +68,57 @@ function normalizeDateKeywordValue(value) {
   if (normalized === "yesterday" || normalized === "ayer") return "YESTERDAY";
 
   return null;
+}
+
+function addDateConditions(conditions, filters, dateField) {
+  if (filters.dateKeyword) {
+    conditions.push(`${dateField} = ${filters.dateKeyword.toUpperCase()}`);
+    return;
+  }
+
+  if (filters.period === "last_month") {
+    conditions.push(`${dateField} = LAST_N_DAYS:30`);
+    return;
+  }
+
+  if (filters.date) {
+    const { startUTC, endUTC } = normalizeDateRange(filters.date, filters.date);
+    conditions.push(`${dateField} >= ${startUTC} AND ${dateField} < ${endUTC}`);
+    return;
+  }
+
+  if (filters.startDate && filters.endDate) {
+    const { startUTC, endUTC } = normalizeDateRange(
+      filters.startDate,
+      filters.endDate,
+    );
+    conditions.push(`${dateField} >= ${startUTC} AND ${dateField} < ${endUTC}`);
+    return;
+  }
+
+  conditions.push(`${dateField} = TODAY`);
+}
+
+function addCaseFilterConditions(conditions, filters, normalizedValues) {
+  const { originValue, tierValue } = normalizedValues;
+
+  if (filters.status) conditions.push(`Status = '${filters.status}'`);
+  if (originValue) conditions.push(`Origin = '${originValue}'`);
+  if (filters.segment) {
+    conditions.push(`Supplier_Segment__c = '${filters.segment}'`);
+  }
+  if (filters.type) {
+    const typeVal =
+      filters.type.toLowerCase() === "tort" ? "Tort" : filters.type;
+    conditions.push(`Type = '${typeVal}'`);
+  }
+  if (filters.substatus) {
+    conditions.push(`Substatus__c = '${filters.substatus}'`);
+  }
+  if (tierValue) conditions.push(`Tier__c = '${tierValue}'`);
+  if (filters.agentName) {
+    conditions.push(`Owner.Name LIKE '%${filters.agentName}%'`);
+  }
 }
 
 function resolveDateFieldForStatus(status) {
@@ -507,7 +560,7 @@ exports.getCaseByNumber = async (caseNumber) => {
 
     const result = await runSoqlQueryFull(sf, soql);
 
-    if (!result.records || !result.records.length) {
+    if (!result.records?.length) {
       logger.warn(`Case not found: ${caseNumber}`);
       return null;
     }
@@ -597,7 +650,7 @@ exports.getCasesByDateRange = async (startDate, endDate) => {
       total: result.totalSize,
       records: result.records,
     };
-  } catch (error) {
+  } catch {
     throw new Error("SF_CASE_RANGE_FAILED");
   }
 };
@@ -630,7 +683,7 @@ exports.getCaseByPhone = async (phone) => {
     const result = await runSoqlQueryFull(sf, soql);
 
     return result.records;
-  } catch (error) {
+  } catch {
     throw new Error("SF_PHONE_QUERY_FAILED");
   }
 };
@@ -661,7 +714,7 @@ exports.getCaseByEmail = async (email) => {
     const result = await runSoqlQueryFull(sf, soql);
 
     return result.records;
-  } catch (error) {
+  } catch {
     throw new Error("SF_EMAIL_QUERY_FAILED");
   }
 };
@@ -697,7 +750,7 @@ exports.getCasesByOrigin = async (origin, dateKeyword = null, date = null) => {
       total: result.totalSize,
       records: result.records,
     };
-  } catch (error) {
+  } catch {
     throw new Error("SF_ORIGIN_QUERY_FAILED");
   }
 };
@@ -736,7 +789,7 @@ exports.getCasesBySupplierSegment = async (
       total: result.totalSize,
       records: result.records,
     };
-  } catch (error) {
+  } catch {
     throw new Error("SF_SEGMENT_QUERY_FAILED");
   }
 };
@@ -783,7 +836,7 @@ exports.getCasesBySubstatus = async (
       total: result.totalSize,
       records: result.records,
     };
-  } catch (error) {
+  } catch {
     throw new Error("SF_SUBSTATUS_QUERY_FAILED");
   }
 };
@@ -1138,7 +1191,7 @@ exports.getCasesByType = async (type, dateKeyword = null, date = null) => {
       total: result.totalSize,
       records: result.records,
     };
-  } catch (error) {
+  } catch {
     throw new Error("SF_TYPE_QUERY_FAILED");
   }
 };
@@ -1209,7 +1262,7 @@ exports.getCasesGroupedByField = async (field, dateKeyword = null) => {
       total,
       dateScope: dateKeyword || "all",
     };
-  } catch (error) {
+  } catch {
     throw new Error("SF_GROUP_QUERY_FAILED");
   }
 };
@@ -1230,45 +1283,8 @@ exports.getCasesByFilters = async (filters) => {
         `
       : "";
 
-    if (filters.status) conditions.push(`Status = '${filters.status}'`);
-    if (originValue) conditions.push(`Origin = '${originValue}'`);
-    if (filters.segment)
-      conditions.push(`Supplier_Segment__c = '${filters.segment}'`);
-    if (filters.type) {
-      const typeVal =
-        filters.type.toLowerCase() === "tort" ? "Tort" : filters.type;
-      conditions.push(`Type = '${typeVal}'`);
-    }
-    if (filters.substatus)
-      conditions.push(`Substatus__c = '${filters.substatus}'`);
-    if (tierValue) conditions.push(`Tier__c = '${tierValue}'`);
-    if (filters.agentName)
-      conditions.push(`Owner.Name LIKE '%${filters.agentName}%'`);
-
-    if (filters.dateKeyword) {
-      conditions.push(`${dateField} = ${filters.dateKeyword.toUpperCase()}`);
-    } else if (filters.period === "last_month") {
-      conditions.push(`${dateField} = LAST_N_DAYS:30`);
-    } else if (filters.date) {
-      const { startUTC, endUTC } = normalizeDateRange(
-        filters.date,
-        filters.date,
-      );
-      conditions.push(
-        `${dateField} >= ${startUTC} AND ${dateField} < ${endUTC}`,
-      );
-    } else if (filters.startDate && filters.endDate) {
-      const { startUTC, endUTC } = normalizeDateRange(
-        filters.startDate,
-        filters.endDate,
-      );
-      conditions.push(
-        `${dateField} >= ${startUTC} AND ${dateField} < ${endUTC}`,
-      );
-    } else {
-      // Default scope for filtered case queries when no date is provided.
-      conditions.push(`${dateField} = TODAY`);
-    }
+    addCaseFilterConditions(conditions, filters, { originValue, tierValue });
+    addDateConditions(conditions, filters, dateField);
 
     const whereClause = conditions.length
       ? `WHERE ${conditions.join(" AND ")}`
@@ -1302,7 +1318,7 @@ exports.getCasesByFilters = async (filters) => {
       total: result.totalSize,
       records: result.records,
     };
-  } catch (error) {
+  } catch {
     throw new Error("SF_DYNAMIC_FILTER_FAILED");
   }
 };
@@ -1349,7 +1365,7 @@ exports.getOperationalSummary = async (dateKeyword) => {
       summary,
       sampleCases: records.slice(0, 10),
     };
-  } catch (error) {
+  } catch {
     throw new Error("SF_SUMMARY_FAILED");
   }
 };
