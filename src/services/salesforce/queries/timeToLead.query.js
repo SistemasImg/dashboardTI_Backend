@@ -1,6 +1,7 @@
 function buildTimeToLeadCasesQuery({ startDateTimeUtc, endDateTimeUtc }) {
   return `
 SELECT
+  Id,
   CreatedDate,
   CaseNumber,
   FullName__c,
@@ -21,10 +22,51 @@ SELECT
 FROM Case
 WHERE CreatedDate >= ${startDateTimeUtc}
   AND CreatedDate < ${endDateTimeUtc}
+  AND Status NOT IN ('Sent', 'Closed')
+  AND (
+    Substatus__c = null
+    OR Substatus__c NOT IN (
+      'Redo TCPA',
+      'No TCPA',
+      'Disqualified',
+      'Do Not Call',
+      'Test',
+      'Returned to Supplier'
+    )
+  )
 ORDER BY CreatedDate DESC
+`;
+}
+
+function escapeSoqlString(value) {
+  const backslash = String.fromCodePoint(92);
+  return String(value || "")
+    .replaceAll(backslash, `${backslash}${backslash}`)
+    .replaceAll("'", `${backslash}'`);
+}
+
+function buildCaseSubstatusHistoryQuery(caseIds = []) {
+  const values = [...new Set(caseIds.filter(Boolean))]
+    .map((caseId) => `'${escapeSoqlString(caseId)}'`)
+    .join(", ");
+
+  if (!values) return null;
+
+  return `
+SELECT
+  CaseId,
+  CreatedDate,
+  Field,
+  OldValue,
+  NewValue
+FROM CaseHistory
+WHERE CaseId IN (${values})
+  AND Field IN ('Substatus', 'Substatus__c')
+ORDER BY CaseId ASC, CreatedDate ASC
 `;
 }
 
 module.exports = {
   buildTimeToLeadCasesQuery,
+  buildCaseSubstatusHistoryQuery,
 };

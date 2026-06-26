@@ -34,6 +34,12 @@ async function runTimeToLeadSyncJob(options = {}) {
         await refreshRecentTimeToLeadSnapshotMetrics({
           daysBack,
           limit,
+          retryableMatchStatuses: [
+            "pending_lookup",
+            "no_first_call_found",
+            "lookup_timeout",
+            "lookup_failed",
+          ],
         }),
       );
     }

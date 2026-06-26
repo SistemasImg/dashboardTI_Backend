@@ -10,6 +10,13 @@ const AUTO_METRICS_LIMIT = 5;
 const AUTO_METRICS_MIN_BATCHES = 3;
 const AUTO_METRICS_MAX_BATCHES = 30;
 const AUTO_METRICS_MAX_CASES_PER_REQUEST = 150;
+const backgroundMetricsRefreshes = new Map();
+const LIVE_RETRYABLE_MATCH_STATUSES = [
+  "pending_lookup",
+  "no_first_call_found",
+  "lookup_timeout",
+  "lookup_failed",
+];
 
 function parseBooleanQuery(
   value,
@@ -55,18 +62,81 @@ function getAutoMetricsBatchOptions(syncResult = {}) {
   };
 }
 
-async function syncAndBuildTimeToLeadReport(body = {}) {
+function buildMetricsRefreshKey({ startDate, endDate, limit, maxBatches }) {
+  return `${startDate || ""}:${endDate || ""}:${limit}:${maxBatches}`;
+}
+
+function startBackgroundMetricsRefresh({ startDate, endDate, metricsOptions }) {
+  const key = buildMetricsRefreshKey({
+    startDate,
+    endDate,
+    limit: metricsOptions.limit,
+    maxBatches: metricsOptions.maxBatches,
+  });
+
+  if (backgroundMetricsRefreshes.has(key)) {
+    return {
+      mode: "background",
+      status: "already_running",
+      key,
+      strategy: metricsOptions.strategy,
+    };
+  }
+
+  const promise = refreshTimeToLeadSnapshotMetricsBatches({
+    startDate,
+    endDate,
+    limit: metricsOptions.limit,
+    maxBatches: metricsOptions.maxBatches,
+    retryableMatchStatuses: LIVE_RETRYABLE_MATCH_STATUSES,
+  })
+    .then((result) => {
+      logger.success(
+        "TimeToLeadController -> background metrics refresh completed",
+        result,
+      );
+      return result;
+    })
+    .catch((error) => {
+      logger.error(
+        `TimeToLeadController -> background metrics refresh error: ${error.message}`,
+        { stack: error.stack, startDate, endDate },
+      );
+      return null;
+    })
+    .finally(() => {
+      backgroundMetricsRefreshes.delete(key);
+    });
+
+  backgroundMetricsRefreshes.set(key, promise);
+
+  return {
+    mode: "background",
+    status: "started",
+    key,
+    strategy: metricsOptions.strategy,
+  };
+}
+
+async function syncAndBuildTimeToLeadReport(body = {}, options = {}) {
+  const waitForMetrics = Boolean(options.waitForMetrics);
   const syncResult = await syncTimeToLeadSnapshots({
     startDate: body.startDate,
     endDate: body.endDate,
   });
   const metricsOptions = getAutoMetricsBatchOptions(syncResult);
-  const metricsResult = await refreshTimeToLeadSnapshotMetricsBatches({
-    startDate: syncResult.startDate,
-    endDate: syncResult.endDate,
-    limit: metricsOptions.limit,
-    maxBatches: metricsOptions.maxBatches,
-  });
+  const metricsResult = waitForMetrics
+    ? await refreshTimeToLeadSnapshotMetricsBatches({
+        startDate: syncResult.startDate,
+        endDate: syncResult.endDate,
+        limit: metricsOptions.limit,
+        maxBatches: metricsOptions.maxBatches,
+      })
+    : startBackgroundMetricsRefresh({
+        startDate: syncResult.startDate,
+        endDate: syncResult.endDate,
+        metricsOptions,
+      });
   const report = await getTimeToLead({
     startDate: syncResult.startDate,
     endDate: syncResult.endDate,
@@ -82,7 +152,7 @@ async function syncAndBuildTimeToLeadReport(body = {}) {
           sync: syncResult,
           metrics: {
             ...metricsResult,
-            strategy: metricsOptions.strategy,
+            strategy: metricsResult.strategy || metricsOptions.strategy,
           },
         },
       },
@@ -90,7 +160,7 @@ async function syncAndBuildTimeToLeadReport(body = {}) {
     syncResult,
     metricsResult: {
       ...metricsResult,
-      strategy: metricsOptions.strategy,
+      strategy: metricsResult.strategy || metricsOptions.strategy,
     },
   };
 }
@@ -123,7 +193,7 @@ async function syncTimeToLeadController(req, res, next) {
 
   try {
     const { report, syncResult, metricsResult } =
-      await syncAndBuildTimeToLeadReport(req.body);
+      await syncAndBuildTimeToLeadReport(req.body, { waitForMetrics: true });
 
     return res.json({
       message: "Time To Lead sync, metrics refresh and report completed",
@@ -147,7 +217,14 @@ async function postTimeToLeadController(req, res, next) {
   });
 
   try {
-    const { report } = await syncAndBuildTimeToLeadReport(req.body);
+    const waitForMetrics = parseBooleanQuery(
+      req.body?.waitForMetrics,
+      false,
+      "waitForMetrics",
+    );
+    const { report } = await syncAndBuildTimeToLeadReport(req.body, {
+      waitForMetrics,
+    });
     return res.json(report);
   } catch (error) {
     logger.error(
@@ -171,6 +248,7 @@ async function refreshTimeToLeadMetricsController(req, res, next) {
       endDate: req.body?.endDate,
       limit: req.body?.limit,
       force: parseBooleanQuery(req.body?.force, false, "force"),
+      retryableMatchStatuses: req.body?.retryableMatchStatuses,
     });
 
     return res.json({

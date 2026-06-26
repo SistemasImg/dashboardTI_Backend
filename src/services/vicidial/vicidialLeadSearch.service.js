@@ -4,7 +4,7 @@ const vicidialConfig = require("../../config/vicidial");
 const {
   parseVicidialLeadSearch,
   parseVicidialLeadRecordings,
-  normalizeDigits,
+  normalizeComparablePhoneDigits,
 } = require("../../utils/vicidialLeadSearchParser");
 const {
   resolveRecordingAccessUrl,
@@ -70,6 +70,44 @@ function buildSearchPayload(phone) {
     lead_phone: phone,
     lead_phone_number: phone,
   };
+}
+
+function buildPhoneSearchVariants(phone) {
+  const phoneDigits = normalizeComparablePhoneDigits(phone);
+
+  if (!phoneDigits) return [];
+  if (phoneDigits.length !== 10) return [phoneDigits];
+
+  const areaCode = phoneDigits.slice(0, 3);
+  const prefix = phoneDigits.slice(3, 6);
+  const lineNumber = phoneDigits.slice(6);
+
+  return [
+    phoneDigits,
+    `1${phoneDigits}`,
+    `${areaCode}${prefix}-${lineNumber}`,
+    `(${areaCode}) ${prefix}-${lineNumber}`,
+    `${areaCode}-${prefix}-${lineNumber}`,
+  ].filter((value, index, values) => values.indexOf(value) === index);
+}
+
+function mergeLeadSearchResults(htmlResponsesByVariant, phoneDigits) {
+  const merged = [];
+  const seen = new Set();
+
+  htmlResponsesByVariant.forEach(({ htmlResponses }) => {
+    htmlResponses.forEach((html) => {
+      const parsed = parseVicidialLeadSearch(html, phoneDigits);
+      parsed.forEach((item) => {
+        const key = `${item.leadId || "NA"}-${item.rowText}`;
+        if (seen.has(key)) return;
+        seen.add(key);
+        merged.push(item);
+      });
+    });
+  });
+
+  return merged;
 }
 
 async function requestVicidialLeadSearch(phone, options = {}) {
@@ -206,7 +244,7 @@ async function enrichLeadWithRecordings(record, resolutionStats, options = {}) {
 }
 
 async function searchVicidialLeadByPhone(phone, options = {}) {
-  const phoneDigits = normalizeDigits(phone);
+  const phoneDigits = normalizeComparablePhoneDigits(phone);
 
   if (!phoneDigits) {
     throw Object.assign(new Error("phone is required"), { statusCode: 400 });
@@ -214,20 +252,43 @@ async function searchVicidialLeadByPhone(phone, options = {}) {
 
   logger.info(`VicidialLeadSearchService → search by phone: ${phoneDigits}`);
 
-  const htmlResponses = await requestVicidialLeadSearch(phoneDigits, options);
+  const searchVariants = buildPhoneSearchVariants(phoneDigits);
+  const primaryVariant = searchVariants[0];
+  const htmlResponsesByVariant = [
+    {
+      variant: primaryVariant,
+      htmlResponses: await requestVicidialLeadSearch(primaryVariant, options),
+    },
+  ];
+  let merged = mergeLeadSearchResults(htmlResponsesByVariant, phoneDigits);
 
-  const merged = [];
-  const seen = new Set();
+  if (!merged.length && searchVariants.length > 1) {
+    const fallbackVariants = searchVariants.slice(1);
 
-  htmlResponses.forEach((html) => {
-    const parsed = parseVicidialLeadSearch(html, phoneDigits);
-    parsed.forEach((item) => {
-      const key = `${item.leadId || "NA"}-${item.rowText}`;
-      if (seen.has(key)) return;
-      seen.add(key);
-      merged.push(item);
+    logger.info(
+      `VicidialLeadSearchService → retrying phone search with formatted variants for ${phoneDigits}: ${fallbackVariants.join(", ")}`,
+    );
+
+    const fallbackResults = await Promise.allSettled(
+      fallbackVariants.map(async (variant) => ({
+        variant,
+        htmlResponses: await requestVicidialLeadSearch(variant, options),
+      })),
+    );
+
+    fallbackResults.forEach((result) => {
+      if (result.status === "fulfilled") {
+        htmlResponsesByVariant.push(result.value);
+        return;
+      }
+
+      logger.warn(
+        `VicidialLeadSearchService → formatted phone variant lookup failed for ${phoneDigits}: ${result.reason?.message || result.reason}`,
+      );
     });
-  });
+
+    merged = mergeLeadSearchResults(htmlResponsesByVariant, phoneDigits);
+  }
 
   logger.success(
     `VicidialLeadSearchService → found ${merged.length} possible matches for ${phoneDigits}`,

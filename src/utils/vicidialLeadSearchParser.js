@@ -3,6 +3,31 @@ const logger = require("./logger");
 
 const normalizeDigits = (value) => String(value || "").replaceAll(/\D/g, "");
 
+function normalizeComparablePhoneDigits(value) {
+  const digits = normalizeDigits(value);
+  if (digits.length === 11 && digits.startsWith("1")) return digits.slice(1);
+  return digits;
+}
+
+function hasMatchingPhoneDigits(sourceDigits, phoneDigits) {
+  if (!phoneDigits) return true;
+
+  const comparablePhone = normalizeComparablePhoneDigits(phoneDigits);
+  if (!comparablePhone) return true;
+
+  if (sourceDigits.includes(comparablePhone)) return true;
+
+  if (comparablePhone.length === 10) {
+    return sourceDigits.includes(`1${comparablePhone}`);
+  }
+
+  if (comparablePhone.length === 11 && comparablePhone.startsWith("1")) {
+    return sourceDigits.includes(comparablePhone.slice(1));
+  }
+
+  return false;
+}
+
 function extractLeadIdFromText(text) {
   const match = /lead[_\s-]?id\D*(\d{3,})/i.exec(String(text || ""));
   return match?.[1] || null;
@@ -15,7 +40,7 @@ function extractLeadIdFromHref(href) {
 
 function parseVicidialLeadSearch(html, phoneInput) {
   const $ = cheerio.load(String(html || ""));
-  const phoneDigits = normalizeDigits(phoneInput);
+  const phoneDigits = normalizeComparablePhoneDigits(phoneInput);
   const seen = new Set();
   const results = [];
 
@@ -24,7 +49,7 @@ function parseVicidialLeadSearch(html, phoneInput) {
     if (!rowText) return;
 
     const rowDigits = normalizeDigits(rowText);
-    if (phoneDigits && !rowDigits.includes(phoneDigits)) return;
+    if (!hasMatchingPhoneDigits(rowDigits, phoneDigits)) return;
 
     const tds = $(row)
       .find("td")
@@ -56,7 +81,7 @@ function parseVicidialLeadSearch(html, phoneInput) {
     const bodyText = $("body").text().replaceAll(/\s+/g, " ").trim();
     const bodyDigits = normalizeDigits(bodyText);
 
-    if (!phoneDigits || bodyDigits.includes(phoneDigits)) {
+    if (hasMatchingPhoneDigits(bodyDigits, phoneDigits)) {
       const leadId = extractLeadIdFromText(bodyText);
       if (leadId || phoneDigits) {
         results.push({
@@ -237,4 +262,5 @@ module.exports = {
   parseVicidialLeadSearch,
   parseVicidialLeadRecordings,
   normalizeDigits,
+  normalizeComparablePhoneDigits,
 };

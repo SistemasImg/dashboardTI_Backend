@@ -37,6 +37,7 @@ app.use((req, res, next) => {
 // 5. ROUTES
 // ------------------------------
 app.use("/auth", require("./routes/auth.routes"));
+app.use("/external/salesforce", require("./routes/externalSalesforce.routes"));
 app.use("/users", require("./routes/users.routes"));
 app.use("/roles", require("./routes/roles.routes"));
 app.use("/domains", require("./routes/domain.routes"));

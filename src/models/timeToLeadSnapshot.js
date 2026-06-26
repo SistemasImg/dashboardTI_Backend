@@ -13,9 +13,22 @@ const TimeToLeadSnapshot = sequelize.define(
       type: DataTypes.DATE,
       allowNull: false,
     },
+    original_case_created_at: {
+      type: DataTypes.DATE,
+      allowNull: true,
+    },
     case_created_date: {
       type: DataTypes.DATEONLY,
       allowNull: false,
+    },
+    ttl_start_source: {
+      type: DataTypes.STRING(40),
+      allowNull: false,
+      defaultValue: "case_created",
+    },
+    ttl_start_substatus: {
+      type: DataTypes.STRING(120),
+      allowNull: true,
     },
     full_name: {
       type: DataTypes.STRING(255),
@@ -149,6 +162,10 @@ const TimeToLeadSnapshot = sequelize.define(
       {
         name: "idx_ttl_case_created_date",
         fields: ["case_created_date"],
+      },
+      {
+        name: "idx_ttl_start_source",
+        fields: ["ttl_start_source"],
       },
       {
         name: "idx_ttl_owner_name",
