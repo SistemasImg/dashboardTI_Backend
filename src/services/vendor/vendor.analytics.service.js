@@ -16,12 +16,13 @@ const RANGE_DAYS_MAP = {
   "90d": 90,
 };
 
-const GOAL_OVERVIEW_WEEKS = 3;
+const GOAL_OVERVIEW_WEEKS = 4;
 
 const ALLOWED_CATEGORIES = new Set([
   "top_vendors",
   "new_vendor",
   "under_review",
+  "critical_vendor",
 ]);
 
 const ALLOWED_SORT_DIR = new Set(["asc", "desc"]);
@@ -210,7 +211,7 @@ function parseFilters(raw = {}) {
   const category = raw.category ? String(raw.category).toLowerCase() : null;
   if (category && !ALLOWED_CATEGORIES.has(category)) {
     const error = new Error(
-      "category must be one of top_vendors, new_vendor, under_review",
+      "category must be one of top_vendors, new_vendor, under_review, critical_vendor",
     );
     error.status = 400;
     throw error;

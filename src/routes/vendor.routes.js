@@ -17,6 +17,7 @@ const {
   updateVendorCategory,
   upsertVendorTort,
   updateVendorRewards,
+  resetVendorPassword,
   runVendorCategoryRules,
   getVendorMonitoringSnapshot,
   getVendorMonitoringAlertsFeed,
@@ -73,6 +74,7 @@ router.patch(
 );
 router.get("/", getVendors);
 router.get("/:vendorId", getVendorInsights);
+router.post("/:vendorId/reset-password", resetVendorPassword);
 router.patch(
   "/:vendorId/category",
   validate(vendorCategorySchema),

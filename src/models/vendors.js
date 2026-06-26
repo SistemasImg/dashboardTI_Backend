@@ -35,6 +35,18 @@ const Vendor = sequelize.define(
       allowNull: false,
       defaultValue: "active",
     },
+    reactivated_at: {
+      type: DataTypes.DATE,
+      allowNull: true,
+    },
+    deactivated_at: {
+      type: DataTypes.DATE,
+      allowNull: true,
+    },
+    last_status_changed_at: {
+      type: DataTypes.DATE,
+      allowNull: true,
+    },
     supplier_segment: {
       type: DataTypes.STRING(120),
       allowNull: true,

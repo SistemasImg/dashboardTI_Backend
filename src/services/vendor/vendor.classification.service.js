@@ -14,9 +14,11 @@ const {
   runSoqlQuery,
   runSoqlQueryAll,
   patchSalesforceSObject,
+  resetSalesforceUserPassword,
 } = require("../salesforce/client.service");
 const {
   buildVendorCaseSnapshotsQuery,
+  buildVendorOutflowValidationQuery,
 } = require("../salesforce/queries/vendorPerformance.query");
 const {
   Vendor,
@@ -34,6 +36,7 @@ const CATEGORY = {
   NEW_VENDOR: "new_vendor",
   TOP_VENDORS: "top_vendors",
   UNDER_REVIEW: "under_review",
+  CRITICAL_VENDOR: "critical_vendor",
 };
 
 const CATEGORY_SOURCE = {
@@ -49,13 +52,17 @@ const NEW_VENDOR_WINDOW_DAYS = 30;
 const SALESFORCE_METADATA_BATCH_SIZE = 100;
 const SALESFORCE_CASE_SNAPSHOT_DAYS = 90;
 const SALESFORCE_CASE_SNAPSHOT_WINDOW_TYPE = "us_business_days";
-const GOAL_OVERVIEW_WEEKS = 3;
+const SALESFORCE_VENDOR_DATA_SYNC_ENABLED = true;
+const SALESFORCE_SUPPLIER_SEGMENT_SYNC_ENABLED = false;
+const GOAL_OVERVIEW_WEEKS = 4;
+const GOAL_COMPLETED_EVALUATION_WEEKS = 3;
 const ACCEPTED_CASE_SUBSTATUS = "accepted";
 
 const SALESFORCE_SUPPLIER_SEGMENT_BY_CATEGORY = {
   [CATEGORY.TOP_VENDORS]: "Top Vendor",
   [CATEGORY.NEW_VENDOR]: "New Vendor",
   [CATEGORY.UNDER_REVIEW]: "Under Review",
+  [CATEGORY.CRITICAL_VENDOR]: "Critical Vendor",
 };
 
 const REWARD_KEYS = [
@@ -71,6 +78,8 @@ const REWARD_COLUMN_BY_KEY = {
   replacement_flexibility: "replacement_flexibility",
   auto_intake: "auto_intake",
 };
+
+const OUTFLOW_VALIDATION_BATCH_SIZE = 100;
 
 const LEGACY_REWARD_KEY_BY_FIELD = {
   bonusAccess: "additional",
@@ -117,11 +126,13 @@ async function ensureVendorCategoryEnumValues() {
     "new_review",
     CATEGORY.TOP_VENDORS,
     CATEGORY.UNDER_REVIEW,
+    CATEGORY.CRITICAL_VENDOR,
   );
   const categoryEnum = DataTypes.ENUM(
     CATEGORY.NEW_VENDOR,
     CATEGORY.TOP_VENDORS,
     CATEGORY.UNDER_REVIEW,
+    CATEGORY.CRITICAL_VENDOR,
   );
   const queryInterface = sequelize.getQueryInterface();
 
@@ -211,6 +222,39 @@ function isDateWithinLastDays(value, days) {
   const threshold = new Date();
   threshold.setUTCDate(threshold.getUTCDate() - days);
   return date >= threshold;
+}
+
+function buildVendorFreshness(localVendor, salesforceMetadata) {
+  const createdRecently = isDateWithinLastDays(
+    salesforceMetadata?.contactCreatedAt,
+    NEW_VENDOR_WINDOW_DAYS,
+  );
+  const reactivatedRecently =
+    localVendor?.status === "active" &&
+    isDateWithinLastDays(localVendor?.reactivated_at, NEW_VENDOR_WINDOW_DAYS);
+
+  let reason = null;
+  let effectiveDate = null;
+
+  if (reactivatedRecently) {
+    reason = "reactivated";
+    effectiveDate = toIsoDateOrNull(localVendor?.reactivated_at);
+  } else if (createdRecently) {
+    reason = "created";
+    effectiveDate = salesforceMetadata?.contactCreatedAt || null;
+  }
+
+  return {
+    isNewVendor: Boolean(createdRecently || reactivatedRecently),
+    reason,
+    effectiveDate,
+    createdRecently: Boolean(createdRecently),
+    reactivatedRecently: Boolean(reactivatedRecently),
+    reactivatedAt: toIsoDateOrNull(localVendor?.reactivated_at),
+    deactivatedAt: toIsoDateOrNull(localVendor?.deactivated_at),
+    lastStatusChangedAt: toIsoDateOrNull(localVendor?.last_status_changed_at),
+    windowDays: NEW_VENDOR_WINDOW_DAYS,
+  };
 }
 
 function buildVendorAccountMetadataQuery(userIds) {
@@ -363,6 +407,9 @@ function resolveCaseSubStatus(row) {
 }
 
 function isAcceptedCaseSnapshot(snapshot) {
+  if (snapshot?.signed_date || snapshot?.Signed_Date__c) return true;
+  if (isValidatedOutflowSnapshot(snapshot)) return true;
+
   const subStatus = String(
     snapshot?.sub_status ||
       snapshot?.Substatus__c ||
@@ -375,10 +422,57 @@ function isAcceptedCaseSnapshot(snapshot) {
   return subStatus === ACCEPTED_CASE_SUBSTATUS;
 }
 
+function isValidatedOutflowSnapshot(snapshot) {
+  return Boolean(
+    (snapshot?.sent_date_2 || snapshot?.Sent_Date2__c) &&
+    (snapshot?.outflow_validated || snapshot?.outflowValidated),
+  );
+}
+
 function resolveCaseProduct(row, productMap) {
   const typeName = String(row?.Type || "").trim();
   if (!typeName) return null;
   return productMap.get(typeName.toLowerCase()) || null;
+}
+
+function buildOutflowValidationKey(caseNumber, typeName) {
+  const normalizedCaseNumber = normalizeTextKey(caseNumber);
+  const normalizedType = normalizeTextKey(typeName);
+  if (!normalizedCaseNumber || !normalizedType) return null;
+  return `${normalizedCaseNumber}::${normalizedType}`;
+}
+
+async function fetchValidatedOutflowKeySet(sf, caseRows = []) {
+  const sentCaseNumbers = Array.from(
+    new Set(
+      caseRows
+        .filter((row) => row?.Sent_Date2__c)
+        .map((row) => String(row?.CaseNumber || "").trim())
+        .filter(Boolean),
+    ),
+  );
+
+  if (!sentCaseNumbers.length) return new Set();
+
+  const result = new Set();
+
+  for (const batch of chunkArray(
+    sentCaseNumbers,
+    OUTFLOW_VALIDATION_BATCH_SIZE,
+  )) {
+    const query = buildVendorOutflowValidationQuery(batch);
+    const rows = query ? await runSoqlQueryAll(sf, query) : [];
+
+    for (const row of rows || []) {
+      const key = buildOutflowValidationKey(
+        row?.Lead__r?.CaseNumber,
+        row?.Lead__r?.Type,
+      );
+      if (key) result.add(key);
+    }
+  }
+
+  return result;
 }
 
 async function fetchSalesforceCaseSnapshots(salesforceIds) {
@@ -404,13 +498,24 @@ async function fetchSalesforceCaseSnapshots(salesforceIds) {
       {
         createdDateFrom: windowStartLiteral,
         signedDateFrom: windowStartLiteral,
+        sentDateFrom: windowStartLiteral,
       },
     );
-    const batchRows = query ? await runSoqlQuery(sf, query) : [];
+    const batchRows = query ? await runSoqlQueryAll(sf, query) : [];
     rows.push(...(batchRows || []));
   }
 
-  return rows;
+  const validatedOutflowKeys = await fetchValidatedOutflowKeySet(sf, rows);
+
+  return rows.map((row) => ({
+    ...row,
+    outflowValidated: Boolean(
+      row?.Sent_Date2__c &&
+      validatedOutflowKeys.has(
+        buildOutflowValidationKey(row?.CaseNumber, row?.Type),
+      ),
+    ),
+  }));
 }
 
 async function syncVendorCaseSnapshots(
@@ -443,6 +548,7 @@ async function syncVendorCaseSnapshots(
       case_created_at: row.CreatedDate || null,
       signed_date: row.Signed_Date__c || null,
       sent_date_2: row.Sent_Date2__c || null,
+      outflow_validated: Boolean(row.outflowValidated),
       sub_status: resolveCaseSubStatus(row),
     };
 
@@ -467,6 +573,11 @@ async function syncVendorCaseSnapshots(
     days: SALESFORCE_CASE_SNAPSHOT_DAYS,
     windowType: SALESFORCE_CASE_SNAPSHOT_WINDOW_TYPE,
     windowStart: getCaseSnapshotWindowStart().toISOString(),
+    outflowValidation: {
+      required: true,
+      source: "Lead_de_oportunidad__c",
+      rule: "CaseNumber and Type must match a Signed Lead__r record",
+    },
   };
 }
 
@@ -565,6 +676,8 @@ function normalizeLocalVendorTorts(value) {
 }
 
 function buildVendorMetadataJson(localVendor, salesforceMetadata) {
+  const vendorFreshness = buildVendorFreshness(localVendor, salesforceMetadata);
+
   return {
     source: {
       vendorsTableId: localVendor.id,
@@ -581,14 +694,20 @@ function buildVendorMetadataJson(localVendor, salesforceMetadata) {
         salesforceMetadata?.accountLastModifiedByName || null,
     },
     vendorFreshness: {
-      isNewVendor: Boolean(salesforceMetadata?.isNewVendor),
-      windowDays: NEW_VENDOR_WINDOW_DAYS,
+      ...vendorFreshness,
     },
   };
 }
 
-function resolveInitialComputedCategory(existingProfile, salesforceMetadata) {
-  if (salesforceMetadata?.isNewVendor) return CATEGORY.NEW_VENDOR;
+function resolveInitialComputedCategory(
+  localVendor,
+  existingProfile,
+  salesforceMetadata,
+) {
+  if (buildVendorFreshness(localVendor, salesforceMetadata).isNewVendor) {
+    return CATEGORY.NEW_VENDOR;
+  }
+
   return (
     normalizeCategory(existingProfile?.computed_category) ||
     CATEGORY.UNDER_REVIEW
@@ -601,6 +720,7 @@ function buildVendorProfilePayload(
   salesforceMetadata,
 ) {
   const computedCategory = resolveInitialComputedCategory(
+    localVendor,
     existingProfile,
     salesforceMetadata,
   );
@@ -664,6 +784,38 @@ function getCurrentGoalWeekStartDate() {
   return getRecentGoalWeekStartDates(1)[0] || null;
 }
 
+function buildGoalWeekWindowBounds(weekStartDates = []) {
+  const sortedWeekStarts = [...weekStartDates].filter(Boolean).sort();
+  if (!sortedWeekStarts.length) return null;
+
+  const startStr = sortedWeekStarts[0];
+  const endWeekStartStr = sortedWeekStarts[sortedWeekStarts.length - 1];
+  const start = new Date(`${startStr}T00:00:00.000Z`);
+  const end = new Date(`${endWeekStartStr}T00:00:00.000Z`);
+  end.setUTCDate(end.getUTCDate() + 6);
+  end.setUTCHours(23, 59, 59, 999);
+
+  return {
+    start,
+    end,
+    startStr,
+    endStr: end.toISOString().split("T")[0],
+  };
+}
+
+function getGoalOutflowWindowInfo() {
+  const recentWeekStarts = getRecentGoalWeekStartDates(GOAL_OVERVIEW_WEEKS);
+  const classificationWeekStarts = recentWeekStarts.slice(
+    1,
+    1 + GOAL_COMPLETED_EVALUATION_WEEKS,
+  );
+
+  return {
+    visible: buildGoalWeekWindowBounds(recentWeekStarts),
+    classification: buildGoalWeekWindowBounds(classificationWeekStarts),
+  };
+}
+
 function toDateOnlyString(value) {
   if (!value) return null;
   if (value instanceof Date) return value.toISOString().split("T")[0];
@@ -675,6 +827,15 @@ function isGoalWeekComplete(weekEnd) {
   if (!weekEndStr) return false;
   const end = new Date(`${weekEndStr}T23:59:59.999Z`);
   return new Date() > end;
+}
+
+function isDateInsideWindow(value, windowBounds) {
+  if (!value || !windowBounds) return false;
+
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return false;
+
+  return date >= windowBounds.start && date <= windowBounds.end;
 }
 
 function getCaseSnapshotWindowStart() {
@@ -717,6 +878,18 @@ async function ensureVendorClassificationTables() {
     });
   }
 
+  if (!caseSnapshotsDefinition.outflow_validated) {
+    await queryInterface.addColumn(
+      "vendor_case_snapshots",
+      "outflow_validated",
+      {
+        type: DataTypes.BOOLEAN,
+        allowNull: false,
+        defaultValue: false,
+      },
+    );
+  }
+
   const topRewardsDefinition =
     await queryInterface.describeTable("vendor_top_rewards");
 
@@ -729,7 +902,9 @@ async function ensureVendorClassificationTables() {
   }
 }
 
-async function syncVendorsFromMysql() {
+async function syncVendorsFromMysql(options = {}) {
+  const { syncSalesforceData = SALESFORCE_VENDOR_DATA_SYNC_ENABLED } = options;
+
   logger.info("VendorClassificationService → syncVendorsFromMysql() started");
 
   await ensureVendorClassificationTables();
@@ -779,8 +954,15 @@ async function syncVendorsFromMysql() {
     existingProfiles.map((item) => [item.salesforce_user_id, item]),
   );
   const localIdSet = new Set(localSalesforceIds);
-  const salesforceMetadataResult =
-    await fetchSalesforceAccountMetadataMap(localSalesforceIds);
+  const salesforceMetadataResult = syncSalesforceData
+    ? await fetchSalesforceAccountMetadataMap(localSalesforceIds)
+    : {
+        queried: 0,
+        matched: 0,
+        newVendors: 0,
+        metadataMap: new Map(),
+        salesforceSyncEnabled: false,
+      };
   const salesforceMetadataMap = salesforceMetadataResult.metadataMap;
   let synced = 0;
   let deactivated = 0;
@@ -832,12 +1014,20 @@ async function syncVendorsFromMysql() {
       synced += 1;
     }
 
-    caseSnapshots = await syncVendorCaseSnapshots(
-      transaction,
-      localSalesforceIds,
-      profileBySalesforceId,
-      productMap,
-    );
+    if (syncSalesforceData) {
+      caseSnapshots = await syncVendorCaseSnapshots(
+        transaction,
+        localSalesforceIds,
+        profileBySalesforceId,
+        productMap,
+      );
+    } else {
+      caseSnapshots = {
+        ...caseSnapshots,
+        skipped: localSalesforceIds.length,
+        salesforceSyncEnabled: false,
+      };
+    }
 
     const staleProfiles = await VendorProfile.findAll({ transaction });
     for (const profile of staleProfiles) {
@@ -879,12 +1069,18 @@ async function syncVendorsFromMysql() {
 }
 
 async function syncVendorsAndEvaluateRules(options = {}) {
-  const { failOnRulesError = false } = options;
-  const syncResult = await syncVendorsFromMysql();
+  const {
+    failOnRulesError = false,
+    syncSalesforceData = SALESFORCE_VENDOR_DATA_SYNC_ENABLED,
+    syncSalesforceSupplierSegments = SALESFORCE_SUPPLIER_SEGMENT_SYNC_ENABLED,
+  } = options;
+  const syncResult = await syncVendorsFromMysql({ syncSalesforceData });
 
   try {
     const rulesResult = await evaluateCategoryRules();
-    const supplierSegmentSync = await syncVendorSupplierSegmentsFromProfiles();
+    const supplierSegmentSync = await syncVendorSupplierSegmentsFromProfiles({
+      syncSalesforce: syncSalesforceSupplierSegments,
+    });
 
     return {
       ...syncResult,
@@ -948,7 +1144,9 @@ async function fetchSalesforceContactSegmentMap(userIds = []) {
   return { sf, contactByUserId };
 }
 
-async function syncVendorSupplierSegmentsFromProfiles() {
+async function syncVendorSupplierSegmentsFromProfiles(options = {}) {
+  const { syncSalesforce = SALESFORCE_SUPPLIER_SEGMENT_SYNC_ENABLED } = options;
+
   await ensureVendorClassificationTables();
 
   const profiles = await VendorProfile.findAll({
@@ -981,6 +1179,8 @@ async function syncVendorSupplierSegmentsFromProfiles() {
     salesforceUpdated: 0,
     skipped: 0,
     failed: 0,
+    salesforceSyncEnabled: syncSalesforce,
+    salesforceSkipped: 0,
     failures: [],
   };
 
@@ -992,6 +1192,17 @@ async function syncVendorSupplierSegmentsFromProfiles() {
       );
       result.localUpdated += 1;
     }
+  }
+
+  if (!syncSalesforce) {
+    result.skipped = rowsToSync.length;
+    result.salesforceSkipped = rowsToSync.length;
+
+    logger.info(
+      `VendorClassificationService → syncVendorSupplierSegmentsFromProfiles() Salesforce sync disabled | attempted: ${result.attempted} | localUpdated: ${result.localUpdated} | salesforceSkipped: ${result.salesforceSkipped}`,
+    );
+
+    return result;
   }
 
   let salesforceContactMap;
@@ -1093,8 +1304,15 @@ function toPublicVendor(row, options = {}) {
     firstSeenAt: formatDateForPublic(row.first_seen_at),
     lastSyncedAt: formatDateForPublic(row.last_synced_at),
     isNewVendor: Boolean(vendorFreshness.isNewVendor),
+    newVendorReason: vendorFreshness.reason || null,
     newVendorWindowDays: Number(
       vendorFreshness.windowDays || NEW_VENDOR_WINDOW_DAYS,
+    ),
+    newVendorEffectiveDate: formatDateForPublic(vendorFreshness.effectiveDate),
+    reactivatedAt: formatDateForPublic(vendorFreshness.reactivatedAt),
+    deactivatedAt: formatDateForPublic(vendorFreshness.deactivatedAt),
+    lastStatusChangedAt: formatDateForPublic(
+      vendorFreshness.lastStatusChangedAt,
     ),
     contactCreatedAt: formatDateForPublic(salesforceInfo.contactCreatedAt),
     accountCreatedAt: formatDateForPublic(salesforceInfo.accountCreatedAt),
@@ -1191,6 +1409,43 @@ function normalizeTextKey(value) {
     .toLowerCase();
 }
 
+function buildAssignedProductMatcher(assignments = []) {
+  const productIds = new Set();
+  const productNames = new Set();
+
+  (assignments || []).forEach((assignment) => {
+    if (assignment?.status && assignment.status !== "active") return;
+
+    const productId = Number(assignment?.product_id || assignment?.productId);
+    if (productId > 0) productIds.add(productId);
+
+    const productName = normalizeTextKey(
+      assignment?.product?.name || assignment?.productName,
+    );
+    if (productName) productNames.add(productName);
+  });
+
+  return {
+    hasAssignments: productIds.size > 0 || productNames.size > 0,
+    productIds,
+    productNames,
+  };
+}
+
+function doesSnapshotMatchAssignedProducts(snapshot, matcher) {
+  if (!matcher?.hasAssignments) return false;
+
+  const snapshotProductId = Number(snapshot?.product_id || 0);
+  if (snapshotProductId > 0 && matcher.productIds.has(snapshotProductId)) {
+    return true;
+  }
+
+  const snapshotProductName = normalizeTextKey(
+    getSnapshotProductName(snapshot),
+  );
+  return snapshotProductName && matcher.productNames.has(snapshotProductName);
+}
+
 function getSnapshotProductName(row) {
   return (
     String(
@@ -1203,6 +1458,10 @@ function getSnapshotCreatedAt(snapshot) {
   return snapshot?.case_created_at || snapshot?.CreatedDate || null;
 }
 
+function getSnapshotSentAt(snapshot) {
+  return snapshot?.sent_date_2 || snapshot?.Sent_Date2__c || null;
+}
+
 function isSnapshotInsideCreatedDateWindow(snapshot, windowStart) {
   const createdAt = getSnapshotCreatedAt(snapshot);
   if (!createdAt) return false;
@@ -1213,23 +1472,45 @@ function isSnapshotInsideCreatedDateWindow(snapshot, windowStart) {
   return createdDate >= windowStart;
 }
 
+function isSnapshotInsideSentDateWindow(snapshot, windowStart) {
+  const sentAt = getSnapshotSentAt(snapshot);
+  if (!sentAt) return false;
+
+  const sentDate = new Date(sentAt);
+  if (Number.isNaN(sentDate.getTime())) return false;
+
+  return sentDate >= windowStart;
+}
+
 function buildSnapshotMetricsFromSnapshots(snapshots = [], options = {}) {
   const windowStart = options.windowStart || getCaseSnapshotWindowStart();
-  const scopedSnapshots = snapshots.filter((snapshot) =>
+  const assignedProductMatcher = buildAssignedProductMatcher(
+    options.assignments || [],
+  );
+  const scopedSnapshots = assignedProductMatcher.hasAssignments
+    ? snapshots.filter((snapshot) =>
+        doesSnapshotMatchAssignedProducts(snapshot, assignedProductMatcher),
+      )
+    : [];
+  const inflowSnapshots = scopedSnapshots.filter((snapshot) =>
     isSnapshotInsideCreatedDateWindow(snapshot, windowStart),
   );
+  const acceptedSnapshots = inflowSnapshots.filter((snapshot) =>
+    isAcceptedCaseSnapshot(snapshot),
+  );
+  const outflowSnapshots = acceptedSnapshots.filter((snapshot) =>
+    isValidatedOutflowSnapshot(snapshot),
+  );
   const byType = {};
-  let acceptedCount = 0;
-  let outflowCount = 0;
 
-  for (const snapshot of scopedSnapshots) {
+  for (const snapshot of inflowSnapshots) {
     const typeName = getSnapshotProductName(snapshot);
     byType[typeName] = (byType[typeName] || 0) + 1;
-    if (isAcceptedCaseSnapshot(snapshot)) acceptedCount += 1;
-    if (snapshot.sent_date_2 || snapshot.Sent_Date2__c) outflowCount += 1;
   }
 
-  const total = scopedSnapshots.length;
+  const total = inflowSnapshots.length;
+  const acceptedCount = acceptedSnapshots.length;
+  const outflowCount = outflowSnapshots.length;
 
   return {
     totals: {
@@ -1241,9 +1522,9 @@ function buildSnapshotMetricsFromSnapshots(snapshots = [], options = {}) {
       outflowLast90Days: outflowCount,
       acceptedToInflowRatePercent:
         total > 0 ? Number(((acceptedCount / total) * 100).toFixed(2)) : 0,
-      acceptedToOutflowRatePercent:
-        outflowCount > 0
-          ? Number(((acceptedCount / outflowCount) * 100).toFixed(2))
+      outflowToAcceptedRatePercent:
+        acceptedCount > 0
+          ? Number(((outflowCount / acceptedCount) * 100).toFixed(2))
           : 0,
       avgPerDay90Days: Number(
         (total / SALESFORCE_CASE_SNAPSHOT_DAYS).toFixed(4),
@@ -1259,39 +1540,112 @@ function buildSnapshotMetricsFromSnapshots(snapshots = [], options = {}) {
 }
 
 function buildSnapshotMetricsJson(row) {
-  return buildSnapshotMetricsFromSnapshots(row?.caseSnapshots || []);
+  return buildSnapshotMetricsFromSnapshots(row?.caseSnapshots || [], {
+    assignments: row?.tortAssignments || [],
+  });
 }
 
-function toPublicAlertFlags(flags = {}) {
+function groupSalesforceCaseSnapshotsByOwnerId(rows = []) {
+  const grouped = new Map();
+
+  rows.forEach((row) => {
+    const ownerId = String(row?.OwnerId || "").trim();
+    if (!ownerId) return;
+
+    if (!grouped.has(ownerId)) {
+      grouped.set(ownerId, []);
+    }
+
+    grouped.get(ownerId).push(row);
+  });
+
+  return grouped;
+}
+
+function buildMetricsOverrideFromLiveSnapshots(row, liveCaseRows = []) {
+  if (!Array.isArray(liveCaseRows) || liveCaseRows.length === 0) return null;
+
+  const windowStart = getCaseSnapshotWindowStart();
+
+  return {
+    ...(row.metrics_json || {}),
+    ...buildSnapshotMetricsFromSnapshots(liveCaseRows, {
+      windowStart,
+      assignments: row.tortAssignments || [],
+    }),
+  };
+}
+
+function toPublicAlertFlags(flags = {}, vendor = {}) {
+  const totals = vendor.metrics?.totals || {};
+  const businessDays = toNumberSafe(totals.businessDays);
+  const acceptedLast90Days = toNumberSafe(totals.acceptedLast90Days);
+  const acceptedAvgPerDay =
+    businessDays > 0
+      ? Number((acceptedLast90Days / businessDays).toFixed(4))
+      : 0;
+
   return {
     fraudRisk: toBooleanFlag(flags.fraud_risk),
     fraudRatePercent: toNumberSafe(flags.fraud_rate_pct),
-    accepted28Days: toNumberSafe(flags.accepted_28_days),
+    accepted28Days: acceptedLast90Days || toNumberSafe(flags.accepted_28_days),
     acceptedDays28: toNumberSafe(flags.accepted_days_28),
-    conversionRatePercent: toNumberSafe(flags.conversion_rate_pct),
-    acceptedAvgPerDay: toNumberSafe(flags.accepted_avg_per_day),
-    topConversionWindowDays: toNumberSafe(flags.top_conversion_window_days),
-    topInflow90Days: toNumberSafe(flags.top_inflow_90_days),
-    topAccepted90Days: toNumberSafe(flags.top_accepted_90_days),
-    topOutflow90Days: toNumberSafe(flags.top_outflow_90_days),
-    topAcceptedToInflowRatePercent: toNumberSafe(
-      flags.top_accepted_to_inflow_rate_pct,
-    ),
-    topAcceptedToOutflowRatePercent: toNumberSafe(
-      flags.top_accepted_to_outflow_rate_pct,
-    ),
+    conversionRatePercent:
+      toNumberSafe(totals.acceptedToInflowRatePercent) ||
+      toNumberSafe(flags.conversion_rate_pct),
+    acceptedAvgPerDay:
+      acceptedAvgPerDay || toNumberSafe(flags.accepted_avg_per_day),
+    topConversionWindowDays:
+      businessDays || toNumberSafe(flags.top_conversion_window_days),
+    topInflow90Days:
+      toNumberSafe(totals.last90Days) || toNumberSafe(flags.top_inflow_90_days),
+    topAccepted90Days:
+      acceptedLast90Days || toNumberSafe(flags.top_accepted_90_days),
+    topOutflow90Days:
+      toNumberSafe(totals.outflowLast90Days) ||
+      toNumberSafe(flags.top_outflow_90_days),
+    topAcceptedToInflowRatePercent:
+      toNumberSafe(totals.acceptedToInflowRatePercent) ||
+      toNumberSafe(flags.top_accepted_to_inflow_rate_pct),
+    topOutflowToAcceptedRatePercent:
+      toNumberSafe(totals.outflowToAcceptedRatePercent) ||
+      toNumberSafe(flags.top_accepted_to_outflow_rate_pct),
     topMinAcceptedToInflowRatePercent: toNumberSafe(
       flags.top_min_accepted_to_inflow_rate_pct,
     ),
-    topMinAcceptedToOutflowRatePercent: toNumberSafe(
+    topMinOutflowToAcceptedRatePercent: toNumberSafe(
       flags.top_min_accepted_to_outflow_rate_pct,
     ),
     topMeetsConversionThresholds: toBooleanFlag(
       flags.top_meets_conversion_thresholds,
     ),
-    topConversionWindowType: flags.top_conversion_window_type || null,
+    classificationMatrix: flags.classification_matrix || null,
+    highQuality: {
+      enabled: toBooleanFlag(flags.hq_enabled),
+      status: flags.hq_status || null,
+      isHighQuality: toBooleanFlag(flags.hq_high_quality),
+      acceptedToInflowRatePercent:
+        toNumberSafe(totals.acceptedToInflowRatePercent) ||
+        toNumberSafe(flags.hq_accepted_to_inflow_rate_pct),
+      minAcceptedToInflowRatePercent: toNumberSafe(
+        flags.hq_min_accepted_to_inflow_rate_pct,
+      ),
+    },
+    highVolume: {
+      enabled: toBooleanFlag(flags.hv_enabled),
+      status: flags.hv_status || null,
+      isHighVolume: toBooleanFlag(flags.hv_high_volume),
+      passedTorts: toNumberSafe(flags.hv_passed_torts),
+      totalTorts: toNumberSafe(flags.hv_total_torts),
+      passRatePercent: toNumberSafe(flags.hv_pass_rate_pct),
+      minPassRatePercent: toNumberSafe(flags.hv_min_pass_rate_pct),
+      completedWeeksEvaluated: toNumberSafe(flags.hv_completed_weeks_evaluated),
+      byTort: Array.isArray(flags.hv_by_tort) ? flags.hv_by_tort : [],
+    },
+    topConversionWindowType:
+      totals.windowType || flags.top_conversion_window_type || null,
     topConversionWindowStart: formatDateForPublic(
-      flags.top_conversion_window_start,
+      totals.windowStart || flags.top_conversion_window_start,
     ),
     topCompletedWeeksEvaluated: toNumberSafe(
       flags.top_completed_weeks_evaluated,
@@ -1392,6 +1746,34 @@ function toPublicAlertFlags(flags = {}) {
         : [],
       currentWeekProgress: flags.under_review_productivity_current_week || null,
     },
+    criticalVendorStatus: {
+      enabled: toBooleanFlag(flags.critical_vendor_enabled),
+      reviewWeeks: toNumberSafe(flags.critical_vendor_review_weeks),
+      completedWeeks: toNumberSafe(flags.critical_vendor_completed_weeks),
+      remainingWeeks: toNumberSafe(flags.critical_vendor_remaining_weeks),
+      reviewComplete: toBooleanFlag(flags.critical_vendor_review_complete),
+      status: flags.critical_vendor_status || null,
+      subcategory: flags.critical_vendor_subcategory || null,
+      actionRequired: toBooleanFlag(flags.critical_vendor_action_required),
+      shouldDeactivate: toBooleanFlag(flags.critical_vendor_should_deactivate),
+      recommendedAction: flags.critical_vendor_recommended_action || null,
+      messageCode: flags.critical_vendor_message_code || null,
+      message: flags.critical_vendor_message || null,
+      hqLow: toBooleanFlag(flags.critical_vendor_hq_low),
+      hvLow: toBooleanFlag(flags.critical_vendor_hv_low),
+      acceptedToInflowRatePercent: toNumberSafe(
+        flags.critical_vendor_accepted_to_inflow_rate_pct,
+      ),
+      highVolumeRatePercent: toNumberSafe(flags.critical_vendor_hv_rate_pct),
+      totalTarget: toNumberSafe(flags.critical_vendor_total_target),
+      totalOutflow: toNumberSafe(flags.critical_vendor_total_outflow),
+      totalDeficit: toNumberSafe(flags.critical_vendor_total_deficit),
+      totalSurplus: toNumberSafe(flags.critical_vendor_total_surplus),
+      byTort: Array.isArray(flags.critical_vendor_by_tort)
+        ? flags.critical_vendor_by_tort
+        : [],
+      currentWeekProgress: flags.critical_vendor_current_week || null,
+    },
   };
 }
 
@@ -1471,8 +1853,8 @@ function buildPerformancePayload(vendor) {
       acceptedToInflowConversionRateLast90DaysPercent: toNumberSafe(
         totals.acceptedToInflowRatePercent,
       ),
-      acceptedToOutflowConversionRateLast90DaysPercent: toNumberSafe(
-        totals.acceptedToOutflowRatePercent,
+      outflowToAcceptedConversionRateLast90DaysPercent: toNumberSafe(
+        totals.outflowToAcceptedRatePercent,
       ),
       avgInflowPerDayLast90Days: toNumberSafe(totals.avgPerDay90Days),
     },
@@ -1489,8 +1871,8 @@ function buildListAnalyticsPayload(performance) {
     acceptedToInflowConversionRate: toNumberSafe(
       kpis.acceptedToInflowConversionRateLast90DaysPercent,
     ),
-    acceptedToOutflowConversionRate: toNumberSafe(
-      kpis.acceptedToOutflowConversionRateLast90DaysPercent,
+    outflowToAcceptedConversionRate: toNumberSafe(
+      kpis.outflowToAcceptedConversionRateLast90DaysPercent,
     ),
   };
 }
@@ -1500,6 +1882,7 @@ function getCategoryBadgeLabel(category) {
     [CATEGORY.NEW_VENDOR]: "New vendor",
     [CATEGORY.TOP_VENDORS]: "Top vendors",
     [CATEGORY.UNDER_REVIEW]: "Under review",
+    [CATEGORY.CRITICAL_VENDOR]: "Critical vendor",
   };
 
   return labels[category] || category;
@@ -1509,6 +1892,7 @@ function getCategoryBadgeSeverity(category) {
   if (category === CATEGORY.TOP_VENDORS) return "success";
   if (category === CATEGORY.NEW_VENDOR) return "warning";
   if (category === CATEGORY.UNDER_REVIEW) return "danger";
+  if (category === CATEGORY.CRITICAL_VENDOR) return "danger";
   return "neutral";
 }
 
@@ -1560,18 +1944,23 @@ function formatTortBadgeLabel(torts = []) {
 function buildCategorySecondaryBadges(vendor, alerts = {}) {
   const newVendorProbation = alerts.newVendorProbation || {};
   const underReviewProductivity = alerts.underReviewProductivity || {};
+  const criticalVendorStatus = alerts.criticalVendorStatus || {};
   const actionSignal = newVendorProbation.enabled
     ? newVendorProbation
     : underReviewProductivity.enabled
       ? underReviewProductivity
-      : null;
+      : criticalVendorStatus.enabled
+        ? criticalVendorStatus
+        : null;
 
   const badges = [];
+  const canRecommendDeactivation =
+    newVendorProbation.enabled || criticalVendorStatus.enabled;
 
-  if (actionSignal?.shouldDeactivate) {
+  if (actionSignal?.shouldDeactivate && canRecommendDeactivation) {
     badges.push({
       code: actionSignal.subcategory || "deactivate_vendor",
-      label: "Deactivate recommended",
+      label: "Deactivation recommended",
       type: "action",
       severity: "danger",
       message: actionSignal.message || null,
@@ -1693,14 +2082,33 @@ function buildCategorySecondaryBadges(vendor, alerts = {}) {
   }
 
   if (vendor.category === CATEGORY.TOP_VENDORS) {
-    return [
+    const hqPct = toNumberSafe(alerts.highQuality?.acceptedToInflowRatePercent);
+    const hvRate = toNumberSafe(alerts.highVolume?.passRatePercent);
+    const topBadges = [
       {
-        code: "stable",
+        code: "top_stable",
         label: "Stable",
         type: "status",
-        severity: "neutral",
+        severity: "success",
       },
     ];
+    if (hqPct > 0 && hqPct < 25) {
+      topBadges.push({
+        code: "top_hq_trending_down",
+        label: `HQ ${hqPct}% (low margin)`,
+        type: "status",
+        severity: "warning",
+      });
+    }
+    if (hvRate > 0 && hvRate < 60) {
+      topBadges.push({
+        code: "top_hv_trending_down",
+        label: `HV ${hvRate}% (low margin)`,
+        type: "status",
+        severity: "warning",
+      });
+    }
+    return topBadges;
   }
 
   return [];
@@ -1708,19 +2116,22 @@ function buildCategorySecondaryBadges(vendor, alerts = {}) {
 
 function buildCategoryPayload(vendor) {
   const categoryInfo = vendor.metrics?.category || {};
-  const alerts = toPublicAlertFlags(vendor.alertFlags || {});
+  const alerts = toPublicAlertFlags(vendor.alertFlags || {}, vendor);
   const newVendorProbation = alerts.newVendorProbation || {};
   const underReviewProductivity = alerts.underReviewProductivity || {};
+  const criticalVendorStatus = alerts.criticalVendorStatus || {};
   const subcategory =
     newVendorProbation.enabled && newVendorProbation.subcategory
       ? newVendorProbation.subcategory
       : underReviewProductivity.enabled && underReviewProductivity.subcategory
         ? underReviewProductivity.subcategory
-        : vendor.category === CATEGORY.TOP_VENDORS
-          ? "top_goal_qualified"
-          : vendor.category === CATEGORY.UNDER_REVIEW
-            ? "under_review_default"
-            : null;
+        : criticalVendorStatus.enabled && criticalVendorStatus.subcategory
+          ? criticalVendorStatus.subcategory
+          : vendor.category === CATEGORY.TOP_VENDORS
+            ? "top_goal_qualified"
+            : vendor.category === CATEGORY.UNDER_REVIEW
+              ? "under_review_default"
+              : null;
 
   return {
     current: vendor.category,
@@ -1732,21 +2143,24 @@ function buildCategoryPayload(vendor) {
     computed: vendor.computedCategory,
     manual: vendor.manualCategory,
     isNewVendorCategory: vendor.category === CATEGORY.NEW_VENDOR,
+    isCriticalVendorCategory: vendor.category === CATEGORY.CRITICAL_VENDOR,
     isNewVendor: Boolean(vendor.isNewVendor),
     newVendorWindowDays: vendor.newVendorWindowDays,
     isTop20Candidate: toBooleanFlag(categoryInfo.isTop20Candidate),
     consecutiveMissedWeeks: toNumberSafe(vendor.consecutiveMissedWeeks),
     actionRequired: Boolean(
       newVendorProbation.actionRequired ||
-      underReviewProductivity.actionRequired,
+      underReviewProductivity.actionRequired ||
+      criticalVendorStatus.actionRequired,
     ),
     shouldDeactivate: Boolean(
       newVendorProbation.shouldDeactivate ||
-      underReviewProductivity.shouldDeactivate,
+      criticalVendorStatus.shouldDeactivate,
     ),
     recommendedAction:
       newVendorProbation.recommendedAction ||
       underReviewProductivity.recommendedAction ||
+      criticalVendorStatus.recommendedAction ||
       null,
     alerts,
   };
@@ -1862,9 +2276,18 @@ function buildCaseSnapshotInclude() {
     as: "caseSnapshots",
     required: false,
     where: {
-      case_created_at: {
-        [Op.gte]: getLast90DaysStart(),
-      },
+      [Op.or]: [
+        {
+          case_created_at: {
+            [Op.gte]: getLast90DaysStart(),
+          },
+        },
+        {
+          sent_date_2: {
+            [Op.gte]: getLast90DaysStart(),
+          },
+        },
+      ],
     },
     attributes: [
       "salesforce_case_id",
@@ -1873,6 +2296,7 @@ function buildCaseSnapshotInclude() {
       "case_created_at",
       "signed_date",
       "sent_date_2",
+      "outflow_validated",
       "sub_status",
     ],
     include: [
@@ -1924,11 +2348,16 @@ function getDefaultGoalOverview() {
       visibleTotalOutflow: 0,
     },
     byTort: [],
-    compensation: buildGoalCompensationSummary([], { windowWeeks: 2 }),
+    compensation: buildGoalCompensationSummary([], {
+      windowWeeks: GOAL_COMPLETED_EVALUATION_WEEKS,
+    }),
   };
 }
 
-function buildGoalCompensationFromRows(rows = [], windowWeeks = 2) {
+function buildGoalCompensationFromRows(
+  rows = [],
+  windowWeeks = GOAL_COMPLETED_EVALUATION_WEEKS,
+) {
   const weekMap = new Map();
 
   rows.forEach((row) => {
@@ -2092,7 +2521,10 @@ function buildGoalOverviewMap(rows = []) {
         visibleTotalOutflow: entry.visibleTotalOutflow,
       },
       byTort,
-      compensation: buildGoalCompensationFromRows(entry.rows, 2),
+      compensation: buildGoalCompensationFromRows(
+        entry.rows,
+        GOAL_COMPLETED_EVALUATION_WEEKS,
+      ),
     });
   }
 
@@ -2126,16 +2558,29 @@ function buildInflowPayload(vendor, caseEntriesByTypeLast90Days = {}) {
   return payload;
 }
 
-function buildCaseEntriesByTypeMap(rows = []) {
+function buildCaseEntriesByTypeMap(rows = [], options = {}) {
+  const assignedProductMatcher = buildAssignedProductMatcher(
+    options.assignments || [],
+  );
+  const goalOutflowWindow = getGoalOutflowWindowInfo();
   const byType = {};
 
   rows.forEach((row) => {
+    if (
+      assignedProductMatcher.hasAssignments &&
+      !doesSnapshotMatchAssignedProducts(row, assignedProductMatcher)
+    ) {
+      return;
+    }
+
     const type =
       String(
         row?.Type || row?.caseProduct?.name || row?.product?.name || "Unknown",
       ).trim() || "Unknown";
     const caseNumber = String(row?.CaseNumber || row?.case_number || "").trim();
     const caseId = String(row?.Id || row?.salesforce_case_id || "").trim();
+    const outflowDate = getSnapshotSentAt(row);
+    const outflowValidated = isValidatedOutflowSnapshot(row);
 
     if (!caseNumber || !caseId) return;
     if (!byType[type]) byType[type] = [];
@@ -2143,6 +2588,34 @@ function buildCaseEntriesByTypeMap(rows = []) {
     byType[type].push({
       caseNumber,
       caseId,
+      outflow: {
+        date: formatDateForPublic(outflowDate),
+        validated: outflowValidated,
+        countsForVisibleGoalWindow: Boolean(
+          outflowValidated &&
+          isDateInsideWindow(outflowDate, goalOutflowWindow.visible),
+        ),
+        countsForCategoryWindow: Boolean(
+          outflowValidated &&
+          isDateInsideWindow(outflowDate, goalOutflowWindow.classification),
+        ),
+        visibleGoalWindow: goalOutflowWindow.visible
+          ? {
+              start: formatDateForPublic(goalOutflowWindow.visible.startStr),
+              end: formatDateForPublic(goalOutflowWindow.visible.endStr),
+              weeks: GOAL_OVERVIEW_WEEKS,
+            }
+          : null,
+        categoryWindow: goalOutflowWindow.classification
+          ? {
+              start: formatDateForPublic(
+                goalOutflowWindow.classification.startStr,
+              ),
+              end: formatDateForPublic(goalOutflowWindow.classification.endStr),
+              weeks: GOAL_COMPLETED_EVALUATION_WEEKS,
+            }
+          : null,
+      },
     });
   });
 
@@ -2214,7 +2687,10 @@ function buildVendorInsights(
     goalStats,
     goals: {
       byTort: goalsByTort,
-      compensation: buildGoalCompensationFromRows(weeklyGoals, 2),
+      compensation: buildGoalCompensationFromRows(
+        weeklyGoals,
+        GOAL_COMPLETED_EVALUATION_WEEKS,
+      ),
     },
     rewards: topReward ? toPublicRewards(topReward) : toPublicRewards(null),
     categoryLogs: categoryLogs.map((l) => ({
@@ -2416,6 +2892,18 @@ async function listVendors(filters = {}) {
           );
         });
 
+  let liveSnapshotsByOwnerId = new Map();
+  try {
+    const liveRows = await fetchSalesforceCaseSnapshots(
+      filteredRows.map((row) => row.salesforce_user_id),
+    );
+    liveSnapshotsByOwnerId = groupSalesforceCaseSnapshotsByOwnerId(liveRows);
+  } catch (error) {
+    logger.warn(
+      `VendorClassificationService → listVendors() live Salesforce metrics fallback: ${error.message}`,
+    );
+  }
+
   const vendorIds = filteredRows.map((row) => Number(row.id)).filter(Boolean);
   const goalWeekStartDates = getRecentGoalWeekStartDates();
   const weeklyGoalRows = vendorIds.length
@@ -2458,7 +2946,12 @@ async function listVendors(filters = {}) {
   const goalOverviewMap = buildGoalOverviewMap(weeklyGoalRows);
 
   const items = filteredRows.map((row) => {
-    const vendor = toPublicVendor(row);
+    const metricsOverride = buildMetricsOverrideFromLiveSnapshots(
+      row,
+      liveSnapshotsByOwnerId.get(String(row.salesforce_user_id || "").trim()) ||
+        [],
+    );
+    const vendor = toPublicVendor(row, { metricsOverride });
     const performance = buildPerformancePayload(vendor);
     const goalOverview =
       goalOverviewMap.get(Number(row.id)) || getDefaultGoalOverview();
@@ -2611,9 +3104,18 @@ async function getVendorInsightsById(vendorId) {
         model: VendorCaseSnapshot,
         as: "caseSnapshots",
         where: {
-          case_created_at: {
-            [Op.gte]: getLast90DaysStart(),
-          },
+          [Op.or]: [
+            {
+              case_created_at: {
+                [Op.gte]: getLast90DaysStart(),
+              },
+            },
+            {
+              sent_date_2: {
+                [Op.gte]: getLast90DaysStart(),
+              },
+            },
+          ],
         },
         required: false,
         attributes: [
@@ -2623,6 +3125,7 @@ async function getVendorInsightsById(vendorId) {
           "case_created_at",
           "signed_date",
           "sent_date_2",
+          "outflow_validated",
           "sub_status",
         ],
         include: [
@@ -2689,13 +3192,15 @@ async function getVendorInsightsById(vendorId) {
     ]);
     if (Array.isArray(liveCaseRows) && liveCaseRows.length > 0) {
       const windowStart = getCaseSnapshotWindowStart();
-      caseRows = liveCaseRows.filter((snapshot) =>
-        isSnapshotInsideCreatedDateWindow(snapshot, windowStart),
+      caseRows = liveCaseRows.filter(
+        (snapshot) =>
+          isSnapshotInsideCreatedDateWindow(snapshot, windowStart) ||
+          isSnapshotInsideSentDateWindow(snapshot, windowStart),
       );
-      metricsOverride = {
-        ...(row.metrics_json || {}),
-        ...buildSnapshotMetricsFromSnapshots(liveCaseRows, { windowStart }),
-      };
+      metricsOverride = buildMetricsOverrideFromLiveSnapshots(
+        row,
+        liveCaseRows,
+      );
     }
   } catch (error) {
     logger.warn(
@@ -2704,7 +3209,9 @@ async function getVendorInsightsById(vendorId) {
   }
 
   const vendor = toPublicVendor(row, { metricsOverride });
-  const caseEntriesByTypeLast90Days = buildCaseEntriesByTypeMap(caseRows);
+  const caseEntriesByTypeLast90Days = buildCaseEntriesByTypeMap(caseRows, {
+    assignments: row.tortAssignments || [],
+  });
   const goalOverview =
     buildGoalOverviewMap(row.weeklyGoals || []).get(Number(vendorId)) ||
     getDefaultGoalOverview();
@@ -2764,6 +3271,78 @@ async function updateVendorTopRewards(vendorId, payload = {}) {
   };
 }
 
+async function resolveVendorForSalesforcePasswordReset(vendorId) {
+  const parsedVendorId = Number(vendorId);
+  if (!Number.isInteger(parsedVendorId) || parsedVendorId <= 0) {
+    const error = new Error("Valid vendor id is required");
+    error.status = 400;
+    throw error;
+  }
+
+  const profile = await VendorProfile.findByPk(parsedVendorId, {
+    include: [buildVendorInfoInclude({ required: false })],
+  });
+
+  if (profile) {
+    const vendorInfo = getProfileVendorInfo(profile);
+    return {
+      profileId: profile.id,
+      vendorTableId: vendorInfo?.id || null,
+      salesforceUserId:
+        String(
+          profile.salesforce_user_id || vendorInfo?.salesforce_id || "",
+        ).trim() || null,
+      supplier: vendorInfo?.contact_name || profile.supplier || null,
+      username: vendorInfo?.email || profile.username || null,
+    };
+  }
+
+  const vendor = await Vendor.findByPk(parsedVendorId, {
+    attributes: ["id", "salesforce_id", "contact_name", "email", "name"],
+  });
+
+  if (!vendor) {
+    const error = new Error("Vendor not found");
+    error.status = 404;
+    throw error;
+  }
+
+  return {
+    profileId: null,
+    vendorTableId: vendor.id,
+    salesforceUserId: String(vendor.salesforce_id || "").trim() || null,
+    supplier: vendor.contact_name || vendor.name || null,
+    username: vendor.email || null,
+  };
+}
+
+async function resetVendorSalesforcePassword(vendorId) {
+  await ensureVendorClassificationTables();
+
+  const vendor = await resolveVendorForSalesforcePasswordReset(vendorId);
+  if (!vendor.salesforceUserId || !vendor.salesforceUserId.startsWith("005")) {
+    const error = new Error("Vendor has no valid Salesforce User id");
+    error.status = 409;
+    throw error;
+  }
+
+  const sf = await authenticateSalesforce();
+  const salesforceResponse = await resetSalesforceUserPassword(
+    sf,
+    vendor.salesforceUserId,
+  );
+
+  return {
+    success: true,
+    message: "Salesforce password reset requested",
+    vendor,
+    salesforce: {
+      userId: vendor.salesforceUserId,
+      response: salesforceResponse,
+    },
+  };
+}
+
 module.exports = {
   syncVendorsFromMysql,
   syncVendorsAndEvaluateRules,
@@ -2773,4 +3352,5 @@ module.exports = {
   setVendorCategory,
   assignVendorToTort,
   updateVendorTopRewards,
+  resetVendorSalesforcePassword,
 };

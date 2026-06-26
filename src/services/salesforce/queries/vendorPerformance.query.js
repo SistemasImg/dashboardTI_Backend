@@ -117,6 +117,9 @@ function buildVendorCaseSnapshotsQuery(
   const signedDateFilter = options.signedDateFrom
     ? `Signed_Date__c >= ${options.signedDateFrom}`
     : `Signed_Date__c = LAST_N_DAYS:${Number(lastDays)}`;
+  const sentDateFilter = options.sentDateFrom
+    ? `Sent_Date2__c >= ${options.sentDateFrom}`
+    : `Sent_Date2__c = LAST_N_DAYS:${Number(lastDays)}`;
 
   return `
 SELECT
@@ -135,8 +138,23 @@ WHERE OwnerId IN (${inClause})
   AND (
     ${createdDateFilter}
     OR ${signedDateFilter}
+    OR ${sentDateFilter}
   )
 ORDER BY CreatedDate DESC
+`;
+}
+
+function buildVendorOutflowValidationQuery(caseNumbers = []) {
+  const inClause = buildInClause(caseNumbers);
+  if (!inClause) return null;
+
+  return `
+SELECT
+  Lead__r.CaseNumber,
+  Lead__r.Type
+FROM Lead_de_oportunidad__c
+WHERE Lead__r.CaseNumber IN (${inClause})
+  AND Lead__r.Substatus__c = 'Signed'
 `;
 }
 
@@ -146,4 +164,5 @@ module.exports = {
   buildVendorSignedCasesAggregateQuery,
   buildVendorCaseNumbersByTypeQuery,
   buildVendorCaseSnapshotsQuery,
+  buildVendorOutflowValidationQuery,
 };

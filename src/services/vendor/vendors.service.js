@@ -1,6 +1,6 @@
 const logger = require("../../utils/logger");
 const sequelize = require("../../config/db");
-const { Op } = require("sequelize");
+const { Op, DataTypes } = require("sequelize");
 const { authenticateSalesforce } = require("../salesforce/auth.service");
 const {
   runSoqlQuery,
@@ -27,6 +27,9 @@ function toPublicVendor(row) {
     countryId: row.country_id || row.countryInfo?.id || null,
     country: row.countryInfo?.name || null,
     status: row.status,
+    reactivatedAt: row.reactivated_at || null,
+    deactivatedAt: row.deactivated_at || null,
+    lastStatusChangedAt: row.last_status_changed_at || null,
     supplierSegment: row.supplier_segment,
     communicationChannel: communicationChannels,
     tortTierStatuses: Array.isArray(row.tort_tier_statuses)
@@ -43,6 +46,30 @@ function toPublicVendor(row) {
 async function ensureVendorsTable() {
   await Vendor.sync();
   await VendorCountry.sync();
+
+  const queryInterface = sequelize.getQueryInterface();
+  const tableDefinition = await queryInterface.describeTable("vendors");
+
+  if (!tableDefinition.reactivated_at) {
+    await queryInterface.addColumn("vendors", "reactivated_at", {
+      type: DataTypes.DATE,
+      allowNull: true,
+    });
+  }
+
+  if (!tableDefinition.deactivated_at) {
+    await queryInterface.addColumn("vendors", "deactivated_at", {
+      type: DataTypes.DATE,
+      allowNull: true,
+    });
+  }
+
+  if (!tableDefinition.last_status_changed_at) {
+    await queryInterface.addColumn("vendors", "last_status_changed_at", {
+      type: DataTypes.DATE,
+      allowNull: true,
+    });
+  }
 }
 
 function normalizeCountryLookupKey(value) {
@@ -230,12 +257,16 @@ async function syncSalesforceVendorsToMysql() {
 
       const localRow = localBySalesforceId.get(salesforceId);
       if (!localRow) {
+        const initialStatus =
+          salesforceVendor.status === "inactive" ? "inactive" : "active";
         const newVendor = await Vendor.create(
           {
             salesforce_id: salesforceId,
             ...nextValues,
-            status:
-              salesforceVendor.status === "inactive" ? "inactive" : "active",
+            status: initialStatus,
+            reactivated_at: null,
+            deactivated_at: initialStatus === "inactive" ? new Date() : null,
+            last_status_changed_at: null,
             supplier_segment: null,
             communication_channel: null,
             tort_tier_statuses: [],
@@ -263,6 +294,15 @@ async function syncSalesforceVendorsToMysql() {
       }
       if (localRow.status !== nextValues.status) {
         updatePayload.status = nextValues.status;
+        updatePayload.last_status_changed_at = new Date();
+
+        if (localRow.status === "inactive" && nextValues.status === "active") {
+          updatePayload.reactivated_at = new Date();
+        }
+
+        if (localRow.status === "active" && nextValues.status === "inactive") {
+          updatePayload.deactivated_at = new Date();
+        }
       }
 
       const changedFields = Object.keys(updatePayload);

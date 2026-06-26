@@ -38,6 +38,11 @@ const VendorCaseSnapshot = sequelize.define(
       type: DataTypes.DATE,
       allowNull: true,
     },
+    outflow_validated: {
+      type: DataTypes.BOOLEAN,
+      allowNull: false,
+      defaultValue: false,
+    },
     sub_status: {
       type: DataTypes.STRING(120),
       allowNull: true,
@@ -53,6 +58,7 @@ const VendorCaseSnapshot = sequelize.define(
       { fields: ["vendor_id"] },
       { fields: ["product_id"] },
       { fields: ["case_created_at"] },
+      { fields: ["sent_date_2"] },
     ],
   },
 );

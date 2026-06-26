@@ -7,6 +7,7 @@ const {
   setVendorCategory,
   assignVendorToTort,
   updateVendorTopRewards,
+  resetVendorSalesforcePassword,
 } = require("../services/vendor/vendor.classification.service");
 const {
   SYNC_KEYS,
@@ -49,6 +50,8 @@ async function syncVendors(req, res, next) {
       () =>
         syncVendorsAndEvaluateRules({
           failOnRulesError: false,
+          syncSalesforceData: true,
+          syncSalesforceSupplierSegments: false,
         }),
     );
 
@@ -227,6 +230,30 @@ async function updateVendorRewards(req, res, next) {
   } catch (error) {
     logger.error(
       `VendorController → updateVendorRewards() error: ${error.message}`,
+      {
+        stack: error.stack,
+        origin: "controller",
+      },
+    );
+    next(error);
+  }
+}
+
+async function resetVendorPassword(req, res, next) {
+  logger.info("VendorController → resetVendorPassword() called");
+
+  try {
+    const vendorId = Number(req.params.vendorId);
+    const result = await resetVendorSalesforcePassword(vendorId);
+
+    logger.success(
+      `VendorController → resetVendorPassword() success | vendorId: ${vendorId} | salesforceUserId: ${result.vendor.salesforceUserId}`,
+    );
+
+    return res.status(200).json(result);
+  } catch (error) {
+    logger.error(
+      `VendorController → resetVendorPassword() error: ${error.message}`,
       {
         stack: error.stack,
         origin: "controller",
@@ -595,6 +622,7 @@ module.exports = {
   updateVendorCategory,
   upsertVendorTort,
   updateVendorRewards,
+  resetVendorPassword,
   runVendorCategoryRules,
   getVendorMonitoringSnapshot,
   getVendorMonitoringAlertsFeed,

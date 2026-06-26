@@ -107,6 +107,7 @@ async function getVendorMonitoringSummary(options = {}) {
     new_vendor: 0,
     top_vendors: 0,
     under_review: 0,
+    critical_vendor: 0,
   };
 
   const atRiskVendors = [];

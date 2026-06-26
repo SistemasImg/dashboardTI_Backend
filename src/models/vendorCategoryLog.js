@@ -14,11 +14,21 @@ const VendorCategoryLog = sequelize.define(
       allowNull: false,
     },
     from_category: {
-      type: DataTypes.ENUM("new_vendor", "top_vendors", "under_review"),
+      type: DataTypes.ENUM(
+        "new_vendor",
+        "top_vendors",
+        "under_review",
+        "critical_vendor",
+      ),
       allowNull: true,
     },
     to_category: {
-      type: DataTypes.ENUM("new_vendor", "top_vendors", "under_review"),
+      type: DataTypes.ENUM(
+        "new_vendor",
+        "top_vendors",
+        "under_review",
+        "critical_vendor",
+      ),
       allowNull: false,
     },
     reason: {

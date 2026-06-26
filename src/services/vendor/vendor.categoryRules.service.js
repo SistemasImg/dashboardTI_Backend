@@ -28,7 +28,7 @@ const {
 // RULE CONSTANTS
 // =============================================
 
-// Weekly outflow targets per tort type (signed cases/week)
+// Weekly outflow targets per tort type (sent/outflow cases/week)
 const WEEKLY_OUTFLOW_TARGETS = {
   rideshare: 5,
   bardPort: 5,
@@ -38,16 +38,13 @@ const WEEKLY_OUTFLOW_TARGETS = {
 // Missing both completed evaluation weeks keeps/promotes under_review.
 const CONSECUTIVE_MISS_THRESHOLD = 2;
 
-// Top vendor constraints
-const TOP_VENDOR_MAX = 20;
+// Quality/volume category constraints
 const TOP_CONVERSION_WINDOW_DAYS = 90;
 const TOP_CONVERSION_WINDOW_TYPE = "us_business_days";
-const TOP_MIN_ACCEPTED_TO_INFLOW_RATE_PERCENT = 15;
+const HQ_MIN_ACCEPTED_TO_INFLOW_RATE_PERCENT = 15;
+const HV_MIN_TORT_GOAL_RATE_PERCENT = 50;
 
-// Vendors qualify for top by meeting all weekly outflow goals in completed weeks.
-
-// Consecutive underperforming weeks before demotion from top
-const TOP_UNDERPERFORM_WEEKS_THRESHOLD = 4;
+// Vendors qualify by HQ/HV. There is no top vendor count cap.
 
 // Fraud/quality thresholds
 // Only Fake Lead is treated as fraud signal.
@@ -55,9 +52,9 @@ const FRAUD_SUBSTATUS_VALUES = ["fake lead"];
 const FRAUD_RATE_THRESHOLD = 0.2; // 20%+ of cases flagged as Fake Lead
 const LOW_CONVERSION_THRESHOLD = 0.02; // less than 2% accepted
 
-// Show current week + previous 2; classify only from complete weeks.
-const GOAL_DISPLAY_WEEKS = 3;
-const GOAL_CLASSIFICATION_COMPLETED_WEEKS = 2;
+// Show current week + previous 3; classify only from the last 3 complete weeks.
+const GOAL_DISPLAY_WEEKS = 4;
+const GOAL_CLASSIFICATION_COMPLETED_WEEKS = 3;
 const NEW_VENDOR_PROBATION_WEEKS = GOAL_CLASSIFICATION_COMPLETED_WEEKS;
 const GOAL_RULE_LOOKBACK_WEEKS = Math.max(
   GOAL_DISPLAY_WEEKS,
@@ -96,17 +93,6 @@ function getWeekBoundaries(weeksAgo) {
   };
 }
 
-/** Returns the current ISO week start as YYYY-MM-DD. */
-function getCurrentWeekStartStr() {
-  const now = new Date();
-  const dayOfWeek = now.getUTCDay();
-  const daysToMonday = dayOfWeek === 0 ? 6 : dayOfWeek - 1;
-  const monday = new Date(now);
-  monday.setUTCDate(now.getUTCDate() - daysToMonday);
-  monday.setUTCHours(0, 0, 0, 0);
-  return monday.toISOString().split("T")[0];
-}
-
 function getLastDaysStart(days) {
   return getUsBusinessDaysWindowStartDate(days);
 }
@@ -129,6 +115,9 @@ function getProfileDisplayInfo(profile) {
 }
 
 function isAcceptedCaseSnapshot(snapshot) {
+  if (snapshot?.signed_date || snapshot?.Signed_Date__c) return true;
+  if (isValidatedOutflowSnapshot(snapshot)) return true;
+
   return (
     String(snapshot?.sub_status || "")
       .trim()
@@ -164,6 +153,31 @@ function doesSnapshotMatchAssignment(snapshot, assignment, productName) {
   );
 }
 
+function filterSnapshotsByAssignments(snapshots, assignments = []) {
+  if (!Array.isArray(assignments) || assignments.length === 0) return [];
+
+  return snapshots.filter((snapshot) =>
+    assignments.some((assignment) => {
+      const productName = String(assignment.product?.name || "").trim();
+      return doesSnapshotMatchAssignment(snapshot, assignment, productName);
+    }),
+  );
+}
+
+function getSnapshotOutflowDate(snapshot) {
+  return snapshot?.sent_date_2 || snapshot?.Sent_Date2__c || null;
+}
+
+function getSnapshotCreatedDate(snapshot) {
+  return snapshot?.case_created_at || snapshot?.CreatedDate || null;
+}
+
+function isValidatedOutflowSnapshot(snapshot) {
+  return Boolean(
+    getSnapshotOutflowDate(snapshot) && snapshot?.outflow_validated,
+  );
+}
+
 // =============================================
 // EVALUATION FUNCTIONS
 // =============================================
@@ -183,8 +197,9 @@ function computeWeeklyGoalResults(assignments, snapshots) {
     const isComplete = now > week.end;
 
     const weekSnapshots = snapshots.filter((s) => {
-      if (!s.signed_date) return false;
-      const d = new Date(s.signed_date);
+      if (!isValidatedOutflowSnapshot(s)) return false;
+      const outflowDate = getSnapshotOutflowDate(s);
+      const d = new Date(outflowDate);
       return d >= week.start && d <= week.end;
     });
 
@@ -434,12 +449,12 @@ function buildUnderReviewProductivityStatus(isUnderReview, weeklyResults) {
     recommendedAction = "deactivate_underperforming_torts";
   } else if (reviewComplete) {
     status = "failed";
-    subcategory = "under_review_deactivation_required";
-    messageCode = "under_review_deactivation_required";
+    subcategory = "under_review_productivity_failed";
+    messageCode = "under_review_productivity_failed";
     message = `Under review vendor failed ${GOAL_CLASSIFICATION_COMPLETED_WEEKS}-completed-week productivity goals: ${finalSummary.totalOutflow}/${finalSummary.totalTarget} outflow, deficit ${finalSummary.totalDeficit}.`;
     actionRequired = true;
-    shouldDeactivate = true;
-    recommendedAction = "deactivate_vendor";
+    shouldDeactivate = false;
+    recommendedAction = "review_vendor_assignments";
   } else if (
     completedWeeksEvaluated > 0 &&
     progressSummary.eligibleAfterCompensation
@@ -490,6 +505,126 @@ function buildUnderReviewProductivityStatus(isUnderReview, weeklyResults) {
   };
 }
 
+function buildCriticalVendorStatus(isCritical, weeklyResults, topEligibility) {
+  if (!isCritical) {
+    return {
+      enabled: false,
+      subcategory: null,
+      status: null,
+      actionRequired: false,
+      shouldDeactivate: false,
+      recommendedAction: null,
+    };
+  }
+
+  const reviewWeeks = getClassificationWeeklyResults(weeklyResults);
+  const completedWeeksEvaluated = reviewWeeks.length;
+  const finalSummary = buildGoalCompensationSummary(reviewWeeks, {
+    windowWeeks: GOAL_CLASSIFICATION_COMPLETED_WEEKS,
+  });
+  const reviewComplete =
+    completedWeeksEvaluated >= GOAL_CLASSIFICATION_COMPLETED_WEEKS;
+  const currentWeekProgress = buildCurrentWeekProgress(weeklyResults);
+
+  const hqLow = !topEligibility.highQuality;
+  const hvLow = !topEligibility.highVolume;
+
+  let status;
+  let subcategory;
+  let messageCode;
+  let message;
+  let actionRequired = true;
+  let shouldDeactivate = false;
+  let recommendedAction = "deactivate_vendor";
+
+  // Caso 1: vendor sin torts activos — nunca puede generar outflow
+  if (topEligibility.totalAssignedTorts === 0) {
+    status = "no_torts";
+    subcategory = "critical_no_torts";
+    messageCode = "critical_no_torts";
+    message = "Critical vendor has no active tort assignments.";
+    shouldDeactivate = true;
+    recommendedAction = "deactivate_vendor";
+  } else if (reviewComplete && hasMixedTortPerformance(finalSummary)) {
+    // Caso 2: review completa, algunos torts pasan pero HQ sigue bajo
+    const failedTorts = getFailedTortNames(finalSummary);
+    status = "tort_action_required";
+    subcategory = "critical_tort_deactivation_required";
+    messageCode = "critical_tort_deactivation_required";
+    message =
+      `Critical vendor with underperforming torts: ${formatTortList(failedTorts)}: ` +
+      `${finalSummary.totalOutflow}/${finalSummary.totalTarget} outflow, ` +
+      `deficit ${finalSummary.totalDeficit}.`;
+    shouldDeactivate = false;
+    recommendedAction = "deactivate_underperforming_torts";
+  } else if (reviewComplete && !finalSummary.eligibleAfterCompensation) {
+    // Caso 3: critical review completa y no cumple metas.
+    status = "failed";
+    subcategory = "critical_deactivation_required";
+    messageCode = "critical_deactivation_required";
+    message =
+      `Critical vendor failed ${GOAL_CLASSIFICATION_COMPLETED_WEEKS}-week review: ` +
+      `${finalSummary.totalOutflow}/${finalSummary.totalTarget} outflow, ` +
+      `deficit ${finalSummary.totalDeficit}.`;
+    shouldDeactivate = true;
+    recommendedAction = "deactivate_vendor";
+  } else if (hqLow && hvLow) {
+    // Caso 4: semanas en curso — ambas métricas bajas
+    status = "critical_low_hq_low_hv";
+    subcategory = "critical_low_quality_low_volume";
+    messageCode = "critical_low_quality_low_volume";
+    message =
+      `Critical vendor: low accepted/inflow ` +
+      `(${topEligibility.acceptedToInflowRatePercent}%) ` +
+      `and low volume ` +
+      `(${topEligibility.qualifiedTortCount}/${topEligibility.totalAssignedTorts} torts).`;
+    shouldDeactivate = false;
+    recommendedAction = "improve_quality_and_volume";
+  } else {
+    // Fallback genérico mientras no hay semanas completas aún
+    status = "pending";
+    subcategory = "critical_pending";
+    messageCode = "critical_pending";
+    message = "Critical vendor pending full review window.";
+    shouldDeactivate = false;
+    recommendedAction = "monitor_vendor";
+  }
+
+  const summary = reviewComplete
+    ? finalSummary
+    : buildGoalCompensationSummary(reviewWeeks, {
+        windowWeeks: Math.max(completedWeeksEvaluated, 1),
+      });
+
+  return {
+    enabled: true,
+    reviewWeeks: GOAL_CLASSIFICATION_COMPLETED_WEEKS,
+    completedWeeksEvaluated,
+    remainingWeeks: Math.max(
+      GOAL_CLASSIFICATION_COMPLETED_WEEKS - completedWeeksEvaluated,
+      0,
+    ),
+    reviewComplete,
+    status,
+    subcategory,
+    actionRequired,
+    shouldDeactivate,
+    recommendedAction,
+    messageCode,
+    message,
+    hqLow,
+    hvLow,
+    acceptedToInflowRatePercent: topEligibility.acceptedToInflowRatePercent,
+    highVolumeRatePercent: topEligibility.highVolumeRatePercent,
+    totalTarget: summary.totalTarget,
+    totalOutflow: summary.totalOutflow,
+    totalDeficit: summary.totalDeficit,
+    totalSurplus: summary.totalSurplus,
+    byTort: summary.byTort,
+    currentWeekProgress,
+  };
+}
+
 /** Counts consecutive leading weeks where ALL goals were missed. */
 function countConsecutiveMissedWeeks(weeklyResults) {
   let count = 0;
@@ -513,7 +648,9 @@ function computeFraudRisk(snapshots) {
     ),
   ).length;
 
-  const acceptedCount = snapshots.filter((s) => Boolean(s.signed_date)).length;
+  const acceptedCount = snapshots.filter((s) =>
+    isAcceptedCaseSnapshot(s),
+  ).length;
   const fraudRate = fraudCount / total;
   const conversionRate = acceptedCount / total;
   const isFraudRisk = fraudRate >= FRAUD_RATE_THRESHOLD;
@@ -533,24 +670,29 @@ function computeTopEligibility(
   snapshots,
   classificationWeeklyResults,
   goalCompensation,
+  activeAssignments = [],
 ) {
+  const scopedSnapshots = filterSnapshotsByAssignments(
+    snapshots,
+    activeAssignments,
+  );
   const cutoff = getLastDaysStart(TOP_CONVERSION_WINDOW_DAYS);
 
-  const recentWindowSnapshots = snapshots.filter((s) => {
-    if (!s.case_created_at) return false;
-    const d = new Date(s.case_created_at);
+  const recentInflowSnapshots = scopedSnapshots.filter((s) => {
+    const createdDate = getSnapshotCreatedDate(s);
+    if (!createdDate) return false;
+    const d = new Date(createdDate);
     return d >= cutoff;
   });
-
-  const recentAccepted = recentWindowSnapshots.filter((s) =>
+  const recentAccepted = recentInflowSnapshots.filter((s) =>
     isAcceptedCaseSnapshot(s),
   );
-  const recentOutflow = recentWindowSnapshots.filter((s) =>
-    Boolean(s.sent_date_2),
+  const recentOutflow = recentAccepted.filter((s) =>
+    isValidatedOutflowSnapshot(s),
   );
 
   const acceptedCount = recentAccepted.length;
-  const inflowCount = recentWindowSnapshots.length;
+  const inflowCount = recentInflowSnapshots.length;
   const outflowCount = recentOutflow.length;
   const acceptedDaySet = new Set(
     recentAccepted.map(
@@ -562,12 +704,12 @@ function computeTopEligibility(
     inflowCount > 0
       ? Number(((acceptedCount / inflowCount) * 100).toFixed(2))
       : 0;
-  const acceptedToOutflowRatePercent =
-    outflowCount > 0
-      ? Number(((acceptedCount / outflowCount) * 100).toFixed(2))
+  const outflowToAcceptedRatePercent =
+    acceptedCount > 0
+      ? Number(((outflowCount / acceptedCount) * 100).toFixed(2))
       : 0;
-  const meetsConversionThresholds =
-    acceptedToInflowRatePercent > TOP_MIN_ACCEPTED_TO_INFLOW_RATE_PERCENT;
+  const highQuality =
+    acceptedToInflowRatePercent > HQ_MIN_ACCEPTED_TO_INFLOW_RATE_PERCENT;
 
   const avgAcceptedPerDay = acceptedCount / TOP_CONVERSION_WINDOW_DAYS;
   const completedWeeksEvaluated = classificationWeeklyResults.length;
@@ -583,15 +725,27 @@ function computeTopEligibility(
   const meetsCompletedWeeklyGoals = Boolean(
     goalCompensation?.eligibleAfterCompensation,
   );
-  const isEligibleForTop =
-    meetsCompletedWeeklyGoals && meetsConversionThresholds;
+  const totalAssignedTorts = activeAssignments.length;
+  const qualifiedTortCount = (goalCompensation?.byTort || []).filter(
+    (item) => item.eligibleAfterCompensation,
+  ).length;
+  const highVolumeRatePercent =
+    totalAssignedTorts > 0
+      ? Number(((qualifiedTortCount / totalAssignedTorts) * 100).toFixed(2))
+      : 0;
+  const highVolume = highVolumeRatePercent > HV_MIN_TORT_GOAL_RATE_PERCENT;
+  const isEligibleForTop = highQuality && highVolume;
 
   return {
     isEligibleForTop,
     isEligibleToStayTop: isEligibleForTop,
     compensationApplied: Boolean(goalCompensation?.applied),
     meetsCompletedWeeklyGoals,
-    meetsConversionThresholds,
+    meetsConversionThresholds: highQuality,
+    highQuality,
+    highVolume,
+    qualityStatus: highQuality ? "high" : "low",
+    volumeStatus: highVolume ? "high" : "low",
     inflowCount,
     acceptedCount,
     outflowCount,
@@ -601,9 +755,14 @@ function computeTopEligibility(
     conversionWindowType: TOP_CONVERSION_WINDOW_TYPE,
     conversionWindowStart: cutoff.toISOString(),
     acceptedToInflowRatePercent,
-    acceptedToOutflowRatePercent,
-    minAcceptedToInflowRatePercent: TOP_MIN_ACCEPTED_TO_INFLOW_RATE_PERCENT,
-    minAcceptedToOutflowRatePercent: null,
+    outflowToAcceptedRatePercent,
+    minAcceptedToInflowRatePercent: HQ_MIN_ACCEPTED_TO_INFLOW_RATE_PERCENT,
+    minOutflowToAcceptedRatePercent: null,
+    totalAssignedTorts,
+    qualifiedTortCount,
+    highVolumeRatePercent,
+    minHighVolumeRatePercent: HV_MIN_TORT_GOAL_RATE_PERCENT,
+    highVolumeByTort: goalCompensation?.byTort || [],
     completedWeeksEvaluated,
     totalGoals,
     metGoals,
@@ -649,11 +808,14 @@ function evaluateSingleVendor(profile) {
   const consecutiveMissed = goalCompensation.eligibleAfterCompensation
     ? 0
     : countConsecutiveMissedWeeks(classificationWeeklyResults);
-  const fraudRisk = computeFraudRisk(snapshots);
+  const fraudRisk = computeFraudRisk(
+    filterSnapshotsByAssignments(snapshots, activeAssignments),
+  );
   const topEligibility = computeTopEligibility(
     snapshots,
     classificationWeeklyResults,
     goalCompensation,
+    activeAssignments,
   );
   const prevAlertFlags = profile.alert_flags || {};
 
@@ -669,109 +831,48 @@ function evaluateSingleVendor(profile) {
     fraudRisk,
     topEligibility,
     prevAlertFlags,
-    // Will be populated by buildTop20Set
-    newTopUnderperformWeeks: 0,
-    newLastTopCheckWeek: prevAlertFlags.last_top_check_week || null,
   };
 }
 
-/**
- * Selects up to TOP_VENDOR_MAX vendors by accepted volume.
- * Prioritises existing top vendors to reduce category churn.
- * Tracks consecutive underperforming weeks for potential demotion.
- */
-function buildTop20Set(evaluations, currentWeekStartStr) {
-  const eligible = evaluations.filter(
-    (e) =>
-      isProfileCurrentlyActive(e.profile) && e.topEligibility.isEligibleForTop,
-  );
-
-  eligible.sort(
-    (a, b) => b.topEligibility.acceptedCount - a.topEligibility.acceptedCount,
-  );
-
-  const currentTop = eligible.filter(
-    (e) => e.profile.computed_category === "top_vendors",
-  );
-  const newCandidates = eligible.filter(
-    (e) => e.profile.computed_category !== "top_vendors",
-  );
-
-  const combined = [...currentTop, ...newCandidates].slice(0, TOP_VENDOR_MAX);
-  const top20Set = new Set(combined.map((e) => e.profileId));
-
-  // Track underperforming weeks for current top vendors
-  for (const e of evaluations) {
-    const isCurrentlyTop = e.profile.computed_category === "top_vendors";
-    if (!isCurrentlyTop) continue;
-
-    const canSustain = e.topEligibility.isEligibleToStayTop;
-    const prevWeeks = Number(e.prevAlertFlags.top_underperform_weeks || 0);
-    const lastCheckWeek = e.prevAlertFlags.last_top_check_week || "";
-    const isNewWeek = lastCheckWeek !== currentWeekStartStr;
-
-    if (!canSustain) {
-      e.newTopUnderperformWeeks = isNewWeek ? prevWeeks + 1 : prevWeeks;
-      e.newLastTopCheckWeek = isNewWeek ? currentWeekStartStr : lastCheckWeek;
-
-      // Force remove from top if underperform threshold is reached
-      if (e.newTopUnderperformWeeks >= TOP_UNDERPERFORM_WEEKS_THRESHOLD) {
-        top20Set.delete(e.profileId);
-      }
-    } else {
-      e.newTopUnderperformWeeks = 0;
-      e.newLastTopCheckWeek = currentWeekStartStr;
-    }
-  }
-
-  return top20Set;
-}
-
 /** Determines the computed category for a vendor based on all evaluated rules. */
-function determineComputedCategory(evaluation, top20Set) {
-  const { fraudRisk, consecutiveMissed, isNewVendor } = evaluation;
+function determineComputedCategory(evaluation) {
+  const { isNewVendor, topEligibility } = evaluation;
 
   if (isNewVendor) return "new_vendor";
 
-  if (fraudRisk.isFraudRisk) return "under_review";
-  if (consecutiveMissed >= CONSECUTIVE_MISS_THRESHOLD) return "under_review";
-  if (top20Set.has(evaluation.profileId)) return "top_vendors";
+  if (topEligibility.highQuality && topEligibility.highVolume) {
+    return "top_vendors";
+  }
+  if (!topEligibility.highQuality && !topEligibility.highVolume) {
+    return "critical_vendor";
+  }
 
   return "under_review";
 }
 
 /** Builds a human-readable reason string for a category change. */
 function buildChangeReason(evaluation, newCategory) {
-  const {
-    fraudRisk,
-    consecutiveMissed,
-    topEligibility,
-    goalCompensation,
-    isNewVendor,
-  } = evaluation;
+  const { topEligibility, goalCompensation, isNewVendor } = evaluation;
+  const hqText =
+    `${topEligibility.acceptedToInflowRatePercent}% accepted/inflow ` +
+    `(min > ${topEligibility.minAcceptedToInflowRatePercent}%)`;
+  const hvText =
+    `${topEligibility.qualifiedTortCount}/${topEligibility.totalAssignedTorts} tort goals met ` +
+    `(${topEligibility.highVolumeRatePercent}%, ` +
+    `min > ${topEligibility.minHighVolumeRatePercent}%)`;
 
   if (newCategory === "under_review") {
-    if (fraudRisk.isFraudRisk) {
-      return (
-        `Fraud/quality risk detected: ` +
-        `${(fraudRisk.fraudRate * 100).toFixed(1)}% Fake Lead rate, ` +
-        `${(fraudRisk.conversionRate * 100).toFixed(2)}% conversion rate`
-      );
-    }
-    if (goalCompensation?.messageCode === "goal_compensation_insufficient") {
-      return goalCompensation.message;
-    }
-    if (!topEligibility.meetsConversionThresholds) {
-      return (
-        `Top vendor conversion thresholds not met: ` +
-        `${topEligibility.acceptedToInflowRatePercent}% accepted/inflow ` +
-        `(min > ${topEligibility.minAcceptedToInflowRatePercent}%)`
-      );
-    }
-
     return (
-      `Consecutive goal miss threshold reached: ` +
-      `${consecutiveMissed} consecutive weeks with all assigned goals missed`
+      `Mixed HQ/HV classification: ` +
+      `HQ ${topEligibility.qualityStatus} (${hqText}), ` +
+      `HV ${topEligibility.volumeStatus} (${hvText})`
+    );
+  }
+
+  if (newCategory === "critical_vendor") {
+    return (
+      `Low HQ and low HV classification: ` +
+      `HQ low (${hqText}), HV low (${hvText})`
     );
   }
 
@@ -779,18 +880,17 @@ function buildChangeReason(evaluation, newCategory) {
     if (topEligibility.compensationApplied) {
       return (
         `Promoted to top_vendors: ${goalCompensation.message}. ` +
-        `Conversion OK at ${topEligibility.acceptedToInflowRatePercent}% accepted/inflow. ` +
-        `Informational accepted/outflow: ` +
-        `${topEligibility.acceptedToOutflowRatePercent}% accepted/outflow`
+        `HQ high at ${topEligibility.acceptedToInflowRatePercent}% accepted/inflow. ` +
+        `HV high with ${hvText}. ` +
+        `Informational outflow/accepted: ` +
+        `${topEligibility.outflowToAcceptedRatePercent}% outflow/accepted`
       );
     }
 
     return (
-      `Promoted to top_vendors: ` +
-      `${topEligibility.metGoals}/${topEligibility.totalGoals} completed weekly outflow goals met, ` +
-      `${topEligibility.acceptedToInflowRatePercent}% accepted/inflow. ` +
-      `Informational accepted/outflow: ` +
-      `${topEligibility.acceptedToOutflowRatePercent}% accepted/outflow`
+      `Promoted to top_vendors: HQ high (${hqText}), HV high (${hvText}). ` +
+      `Informational outflow/accepted: ` +
+      `${topEligibility.outflowToAcceptedRatePercent}% outflow/accepted`
     );
   }
 
@@ -800,11 +900,6 @@ function buildChangeReason(evaluation, newCategory) {
         evaluation.newVendorProbation?.message ||
         "New vendor detected from Salesforce Contact.CreatedDate"
       );
-    }
-
-    const underperformWeeks = evaluation.newTopUnderperformWeeks || 0;
-    if (underperformWeeks >= TOP_UNDERPERFORM_WEEKS_THRESHOLD) {
-      return `Demoted from top_vendors: ${underperformWeeks} consecutive underperforming weeks`;
     }
   }
 
@@ -824,6 +919,11 @@ function buildAlertFlags(evaluation, newCategory) {
     newCategory === "under_review" && !evaluation.isNewVendor,
     evaluation.weeklyResults,
   );
+  const criticalVendorStatus = buildCriticalVendorStatus(
+    newCategory === "critical_vendor",
+    evaluation.weeklyResults,
+    topEligibility,
+  );
 
   return {
     // Goal tracking
@@ -837,16 +937,29 @@ function buildAlertFlags(evaluation, newCategory) {
     fraud_rate_pct: Number((fraudRisk.fraudRate * 100).toFixed(2)),
     conversion_rate_pct: Number((fraudRisk.conversionRate * 100).toFixed(2)),
 
+    // HQ/HV classification matrix
+    classification_matrix: `${topEligibility.qualityStatus}_hq_${topEligibility.volumeStatus}_hv`,
+    hq_enabled: true,
+    hq_status: topEligibility.qualityStatus,
+    hq_high_quality: Boolean(topEligibility.highQuality),
+    hq_accepted_to_inflow_rate_pct:
+      topEligibility.acceptedToInflowRatePercent || 0,
+    hq_min_accepted_to_inflow_rate_pct:
+      topEligibility.minAcceptedToInflowRatePercent || 0,
+    hv_enabled: true,
+    hv_status: topEligibility.volumeStatus,
+    hv_high_volume: Boolean(topEligibility.highVolume),
+    hv_passed_torts: topEligibility.qualifiedTortCount || 0,
+    hv_total_torts: topEligibility.totalAssignedTorts || 0,
+    hv_pass_rate_pct: topEligibility.highVolumeRatePercent || 0,
+    hv_min_pass_rate_pct: topEligibility.minHighVolumeRatePercent || 0,
+    hv_completed_weeks_evaluated: topEligibility.completedWeeksEvaluated || 0,
+    hv_by_tort: topEligibility.highVolumeByTort || [],
+
     // Top vendor tracking
-    trending_to_new_vendor:
-      newCategory === "top_vendors" &&
-      !topEligibility.isEligibleForTop &&
-      (evaluation.newTopUnderperformWeeks || 0) > 0,
-    top_underperform_weeks: evaluation.newTopUnderperformWeeks ?? 0,
-    last_top_check_week:
-      evaluation.newLastTopCheckWeek ??
-      evaluation.prevAlertFlags.last_top_check_week ??
-      null,
+    trending_to_new_vendor: false,
+    top_underperform_weeks: 0,
+    last_top_check_week: null,
 
     // Performance summary
     accepted_28_days: topEligibility.acceptedCount,
@@ -861,11 +974,11 @@ function buildAlertFlags(evaluation, newCategory) {
     top_accepted_to_inflow_rate_pct:
       topEligibility.acceptedToInflowRatePercent || 0,
     top_accepted_to_outflow_rate_pct:
-      topEligibility.acceptedToOutflowRatePercent || 0,
+      topEligibility.outflowToAcceptedRatePercent || 0,
     top_min_accepted_to_inflow_rate_pct:
       topEligibility.minAcceptedToInflowRatePercent || 0,
     top_min_accepted_to_outflow_rate_pct:
-      topEligibility.minAcceptedToOutflowRatePercent || 0,
+      topEligibility.minOutflowToAcceptedRatePercent || 0,
     top_meets_conversion_thresholds: Boolean(
       topEligibility.meetsConversionThresholds,
     ),
@@ -963,6 +1076,41 @@ function buildAlertFlags(evaluation, newCategory) {
     under_review_productivity_by_tort: underReviewProductivity?.byTort || [],
     under_review_productivity_current_week:
       underReviewProductivity?.currentWeekProgress || null,
+
+    // Critical vendor review status
+    critical_vendor_enabled: Boolean(criticalVendorStatus?.enabled),
+    critical_vendor_review_weeks: criticalVendorStatus?.reviewWeeks || 0,
+    critical_vendor_completed_weeks:
+      criticalVendorStatus?.completedWeeksEvaluated || 0,
+    critical_vendor_remaining_weeks: criticalVendorStatus?.remainingWeeks || 0,
+    critical_vendor_review_complete: Boolean(
+      criticalVendorStatus?.reviewComplete,
+    ),
+    critical_vendor_status: criticalVendorStatus?.status || null,
+    critical_vendor_subcategory: criticalVendorStatus?.subcategory || null,
+    critical_vendor_action_required: Boolean(
+      criticalVendorStatus?.actionRequired,
+    ),
+    critical_vendor_should_deactivate: Boolean(
+      criticalVendorStatus?.shouldDeactivate,
+    ),
+    critical_vendor_recommended_action:
+      criticalVendorStatus?.recommendedAction || null,
+    critical_vendor_message_code: criticalVendorStatus?.messageCode || null,
+    critical_vendor_message: criticalVendorStatus?.message || null,
+    critical_vendor_hq_low: Boolean(criticalVendorStatus?.hqLow),
+    critical_vendor_hv_low: Boolean(criticalVendorStatus?.hvLow),
+    critical_vendor_accepted_to_inflow_rate_pct:
+      criticalVendorStatus?.acceptedToInflowRatePercent || 0,
+    critical_vendor_hv_rate_pct:
+      criticalVendorStatus?.highVolumeRatePercent || 0,
+    critical_vendor_total_target: criticalVendorStatus?.totalTarget || 0,
+    critical_vendor_total_outflow: criticalVendorStatus?.totalOutflow || 0,
+    critical_vendor_total_deficit: criticalVendorStatus?.totalDeficit || 0,
+    critical_vendor_total_surplus: criticalVendorStatus?.totalSurplus || 0,
+    critical_vendor_by_tort: criticalVendorStatus?.byTort || [],
+    critical_vendor_current_week:
+      criticalVendorStatus?.currentWeekProgress || null,
   };
 }
 
@@ -1141,10 +1289,29 @@ async function ensureVendorTopRewardColumns() {
   }
 }
 
+async function ensureVendorCaseSnapshotOutflowValidatedColumn() {
+  await VendorCaseSnapshot.sync();
+
+  const tableDefinition = await sequelize
+    .getQueryInterface()
+    .describeTable("vendor_case_snapshots");
+
+  if (!tableDefinition.outflow_validated) {
+    await sequelize
+      .getQueryInterface()
+      .addColumn("vendor_case_snapshots", "outflow_validated", {
+        type: DataTypes.BOOLEAN,
+        allowNull: false,
+        defaultValue: false,
+      });
+  }
+}
+
 async function evaluateCategoryRules() {
   logger.info("VendorCategoryRules → evaluateCategoryRules() started");
 
   await ensureVendorTopRewardColumns();
+  await ensureVendorCaseSnapshotOutflowValidatedColumn();
 
   const profiles = await VendorProfile.findAll({
     include: [
@@ -1176,6 +1343,7 @@ async function evaluateCategoryRules() {
           "case_created_at",
           "signed_date",
           "sent_date_2",
+          "outflow_validated",
           "sub_status",
         ],
         include: [
@@ -1195,9 +1363,7 @@ async function evaluateCategoryRules() {
     return { evaluated: 0, changed: 0 };
   }
 
-  const currentWeekStartStr = getCurrentWeekStartStr();
   const evaluations = profiles.map(evaluateSingleVendor);
-  const top20Set = buildTop20Set(evaluations, currentWeekStartStr);
 
   let changed = 0;
 
@@ -1205,10 +1371,7 @@ async function evaluateCategoryRules() {
   try {
     for (const evaluation of evaluations) {
       const { profile } = evaluation;
-      const newComputedCategory = determineComputedCategory(
-        evaluation,
-        top20Set,
-      );
+      const newComputedCategory = determineComputedCategory(evaluation);
       const oldComputedCategory = profile.computed_category;
 
       // Upsert weekly goal records
@@ -1271,9 +1434,8 @@ module.exports = {
   evaluateCategoryRules,
   WEEKLY_OUTFLOW_TARGETS,
   CONSECUTIVE_MISS_THRESHOLD,
-  TOP_VENDOR_MAX,
-  TOP_UNDERPERFORM_WEEKS_THRESHOLD,
   TOP_CONVERSION_WINDOW_DAYS,
   TOP_CONVERSION_WINDOW_TYPE,
-  TOP_MIN_ACCEPTED_TO_INFLOW_RATE_PERCENT,
+  HQ_MIN_ACCEPTED_TO_INFLOW_RATE_PERCENT,
+  HV_MIN_TORT_GOAL_RATE_PERCENT,
 };
