@@ -1,3 +1,4 @@
+const axios = require("axios");
 const logger = require("../utils/logger");
 const { verifyAccessToken } = require("../utils/verifyAccessToken");
 const {
@@ -12,6 +13,68 @@ const {
 } = require("../services/infobit.service");
 
 const sseClients = new Map();
+
+function getImginaWebhookForwardUrl() {
+  return String(process.env.IMGINA_WEBHOOK_FORWARD_URL || "").trim();
+}
+
+function getImginaWebhookForwardSecret() {
+  return String(process.env.IMGINA_WEBHOOK_FORWARD_SECRET || "").trim();
+}
+
+async function forwardInboundPayloadToImgina(payload) {
+  const webhookUrl = getImginaWebhookForwardUrl();
+  if (!webhookUrl) {
+    return { skipped: true, reason: "missing_webhook_url" };
+  }
+
+  const secret = getImginaWebhookForwardSecret();
+  const headers = {
+    "Content-Type": "application/json",
+  };
+
+  if (secret) {
+    headers["x-imgina-forward-secret"] = secret;
+  }
+
+  const response = await axios.post(webhookUrl, payload, {
+    timeout: 12000,
+    headers,
+    validateStatus: () => true,
+  });
+
+  const parsedBody =
+    response.data && typeof response.data === "object" ? response.data : null;
+
+  return {
+    skipped: false,
+    status: response.status,
+    ok: response.status >= 200 && response.status < 300,
+    handled: Boolean(parsedBody?.handled),
+    reason: parsedBody?.reason || null,
+    target: parsedBody?.target || null,
+    body:
+      typeof response.data === "string"
+        ? response.data
+        : JSON.stringify(response.data || {}),
+  };
+}
+
+function classifyInboundOwnership(imginaForward) {
+  if (imginaForward?.skipped) {
+    return "dashboard_only";
+  }
+
+  if (!imginaForward?.ok) {
+    return "dashboard_with_imgina_forward_error";
+  }
+
+  if (imginaForward?.handled) {
+    return "imgina_handled";
+  }
+
+  return "dashboard_only";
+}
 
 function getAuthToken(req) {
   const authHeader = req.headers.authorization;
@@ -371,8 +434,25 @@ async function infobitInboundWebhook(req, res, next) {
     const saved = await saveInboundMessages(results);
     publishInboundEvents(saved);
 
+    let imginaForward = { skipped: true, reason: "not_attempted" };
+    try {
+      imginaForward = await forwardInboundPayloadToImgina(req.body);
+    } catch (forwardError) {
+      imginaForward = {
+        skipped: false,
+        ok: false,
+        error: forwardError.response?.data || forwardError.message,
+        status: forwardError.response?.status || null,
+      };
+      logger.warn("InfobitController → IMGina forward failed", imginaForward);
+    }
+
+    const inboundOwnership = classifyInboundOwnership(imginaForward);
+
     logger.info("InfobitController → inbound webhook persisted", {
       saved: saved.length,
+      inboundOwnership,
+      imginaForward,
     });
 
     return res

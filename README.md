@@ -297,7 +297,18 @@ VICIDIAL_USER=
 VICIDIAL_PASS=
 VICIDIAL_RECORDINGS_USER=
 VICIDIAL_RECORDINGS_PASS=
+VICIDIAL_DB_HOST=
+VICIDIAL_DB_PORT=3306
+VICIDIAL_DB_NAME=asterisk
+VICIDIAL_DB_USER=
+VICIDIAL_DB_PASSWORD=
+VICIDIAL_DB_TIMEZONE=America/Lima
+VICIDIAL_USER_STATS_USERS=
+VICIDIAL_USER_STATS_EXCLUDED_USERS=
 ```
+
+The `VICIDIAL_DB_*` values are optional, but Time To Lead uses them when available to search `vicidial_log` directly for the first outbound call by phone and date before falling back to lead-search scraping.
+The `VICIDIAL_USER_STATS_*` values are optional comma-separated overrides for the web-report fallback. When omitted, the backend uses the current active/excluded Vicidial user lists configured in code.
 
 ### 11.8 Azure OpenAI (Chatbot)
 
@@ -657,7 +668,18 @@ VICIDIAL_USER=
 VICIDIAL_PASS=
 VICIDIAL_RECORDINGS_USER=
 VICIDIAL_RECORDINGS_PASS=
+VICIDIAL_DB_HOST=
+VICIDIAL_DB_PORT=3306
+VICIDIAL_DB_NAME=asterisk
+VICIDIAL_DB_USER=
+VICIDIAL_DB_PASSWORD=
+VICIDIAL_DB_TIMEZONE=America/Lima
+VICIDIAL_USER_STATS_USERS=
+VICIDIAL_USER_STATS_EXCLUDED_USERS=
 ```
+
+Los valores `VICIDIAL_DB_*` son opcionales, pero Time To Lead los usa cuando existen para buscar primero en `vicidial_log` la primera llamada outbound por telefono y fecha antes de caer al scraping del lead search.
+Los valores `VICIDIAL_USER_STATS_*` son opcionales y aceptan listas separadas por coma para sobrescribir el fallback del reporte web. Si se omiten, el backend usa las listas actuales de usuarios activos/excluidos configuradas en codigo.
 
 ### 11.8 Azure OpenAI (chatbot)
 

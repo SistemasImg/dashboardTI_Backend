@@ -4,6 +4,7 @@ const vicidialConfig = require("../../config/vicidial");
 const {
   parseVicidialLeadSearch,
   parseVicidialLeadRecordings,
+  parseVicidialLeadCallDates,
   normalizeComparablePhoneDigits,
 } = require("../../utils/vicidialLeadSearchParser");
 const {
@@ -42,6 +43,21 @@ function formatResolutionIssueSummary(stats) {
   return Object.entries(stats.byReason)
     .map(([reason, total]) => `${reason}=${total}`)
     .join(", ");
+}
+
+function hasVicidialDateTimeText(value) {
+  return /\b\d{4}-\d{2}-\d{2}\s+\d{1,2}:\d{2}(?::\d{2})?\b/.test(
+    String(value || ""),
+  );
+}
+
+function hasSearchRowDateTime(record) {
+  return (
+    hasVicidialDateTimeText(record?.rowText) ||
+    (Array.isArray(record?.columns) &&
+      record.columns.some((column) => hasVicidialDateTimeText(column))) ||
+    (Array.isArray(record?.leadCallDates) && record.leadCallDates.length > 0)
+  );
 }
 
 function getVicidialHeaders() {
@@ -204,12 +220,14 @@ async function enrichLeadWithRecordings(record, resolutionStats, options = {}) {
       durationSeconds: null,
       location: null,
       recordings: [],
+      leadCallDates: [],
     };
   }
 
   try {
     const detailHtml = await requestVicidialLeadDetail(record.leadId, options);
     const parsedRecordings = parseVicidialLeadRecordings(detailHtml);
+    const leadCallDates = parseVicidialLeadCallDates(detailHtml);
     const shouldResolveRecordingLocations =
       options.resolveRecordingLocations !== false;
     const recordings = shouldResolveRecordingLocations
@@ -227,6 +245,7 @@ async function enrichLeadWithRecordings(record, resolutionStats, options = {}) {
       durationSeconds: latestRecording?.seconds ?? null,
       location: latestRecording?.location ?? null,
       recordings,
+      leadCallDates,
     };
   } catch (error) {
     logger.warn(
@@ -239,6 +258,7 @@ async function enrichLeadWithRecordings(record, resolutionStats, options = {}) {
       durationSeconds: null,
       location: null,
       recordings: [],
+      leadCallDates: [],
     };
   }
 }
@@ -294,6 +314,25 @@ async function searchVicidialLeadByPhone(phone, options = {}) {
     `VicidialLeadSearchService → found ${merged.length} possible matches for ${phoneDigits}`,
   );
 
+  // Fast path: the lead search page already exposes each lead's last call time
+  // (last_local_call_time) in its row, so callers that only need call datetimes
+  // (e.g. Time To Lead) can skip the expensive per-lead detail enrichment.
+  if (options.enrichRecords === false) {
+    const searchOnlyRecords = merged.filter((item) =>
+      hasSearchRowDateTime(item),
+    );
+
+    logger.info(
+      `VicidialLeadSearchService → returning ${searchOnlyRecords.length} search-row matches without enrichment for ${phoneDigits}`,
+    );
+
+    return {
+      phone: phoneDigits,
+      total: searchOnlyRecords.length,
+      records: searchOnlyRecords,
+    };
+  }
+
   const resolutionStats = {
     total: 0,
     byReason: {},
@@ -305,7 +344,9 @@ async function searchVicidialLeadByPhone(phone, options = {}) {
     ),
   );
   const filteredRecords = enrichedRecords.filter(
-    (item) => Array.isArray(item.recordings) && item.recordings.length > 0,
+    (item) =>
+      (Array.isArray(item.recordings) && item.recordings.length > 0) ||
+      hasSearchRowDateTime(item),
   );
 
   if (

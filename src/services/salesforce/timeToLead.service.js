@@ -12,6 +12,13 @@ const { TimeToLeadSnapshot, TimeToLeadSyncRun } = require("../../models");
 const {
   searchVicidialLeadByPhone,
 } = require("../vicidial/vicidialLeadSearch.service");
+const {
+  canUseVicidialOutboundLog,
+  searchVicidialOutboundCallsByPhone,
+} = require("../vicidial/vicidialOutboundLog.service");
+const {
+  buildVicidialOutboundIndexFromUserStats,
+} = require("../vicidial/vicidialUserStats.service");
 
 const LIMA_TIMEZONE = "America/Lima";
 const DEFAULT_BUSINESS_START_HOUR = 9;
@@ -47,6 +54,7 @@ const LIVE_RETRYABLE_MATCH_STATUSES = [
   "lookup_failed",
 ];
 const TCPA_BLOCKING_SUBSTATUSES = new Set(["Redo TCPA", "No TCPA"]);
+const EXCLUDED_TCPA_HISTORY_MATCH_STATUS = "excluded_tcpa_history";
 const CASE_HISTORY_CHUNK_SIZE = 150;
 
 let snapshotTableReadyPromise;
@@ -429,6 +437,26 @@ function parseVicidialDateTime(value) {
   return candidates.find((item) => item.isValid) || null;
 }
 
+function extractVicidialDateTimeTextCandidates(value) {
+  const text = String(value || "");
+  const matches = [];
+  const patterns = [
+    /\b\d{4}-\d{2}-\d{2}\s+\d{1,2}:\d{2}(?::\d{2})?\b/g,
+    /\b\d{1,2}\/\d{1,2}\/\d{4}\s+\d{1,2}:\d{2}(?::\d{2})?(?:\s*[APMapm]{2})?\b/g,
+  ];
+
+  patterns.forEach((pattern) => {
+    let match = pattern.exec(text);
+
+    while (match) {
+      matches.push(match[0]);
+      match = pattern.exec(text);
+    }
+  });
+
+  return [...new Set(matches)];
+}
+
 function pickFirstNonEmpty(...values) {
   for (const value of values) {
     const normalized = sanitizeText(value);
@@ -438,6 +466,29 @@ function pickFirstNonEmpty(...values) {
   }
 
   return null;
+}
+
+function collectSearchRowDateCandidates(record, fallbackAgentName) {
+  const values = [
+    ...(Array.isArray(record?.columns) ? record.columns : []),
+    record?.rowText,
+  ];
+  const dateTimeTextCandidates = values.flatMap((value) => {
+    const directCandidate = parseVicidialDateTime(value);
+
+    return directCandidate?.isValid
+      ? [String(value)]
+      : extractVicidialDateTimeTextCandidates(value);
+  });
+
+  return [...new Set(dateTimeTextCandidates)]
+    .map((value) => parseVicidialDateTime(value))
+    .filter((dateTime) => dateTime?.isValid)
+    .map((dateTime) => ({
+      dateTime,
+      agentName: fallbackAgentName,
+      source: "vicidial_lead_search",
+    }));
 }
 
 function collectVicidialCandidateContacts(records) {
@@ -456,23 +507,39 @@ function collectVicidialCandidateContacts(records) {
               recording?.tsr,
               fallbackAgentName,
             ),
+            source: "vicidial_lead_search",
           });
         }
       });
     }
 
-    if (Array.isArray(record.columns) && record.columns[6]) {
-      const parsedLeadDate = parseVicidialDateTime(record.columns[6]);
-      if (parsedLeadDate) {
-        candidates.push({
-          dateTime: parsedLeadDate,
-          agentName: fallbackAgentName,
-        });
-      }
+    if (Array.isArray(record.leadCallDates)) {
+      record.leadCallDates.forEach((value) => {
+        const parsed = parseVicidialDateTime(value);
+        if (parsed?.isValid) {
+          candidates.push({
+            dateTime: parsed,
+            agentName: fallbackAgentName,
+            source: "vicidial_lead_search",
+          });
+        }
+      });
     }
+
+    candidates.push(
+      ...collectSearchRowDateCandidates(record, fallbackAgentName),
+    );
 
     return candidates;
   });
+}
+
+function getEarliestValidContact(candidateContacts, caseCreatedAt) {
+  return candidateContacts
+    .filter((item) => item.dateTime?.toMillis() >= caseCreatedAt.toMillis())
+    .sort(
+      (left, right) => left.dateTime.toMillis() - right.dateTime.toMillis(),
+    )[0];
 }
 
 function mapSalesforceCase(record) {
@@ -514,7 +581,7 @@ function mapSalesforceCase(record) {
   };
 }
 
-function getSubstatusReleaseByCaseId(historyRecords = []) {
+function getTcpaHistoryByCaseId(historyRecords = []) {
   return historyRecords.reduce((accumulator, record) => {
     const caseId = sanitizeText(record.CaseId);
     if (!caseId || accumulator.has(caseId)) return accumulator;
@@ -523,20 +590,21 @@ function getSubstatusReleaseByCaseId(historyRecords = []) {
     const newSubstatus = normalizeHistoryValue(record.NewValue);
 
     if (
-      isTcpaBlockingSubstatus(oldSubstatus) &&
-      !isTcpaBlockingSubstatus(newSubstatus)
+      isTcpaBlockingSubstatus(oldSubstatus) ||
+      isTcpaBlockingSubstatus(newSubstatus)
     ) {
-      const releasedAt = record.CreatedDate
+      const detectedAt = record.CreatedDate
         ? DateTime.fromISO(record.CreatedDate, { zone: "utc" }).setZone(
             LIMA_TIMEZONE,
           )
         : null;
 
-      if (releasedAt?.isValid) {
+      if (detectedAt?.isValid) {
         accumulator.set(caseId, {
-          releasedAt,
-          oldSubstatus,
-          newSubstatus,
+          detectedAt,
+          substatus: isTcpaBlockingSubstatus(oldSubstatus)
+            ? oldSubstatus
+            : newSubstatus,
         });
       }
     }
@@ -545,7 +613,7 @@ function getSubstatusReleaseByCaseId(historyRecords = []) {
   }, new Map());
 }
 
-async function fetchSubstatusReleaseByCaseId(sf, caseIds = []) {
+async function fetchTcpaHistoryByCaseId(sf, caseIds = []) {
   const uniqueCaseIds = [...new Set(caseIds.filter(Boolean))];
   if (!uniqueCaseIds.length) return new Map();
 
@@ -567,25 +635,35 @@ async function fetchSubstatusReleaseByCaseId(sf, caseIds = []) {
     }
   }
 
-  return getSubstatusReleaseByCaseId(records);
+  return getTcpaHistoryByCaseId(records);
 }
 
-function applyTimeToLeadStartFromHistory(item, substatusReleaseByCaseId) {
-  const release = item.caseId
-    ? substatusReleaseByCaseId.get(item.caseId)
+function applyTimeToLeadExclusionFromHistory(item, tcpaHistoryByCaseId) {
+  const history = item.caseId ? tcpaHistoryByCaseId.get(item.caseId) : null;
+  const currentBlockingSubstatus = isTcpaBlockingSubstatus(item.substatus)
+    ? item.substatus
     : null;
 
-  if (!release?.releasedAt?.isValid) {
+  if (!history && !currentBlockingSubstatus) {
     return item;
   }
 
   return {
     ...item,
-    dateReceived: release.releasedAt,
-    timeToLeadStartSource: "substatus_history",
-    timeToLeadStartSubstatus: release.oldSubstatus,
-    timeToLeadStartNewSubstatus: release.newSubstatus,
+    excludedFromTimeToLead: true,
+    timeToLeadStartSource: EXCLUDED_TCPA_HISTORY_MATCH_STATUS,
+    timeToLeadStartSubstatus: history?.substatus || currentBlockingSubstatus,
   };
+}
+
+function buildInitialMatchSource({ hasValidPhone, isExcludedByTcpaHistory }) {
+  if (isExcludedByTcpaHistory) return null;
+  return hasValidPhone ? "vicidial" : null;
+}
+
+function buildInitialMatchStatus({ hasValidPhone, isExcludedByTcpaHistory }) {
+  if (isExcludedByTcpaHistory) return EXCLUDED_TCPA_HISTORY_MATCH_STATUS;
+  return hasValidPhone ? "pending_lookup" : "invalid_phone";
 }
 
 function clearReasonsByStatus(item) {
@@ -606,7 +684,11 @@ function clearReasonsByStatus(item) {
   };
 }
 
-async function fetchFirstContactForCase({ caseCreatedAt, phoneNumber }) {
+async function fetchFirstContactForCase({
+  caseCreatedAt,
+  phoneNumber,
+  userStatsIndex,
+}) {
   const normalizedPhone = normalizePhone(phoneNumber);
 
   if (!normalizedPhone || !caseCreatedAt?.isValid) {
@@ -618,29 +700,77 @@ async function fetchFirstContactForCase({ caseCreatedAt, phoneNumber }) {
   }
 
   try {
-    const payload = await searchVicidialLeadByPhone(normalizedPhone, {
-      resolveRecordingLocations: false,
-      timeoutMs: VICIDIAL_LOOKUP_TIMEOUT_MS,
-    });
-    const candidateContacts = collectVicidialCandidateContacts(payload.records);
-    const earliestValidContact = candidateContacts
-      .filter((item) => item.dateTime.toMillis() >= caseCreatedAt.toMillis())
-      .sort(
-        (left, right) => left.dateTime.toMillis() - right.dateTime.toMillis(),
-      )[0];
+    const allCandidates = [];
+    let lookupTimedOut = false;
+    let lookupFailed = false;
+    let lookupErrorMessage = null;
+
+    try {
+      const outboundLogResult = await searchVicidialOutboundCallsByPhone({
+        phoneNumber: normalizedPhone,
+        startAt: caseCreatedAt,
+        endAt: DateTime.now().setZone(LIMA_TIMEZONE),
+        limit: 5,
+      });
+
+      allCandidates.push(...(outboundLogResult.records || []));
+    } catch (error) {
+      logger.warn("TimeToLeadService -> Vicidial outbound log lookup skipped", {
+        message: error.message,
+        phoneNumber: normalizedPhone,
+      });
+    }
+
+    if (userStatsIndex?.size) {
+      allCandidates.push(...(userStatsIndex.get(normalizedPhone) || []));
+    }
+
+    try {
+      const payload = await searchVicidialLeadByPhone(normalizedPhone, {
+        resolveRecordingLocations: false,
+        enrichRecords: false,
+        timeoutMs: VICIDIAL_LOOKUP_TIMEOUT_MS,
+      });
+      const candidateContacts = collectVicidialCandidateContacts(
+        payload.records,
+      );
+      allCandidates.push(...candidateContacts);
+    } catch (error) {
+      lookupTimedOut =
+        error.code === "ETIMEOUT" ||
+        String(error.message || "")
+          .toLowerCase()
+          .includes("timeout");
+      lookupFailed = !lookupTimedOut;
+      lookupErrorMessage = error.message;
+
+      logger.warn("TimeToLeadService -> Vicidial lead search skipped", {
+        timedOut: lookupTimedOut,
+        message: error.message,
+        phoneNumber: normalizedPhone,
+      });
+    }
+
+    const earliestValidContact = getEarliestValidContact(
+      allCandidates,
+      caseCreatedAt,
+    );
 
     if (!earliestValidContact) {
       return {
         firstContact: null,
         firstContactAgentName: null,
-        timedOut: false,
-        failed: false,
+        matchSource: null,
+        timedOut: lookupTimedOut,
+        failed: lookupFailed,
+        errorMessage: lookupErrorMessage,
       };
     }
 
     return {
       firstContact: earliestValidContact.dateTime,
       firstContactAgentName: earliestValidContact.agentName || null,
+      matchSource: earliestValidContact.source || "vicidial_lead_search",
       timedOut: false,
       failed: false,
     };
@@ -660,6 +790,7 @@ async function fetchFirstContactForCase({ caseCreatedAt, phoneNumber }) {
     return {
       firstContact: null,
       firstContactAgentName: null,
+      matchSource: null,
       timedOut,
       failed: !timedOut,
       errorMessage: error.message,
@@ -709,7 +840,9 @@ function getSnapshotBaseUpdateFields() {
 
 function buildSnapshotBaseRow({ item, syncedAt, hasPotentialPhoneReuse }) {
   const hasValidPhone = Boolean(item.phoneNumber);
+  const isExcludedByTcpaHistory = Boolean(item.excludedFromTimeToLead);
   const businessHoursEligible =
+    !isExcludedByTcpaHistory &&
     item.dateReceived.hour >= DEFAULT_BUSINESS_START_HOUR &&
     item.dateReceived.hour < DEFAULT_BUSINESS_END_HOUR;
 
@@ -745,13 +878,20 @@ function buildSnapshotBaseRow({ item, syncedAt, hasPotentialPhoneReuse }) {
     response_delay: null,
     response_delay_minutes: null,
     range_time: null,
-    match_source: hasValidPhone ? "vicidial" : null,
-    match_status: hasValidPhone ? "pending_lookup" : "invalid_phone",
+    match_source: buildInitialMatchSource({
+      hasValidPhone,
+      isExcludedByTcpaHistory,
+    }),
+    match_status: buildInitialMatchStatus({
+      hasValidPhone,
+      isExcludedByTcpaHistory,
+    }),
     match_confidence: null,
     has_potential_phone_reuse: hasPotentialPhoneReuse,
-    pending_minutes: hasValidPhone
-      ? roundMetric(syncedAt.diff(item.dateReceived, "minutes").minutes)
-      : null,
+    pending_minutes:
+      hasValidPhone && !isExcludedByTcpaHistory
+        ? roundMetric(syncedAt.diff(item.dateReceived, "minutes").minutes)
+        : null,
     synced_at: syncedAt.toJSDate(),
     created_at: syncedAt.toJSDate(),
     updated_at: syncedAt.toJSDate(),
@@ -759,6 +899,9 @@ function buildSnapshotBaseRow({ item, syncedAt, hasPotentialPhoneReuse }) {
 }
 
 function buildMetricsResetState({ baseRow, syncedAt }) {
+  const isExcludedByTcpaHistory =
+    baseRow.match_status === EXCLUDED_TCPA_HISTORY_MATCH_STATUS;
+
   return {
     ...baseRow,
     first_contact_at: null,
@@ -766,19 +909,26 @@ function buildMetricsResetState({ baseRow, syncedAt }) {
     response_delay: null,
     response_delay_minutes: null,
     range_time: null,
-    match_source: baseRow.has_valid_phone ? "vicidial" : null,
-    match_status: baseRow.has_valid_phone ? "pending_lookup" : "invalid_phone",
+    match_source: buildInitialMatchSource({
+      hasValidPhone: baseRow.has_valid_phone,
+      isExcludedByTcpaHistory,
+    }),
+    match_status: buildInitialMatchStatus({
+      hasValidPhone: baseRow.has_valid_phone,
+      isExcludedByTcpaHistory,
+    }),
     match_confidence: null,
-    pending_minutes: baseRow.has_valid_phone
-      ? roundMetric(
-          syncedAt.diff(
-            DateTime.fromJSDate(new Date(baseRow.case_created_at), {
-              zone: LIMA_TIMEZONE,
-            }),
-            "minutes",
-          ).minutes,
-        )
-      : null,
+    pending_minutes:
+      baseRow.has_valid_phone && !isExcludedByTcpaHistory
+        ? roundMetric(
+            syncedAt.diff(
+              DateTime.fromJSDate(new Date(baseRow.case_created_at), {
+                zone: LIMA_TIMEZONE,
+              }),
+              "minutes",
+            ).minutes,
+          )
+        : null,
     synced_at: syncedAt.toJSDate(),
     updated_at: syncedAt.toJSDate(),
   };
@@ -786,6 +936,12 @@ function buildMetricsResetState({ baseRow, syncedAt }) {
 
 function shouldPreserveSnapshotMetrics(existingRow, nextBaseRow) {
   if (!existingRow) return false;
+  if (nextBaseRow.match_status === EXCLUDED_TCPA_HISTORY_MATCH_STATUS) {
+    return false;
+  }
+  if (existingRow.match_status === EXCLUDED_TCPA_HISTORY_MATCH_STATUS) {
+    return false;
+  }
 
   const samePhoneNumber = existingRow.phone_number === nextBaseRow.phone_number;
   const sameCaseCreatedAt =
@@ -928,12 +1084,12 @@ async function syncTimeToLeadSnapshots({ startDate, endDate }) {
     .map(mapSalesforceCase)
     .map(clearReasonsByStatus)
     .filter((item) => item.dateReceived);
-  const substatusReleaseByCaseId = await fetchSubstatusReleaseByCaseId(
+  const tcpaHistoryByCaseId = await fetchTcpaHistoryByCaseId(
     sf,
     rawItems.map((item) => item.caseId),
   );
   const items = rawItems.map((item) =>
-    applyTimeToLeadStartFromHistory(item, substatusReleaseByCaseId),
+    applyTimeToLeadExclusionFromHistory(item, tcpaHistoryByCaseId),
   );
 
   const syncedAt = DateTime.now().setZone(LIMA_TIMEZONE);
@@ -1053,6 +1209,7 @@ async function refreshTimeToLeadSnapshotMetrics({
   limit = DEFAULT_METRICS_REFRESH_LIMIT,
   force = false,
   retryableMatchStatuses,
+  prefetchedUserStatsIndex,
 }) {
   await ensureTimeToLeadSnapshotTable();
 
@@ -1078,6 +1235,9 @@ async function refreshTimeToLeadSnapshotMetrics({
       [Op.lte]: window.end.toISODate(),
     },
     has_valid_phone: true,
+    match_status: {
+      [Op.ne]: EXCLUDED_TCPA_HISTORY_MATCH_STATUS,
+    },
   };
 
   if (!force) {
@@ -1086,6 +1246,7 @@ async function refreshTimeToLeadSnapshotMetrics({
     };
     where.match_status = {
       [Op.in]: matchStatusesToRetry,
+      [Op.ne]: EXCLUDED_TCPA_HISTORY_MATCH_STATUS,
     };
   }
 
@@ -1129,10 +1290,32 @@ async function refreshTimeToLeadSnapshotMetrics({
   }, new Map());
 
   const lookupSyncedAt = DateTime.now().setZone(LIMA_TIMEZONE);
+  let userStatsIndex = prefetchedUserStatsIndex || null;
   let matched = 0;
   let unmatched = 0;
   let lookupTimeouts = 0;
   let lookupFailures = 0;
+
+  if (!userStatsIndex) {
+    try {
+      const hasVicidialDbAccess = await canUseVicidialOutboundLog();
+
+      if (!hasVicidialDbAccess) {
+        const userStatsLookup = await buildVicidialOutboundIndexFromUserStats({
+          startDate: window.start,
+          endDate: window.end,
+          phoneNumbers: [...phoneCaseCounts.keys()],
+        });
+        userStatsIndex = userStatsLookup.byPhone;
+      }
+    } catch (error) {
+      logger.warn("TimeToLeadService -> user_stats prefetch skipped", {
+        message: error.message,
+        startDate: window.start.toISODate(),
+        endDate: window.end.toISODate(),
+      });
+    }
+  }
 
   await mapWithConcurrency(candidateRows, LOOKUP_CONCURRENCY, async (row) => {
     const caseCreatedAt = toLimaDateTime(row.case_created_at);
@@ -1146,9 +1329,11 @@ async function refreshTimeToLeadSnapshotMetrics({
     const lookupResult = await fetchFirstContactForCase({
       caseCreatedAt,
       phoneNumber: row.phone_number,
+      userStatsIndex,
     });
     const firstContact = lookupResult.firstContact;
     const firstContactAgentName = lookupResult.firstContactAgentName;
+    const matchSource = lookupResult.matchSource || "vicidial";
 
     const responseDelay = computeResponseDelay(firstContact, caseCreatedAt);
     const responseDelayMinutes = responseDelayToMinutes(responseDelay);
@@ -1188,7 +1373,7 @@ async function refreshTimeToLeadSnapshotMetrics({
         response_delay: responseDelay,
         response_delay_minutes: roundMetric(responseDelayMinutes),
         range_time: computeRangeTime(responseDelayMinutes),
-        match_source: "vicidial",
+        match_source: matchSource,
         match_status: matchStatus,
         match_confidence: matchConfidence,
         has_potential_phone_reuse: hasPotentialPhoneReuse,
@@ -1236,6 +1421,25 @@ async function refreshTimeToLeadSnapshotMetricsBatches({
 }) {
   const totalBatches = Math.max(1, Number(maxBatches) || 1);
   const batches = [];
+  let prefetchedUserStatsIndex = null;
+
+  try {
+    const hasVicidialDbAccess = await canUseVicidialOutboundLog();
+
+    if (!hasVicidialDbAccess) {
+      const userStatsLookup = await buildVicidialOutboundIndexFromUserStats({
+        startDate,
+        endDate,
+      });
+      prefetchedUserStatsIndex = userStatsLookup.byPhone;
+    }
+  } catch (error) {
+    logger.warn("TimeToLeadService -> batch user_stats prefetch skipped", {
+      message: error.message,
+      startDate,
+      endDate,
+    });
+  }
 
   for (let batchIndex = 0; batchIndex < totalBatches; batchIndex += 1) {
     const result = await refreshTimeToLeadSnapshotMetrics({
@@ -1244,6 +1448,7 @@ async function refreshTimeToLeadSnapshotMetricsBatches({
       limit,
       force: false,
       retryableMatchStatuses,
+      prefetchedUserStatsIndex,
     });
 
     batches.push(result);
@@ -1379,6 +1584,9 @@ function buildSnapshotCoverage({
   const lookupTimeouts = countByMatchStatus.lookup_timeout || 0;
   const lookupFailures = countByMatchStatus.lookup_failed || 0;
   const invalidPhone = rows.filter((row) => !row.has_valid_phone).length;
+  const excludedByTcpaHistory = rows.filter(
+    (row) => row.match_status === EXCLUDED_TCPA_HISTORY_MATCH_STATUS,
+  ).length;
   const withValidPhone = rows.length - invalidPhone;
   const lastSyncedAt = rows.reduce((latest, row) => {
     if (!row.synced_at) return latest;
@@ -1398,6 +1606,7 @@ function buildSnapshotCoverage({
     totalSnapshotRows: rows.length,
     withValidPhone,
     invalidPhone,
+    excludedByTcpaHistory,
     eligibleAfterFilters: eligibleRows.length,
     businessHoursOnly,
     matched,
@@ -1453,7 +1662,14 @@ async function getTimeToLead({ startDate, endDate, businessHoursOnly = true }) {
     const excludedMissingPhone = rows.filter(
       (row) => !row.has_valid_phone,
     ).length;
-    const validPhoneRows = rows.filter((row) => row.has_valid_phone);
+    const excludedByTcpaHistory = rows.filter(
+      (row) => row.match_status === EXCLUDED_TCPA_HISTORY_MATCH_STATUS,
+    ).length;
+    const validPhoneRows = rows.filter(
+      (row) =>
+        row.has_valid_phone &&
+        row.match_status !== EXCLUDED_TCPA_HISTORY_MATCH_STATUS,
+    );
 
     let eligibleRows = validPhoneRows;
     let excludedOutsideBusinessHours = 0;
@@ -1563,6 +1779,7 @@ async function getTimeToLead({ startDate, endDate, businessHoursOnly = true }) {
         exclusions: {
           missingCreatedDate: excludedMissingCreatedDate,
           missingOrInvalidPhone: excludedMissingPhone,
+          tcpaHistory: excludedByTcpaHistory,
           outsideBusinessHours: excludedOutsideBusinessHours,
           withoutFirstContact: pendingItems.length,
         },

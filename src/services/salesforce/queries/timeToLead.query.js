@@ -26,8 +26,6 @@ WHERE CreatedDate >= ${startDateTimeUtc}
   AND (
     Substatus__c = null
     OR Substatus__c NOT IN (
-      'Redo TCPA',
-      'No TCPA',
       'Disqualified',
       'Do Not Call',
       'Test',

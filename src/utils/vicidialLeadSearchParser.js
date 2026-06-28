@@ -258,9 +258,30 @@ function parseVicidialLeadRecordings(html) {
   return recordings;
 }
 
+const LEAD_CALL_DATE_LABEL_REGEX =
+  /last[\s\S]{0,12}?call[\s\S]{0,40}?(\d{4}-\d{2}-\d{2}\s+\d{1,2}:\d{2}(?::\d{2})?)/gi;
+
+function parseVicidialLeadCallDates(html) {
+  const $ = cheerio.load(String(html || ""));
+  const bodyText = $("body").text().replaceAll(/\s+/g, " ").trim();
+  const sourceText = bodyText || String(html || "");
+  const dates = [];
+
+  let match = LEAD_CALL_DATE_LABEL_REGEX.exec(sourceText);
+  while (match) {
+    if (match[1]) {
+      dates.push(match[1]);
+    }
+    match = LEAD_CALL_DATE_LABEL_REGEX.exec(sourceText);
+  }
+
+  return [...new Set(dates)];
+}
+
 module.exports = {
   parseVicidialLeadSearch,
   parseVicidialLeadRecordings,
+  parseVicidialLeadCallDates,
   normalizeDigits,
   normalizeComparablePhoneDigits,
 };
