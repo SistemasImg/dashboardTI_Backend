@@ -8,6 +8,7 @@ const CaseAssignment = require("./caseAssignments");
 const AttemptsDaily = require("./attemptsDaily");
 const State = require("./state");
 const MessageRecords = require("./messageRecords");
+const ImginaSmsSession = require("./imginaSmsSession");
 const casesSalesforce = require("./casesSalesforce");
 const MediaFiles = require("./mediaFile");
 const CallCenter = require("./callCenter");
@@ -243,6 +244,7 @@ module.exports = {
   AttemptsDaily,
   State,
   MessageRecords,
+  ImginaSmsSession,
   casesSalesforce,
   MediaFiles,
   CallCenter,

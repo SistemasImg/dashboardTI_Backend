@@ -3,7 +3,10 @@ require("dotenv").config();
 
 const app = require("./app");
 const sequelize = require("./config/db");
-const { ensureProductTiersColumn } = require("./config/schema-updates");
+const {
+  ensureProductTiersColumn,
+  ensureImginaSmsSessionsTable,
+} = require("./config/schema-updates");
 
 const PORT = process.env.PORT || 4000;
 
@@ -13,6 +16,7 @@ const PORT = process.env.PORT || 4000;
     console.log("✅ DB connected successfully");
 
     await ensureProductTiersColumn(sequelize);
+    await ensureImginaSmsSessionsTable(sequelize);
 
     if (process.env.ENABLE_JOBS === "false") {
       console.log("ℹ️ Background jobs disabled by ENABLE_JOBS=false");

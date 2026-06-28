@@ -1,5 +1,6 @@
 const { DataTypes } = require("sequelize");
 const logger = require("../utils/logger");
+const ImginaSmsSession = require("../models/imginaSmsSession");
 
 const isMissingTableError = (error) =>
   error?.original?.code === "ER_NO_SUCH_TABLE" ||
@@ -47,6 +48,12 @@ async function ensureProductTiersColumn(sequelize) {
   }
 }
 
+async function ensureImginaSmsSessionsTable() {
+  await ImginaSmsSession.sync();
+  logger.info("SchemaUpdate -> imgina_sms_sessions ready");
+}
+
 module.exports = {
   ensureProductTiersColumn,
+  ensureImginaSmsSessionsTable,
 };
