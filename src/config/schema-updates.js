@@ -1,6 +1,6 @@
 const { DataTypes } = require("sequelize");
 const logger = require("../utils/logger");
-const ImginaSmsSession = require("../models/imginaSmsSession");
+const ImginaSmsSession = require("../modules/imgina/imginaSmsSession.model");
 
 const isMissingTableError = (error) =>
   error?.original?.code === "ER_NO_SUCH_TABLE" ||

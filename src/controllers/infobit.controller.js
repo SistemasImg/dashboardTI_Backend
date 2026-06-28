@@ -2,7 +2,7 @@ const logger = require("../utils/logger");
 const { verifyAccessToken } = require("../utils/verifyAccessToken");
 const {
   processInboundPayloadToImgina,
-} = require("../services/imginaSms.service");
+} = require("../modules/imgina/imginaSms.service");
 const {
   saveInboundMessages,
   getConversationHistoryByNumber,

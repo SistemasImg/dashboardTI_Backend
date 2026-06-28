@@ -1,5 +1,5 @@
 const express = require("express");
-const { startImginaSmsSession } = require("../controllers/imgina.controller");
+const { startImginaSmsSession } = require("./imgina.controller");
 
 const router = express.Router();
 

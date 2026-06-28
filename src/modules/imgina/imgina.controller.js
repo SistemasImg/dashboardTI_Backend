@@ -1,5 +1,5 @@
-const logger = require("../utils/logger");
-const { startSmsSession } = require("../services/imginaSms.service");
+const logger = require("../../utils/logger");
+const { startSmsSession } = require("./imginaSms.service");
 
 function getImginaSmsSecret() {
   return String(

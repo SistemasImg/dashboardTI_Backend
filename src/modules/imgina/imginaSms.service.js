@@ -1,8 +1,8 @@
 const axios = require("axios");
-const logger = require("../utils/logger");
-const infobipConfig = require("../config/infobip");
-const ImginaSmsSession = require("../models/imginaSmsSession");
-const MessageRecords = require("../models/messageRecords");
+const logger = require("../../utils/logger");
+const infobipConfig = require("../../config/infobip");
+const ImginaSmsSession = require("./imginaSmsSession.model");
+const MessageRecords = require("../../models/messageRecords");
 const {
   buildPrequalContext,
   buildSmsSystemPrompt,
