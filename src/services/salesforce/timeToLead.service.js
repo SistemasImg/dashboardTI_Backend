@@ -19,10 +19,15 @@ const {
 const {
   buildVicidialOutboundIndexFromUserStats,
 } = require("../vicidial/vicidialUserStats.service");
+const { isUsFederalHoliday } = require("../../utils/usBusinessDays");
 
 const LIMA_TIMEZONE = "America/Lima";
-const DEFAULT_BUSINESS_START_HOUR = 9;
-const DEFAULT_BUSINESS_END_HOUR = 20;
+const WEEKDAY_BUSINESS_START_MINUTES = 9 * 60;
+const WEEKDAY_BUSINESS_END_MINUTES = 20 * 60;
+const SATURDAY_BUSINESS_START_MINUTES = 9 * 60;
+const SATURDAY_BUSINESS_END_MINUTES = 12 * 60;
+const WEEKDAY_BUSINESS_END_SECONDS = 20 * 60 * 60;
+const SATURDAY_BUSINESS_END_SECONDS = 12 * 60 * 60;
 const TIME_RANGE_LABELS = [
   "[0,5)",
   "[5,10)",
@@ -843,8 +848,7 @@ function buildSnapshotBaseRow({ item, syncedAt, hasPotentialPhoneReuse }) {
   const isExcludedByTcpaHistory = Boolean(item.excludedFromTimeToLead);
   const businessHoursEligible =
     !isExcludedByTcpaHistory &&
-    item.dateReceived.hour >= DEFAULT_BUSINESS_START_HOUR &&
-    item.dateReceived.hour < DEFAULT_BUSINESS_END_HOUR;
+    isTimeToLeadBusinessHoursEligible(item.dateReceived);
 
   return {
     case_number: item.caseNumber,
@@ -896,6 +900,37 @@ function buildSnapshotBaseRow({ item, syncedAt, hasPotentialPhoneReuse }) {
     created_at: syncedAt.toJSDate(),
     updated_at: syncedAt.toJSDate(),
   };
+}
+
+function isTimeToLeadBusinessHoursEligible(dateTime) {
+  if (!dateTime?.isValid) {
+    return false;
+  }
+
+  const isoDate = dateTime.toISODate();
+  if (!isoDate || isUsFederalHoliday(isoDate)) {
+    return false;
+  }
+
+  const minutesOfDay = dateTime.hour * 60 + dateTime.minute;
+  const secondsOfDay =
+    dateTime.hour * 60 * 60 + dateTime.minute * 60 + dateTime.second;
+
+  if (dateTime.weekday === 7) {
+    return false;
+  }
+
+  if (dateTime.weekday === 6) {
+    return (
+      minutesOfDay >= SATURDAY_BUSINESS_START_MINUTES &&
+      secondsOfDay < SATURDAY_BUSINESS_END_SECONDS
+    );
+  }
+
+  return (
+    minutesOfDay >= WEEKDAY_BUSINESS_START_MINUTES &&
+    secondsOfDay <= WEEKDAY_BUSINESS_END_SECONDS
+  );
 }
 
 function buildMetricsResetState({ baseRow, syncedAt }) {
@@ -1847,4 +1882,5 @@ module.exports = {
   refreshTimeToLeadSnapshotMetricsBatches,
   refreshRecentTimeToLeadSnapshotMetrics,
   ensureTimeToLeadSnapshotTable,
+  isTimeToLeadBusinessHoursEligible,
 };

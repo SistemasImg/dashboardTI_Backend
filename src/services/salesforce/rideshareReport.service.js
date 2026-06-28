@@ -53,19 +53,50 @@ function buildUsersMap(userRecords) {
   );
 }
 
-function normalizeDailyFlowParams({ date, type }) {
+function normalizeDailyFlowParams({ date, startDate, endDate, type }) {
   const normalizedDate = String(date || "").trim();
+  const normalizedStartDate = String(startDate || "").trim();
+  const normalizedEndDate = String(endDate || "").trim();
   const normalizedType = String(type || "").trim();
-  const resolvedDate = normalizedDate || getPeruDateKey(0);
+  const resolvedStartDate =
+    normalizedStartDate ||
+    normalizedDate ||
+    normalizedEndDate ||
+    getPeruDateKey(0);
+  const resolvedEndDate =
+    normalizedEndDate ||
+    normalizedDate ||
+    normalizedStartDate ||
+    getPeruDateKey(0);
 
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(resolvedDate)) {
-    throw Object.assign(new Error("date is required in YYYY-MM-DD format"), {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(resolvedStartDate)) {
+    throw Object.assign(
+      new Error("startDate/date must use YYYY-MM-DD format"),
+      {
+        statusCode: 400,
+      },
+    );
+  }
+
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(resolvedEndDate)) {
+    throw Object.assign(new Error("endDate/date must use YYYY-MM-DD format"), {
       statusCode: 400,
     });
   }
 
+  if (resolvedEndDate < resolvedStartDate) {
+    throw Object.assign(
+      new Error("endDate must be greater than or equal to startDate"),
+      {
+        statusCode: 400,
+      },
+    );
+  }
+
   return {
-    date: resolvedDate,
+    date: resolvedStartDate === resolvedEndDate ? resolvedStartDate : null,
+    startDate: resolvedStartDate,
+    endDate: resolvedEndDate,
     type: normalizedType || null,
   };
 }
@@ -111,17 +142,21 @@ async function getLeadOpportunityCaseNumberSet(sf, caseRecords, caseType) {
 }
 
 async function getDailyOperationalFlow({ date, type, flowType }) {
-  const params = normalizeDailyFlowParams({ date, type });
+  const params = normalizeDailyFlowParams(arguments[0] || {});
   const isInflow = flowType === "inflow";
 
   logger.info(
-    `RideshareReportService → getDailyOperationalFlow() | flowType=${flowType} date=${params.date} type=${params.type || "all"}`,
+    `RideshareReportService → getDailyOperationalFlow() | flowType=${flowType} startDate=${params.startDate} endDate=${params.endDate} type=${params.type || "all"}`,
   );
 
   const sf = await authenticateSalesforce();
   const query = isInflow
-    ? buildDailyInflowCasesQuery(params.date, params.type)
-    : buildDailyOutflowCasesQuery(params.date, params.type);
+    ? buildDailyInflowCasesQuery(params.startDate, params.endDate, params.type)
+    : buildDailyOutflowCasesQuery(
+        params.startDate,
+        params.endDate,
+        params.type,
+      );
 
   const [caseRecords, userRecords] = await Promise.all([
     runSoqlQueryAll(sf, query),
@@ -129,6 +164,7 @@ async function getDailyOperationalFlow({ date, type, flowType }) {
   ]);
 
   let eligibleCaseRecords = caseRecords;
+  let excludedWithoutLeadOpportunityRecords = [];
   let leadOpportunityValidation = null;
 
   if (!isInflow) {
@@ -141,13 +177,16 @@ async function getDailyOperationalFlow({ date, type, flowType }) {
     eligibleCaseRecords = caseRecords.filter((record) =>
       leadOpportunityCaseNumbers.has(record.CaseNumber),
     );
+    excludedWithoutLeadOpportunityRecords = caseRecords.filter(
+      (record) => !leadOpportunityCaseNumbers.has(record.CaseNumber),
+    );
 
     leadOpportunityValidation = {
       required: true,
       source: "Lead_de_oportunidad__c",
       matched: eligibleCaseRecords.length,
       excludedWithoutLeadOpportunity:
-        caseRecords.length - eligibleCaseRecords.length,
+        excludedWithoutLeadOpportunityRecords.length,
     };
   }
 
@@ -158,6 +197,27 @@ async function getDailyOperationalFlow({ date, type, flowType }) {
       usersMap.get(record.OwnerId) ?? DEFAULT_CASE_OWNER,
     ),
   );
+  const excludedWithoutLeadOpportunityCases =
+    excludedWithoutLeadOpportunityRecords.map((record) => {
+      const mapped = mapOperationalFlowCase(
+        record,
+        usersMap.get(record.OwnerId) ?? DEFAULT_CASE_OWNER,
+      );
+
+      return {
+        caseId: mapped.caseId,
+        caseNumber: mapped.caseNumber,
+        fullName: mapped.fullName,
+        phoneNumber: mapped.phoneNumber,
+        type: mapped.type,
+        tier: mapped.tier,
+        ownerName: mapped.ownerName,
+        origin: mapped.origin,
+        substatus: mapped.substatus,
+        createdDate: mapped.createdDate,
+        sentDate: mapped.sentDate,
+      };
+    });
 
   logger.success(
     `RideshareReportService → getDailyOperationalFlow() success | flowType=${flowType} total=${data.length}`,
@@ -167,26 +227,39 @@ async function getDailyOperationalFlow({ date, type, flowType }) {
     total: data.length,
     flowType,
     date: params.date,
+    startDate: params.startDate,
+    endDate: params.endDate,
     type: params.type || "all",
     basedOn: isInflow
       ? {
-          rule: "Case created during the selected Salesforce day",
+          rule:
+            params.startDate === params.endDate
+              ? "Case created during the selected Salesforce day"
+              : "Case created during the selected Salesforce date range",
           dateField: "CreatedDate",
           filters: [
-            "CreatedDate inside selected day",
+            params.startDate === params.endDate
+              ? "CreatedDate inside selected day"
+              : "CreatedDate inside selected date range",
             params.type ? "Type equals requested type" : "All case types",
           ],
         }
       : {
-          rule: "Case sent during the selected Salesforce day",
+          rule:
+            params.startDate === params.endDate
+              ? "Case sent during the selected Salesforce day"
+              : "Case sent during the selected Salesforce date range",
           dateField: "Sent_Date2__c",
           filters: [
-            "Sent_Date2__c inside selected day",
+            params.startDate === params.endDate
+              ? "Sent_Date2__c inside selected day"
+              : "Sent_Date2__c inside selected date range",
             params.type ? "Type equals requested type" : "All case types",
             "CaseNumber exists in Lead_de_oportunidad__c with Lead__r.Substatus__c = Signed",
           ],
         },
     leadOpportunityValidation,
+    excludedWithoutLeadOpportunityCases,
     data,
   };
 }

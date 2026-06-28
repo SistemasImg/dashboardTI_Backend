@@ -1,10 +1,21 @@
-function buildSalesforceDayRange(date) {
+function buildSalesforceDateRange(startDate, endDate = startDate) {
   const timezone = process.env.SALESFORCE_TIMEZONE || "America/Los_Angeles";
-  const input = String(date || "").trim();
-  const [year, month, day] = input.split("-").map(Number);
+  const startInput = String(startDate || "").trim();
+  const endInput = String(endDate || startDate || "").trim();
+  const [year, month, day] = startInput.split("-").map(Number);
+  const [endYear, endMonth, endDay] = endInput.split("-").map(Number);
 
   if (!year || !month || !day) {
-    throw Object.assign(new Error("date is required in YYYY-MM-DD format"), {
+    throw Object.assign(
+      new Error("startDate is required in YYYY-MM-DD format"),
+      {
+        statusCode: 400,
+      },
+    );
+  }
+
+  if (!endYear || !endMonth || !endDay) {
+    throw Object.assign(new Error("endDate is required in YYYY-MM-DD format"), {
       statusCode: 400,
     });
   }
@@ -64,7 +75,9 @@ function buildSalesforceDayRange(date) {
   };
 
   const start = getDayStartUtc(year, month, day);
-  const nextDate = new Date(Date.UTC(year, month - 1, day + 1, 12, 0, 0));
+  const nextDate = new Date(
+    Date.UTC(endYear, endMonth - 1, endDay + 1, 12, 0, 0),
+  );
   const nextParts = formatUtcInstantInTimeZone(nextDate);
   const end = getDayStartUtc(nextParts.year, nextParts.month, nextParts.day);
 
@@ -108,8 +121,8 @@ function buildOperationalFlowSelect() {
   Owner.Name`;
 }
 
-function buildDailyInflowCasesQuery(date, caseType) {
-  const { start, end } = buildSalesforceDayRange(date);
+function buildDailyInflowCasesQuery(startDate, endDate, caseType) {
+  const { start, end } = buildSalesforceDateRange(startDate, endDate);
   const typeFilter = buildOptionalCaseTypeFilter(caseType);
 
   return `
@@ -122,8 +135,8 @@ ORDER BY CreatedDate DESC
 `;
 }
 
-function buildDailyOutflowCasesQuery(date, caseType) {
-  const { start, end } = buildSalesforceDayRange(date);
+function buildDailyOutflowCasesQuery(startDate, endDate, caseType) {
+  const { start, end } = buildSalesforceDateRange(startDate, endDate);
   const typeFilter = buildOptionalCaseTypeFilter(caseType);
 
   return `

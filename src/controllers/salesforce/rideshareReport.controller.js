@@ -37,6 +37,8 @@ async function getDailyInflowReport(req, res, next) {
   try {
     const result = await rideshareReportService.getDailyInflowReport({
       date: req.query.date,
+      startDate: req.query.startDate,
+      endDate: req.query.endDate,
       type: req.query.type,
     });
 
@@ -64,6 +66,8 @@ async function getDailyOutflowReport(req, res, next) {
   try {
     const result = await rideshareReportService.getDailyOutflowReport({
       date: req.query.date,
+      startDate: req.query.startDate,
+      endDate: req.query.endDate,
       type: req.query.type,
     });
 
