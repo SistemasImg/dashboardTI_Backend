@@ -1,23 +1,57 @@
 const axios = require("axios");
 const https = require("node:https");
 const salesforceConfig = require("../../config/salesforce");
+const { authenticateSalesforce } = require("./auth.service");
+const { clearCachedToken } = require("./tokenCache.service");
 
 const httpsAgent = new https.Agent({
   rejectUnauthorized: false,
 });
 
+function isSalesforceUnauthorized(error) {
+  if (error?.response?.status === 401) {
+    return true;
+  }
+
+  const responseData = error?.response?.data;
+  const salesforceErrors = Array.isArray(responseData)
+    ? responseData
+    : [responseData].filter(Boolean);
+
+  return salesforceErrors.some(
+    (item) =>
+      String(item?.errorCode || item?.error || "") === "INVALID_SESSION_ID",
+  );
+}
+
+async function withSalesforceReauth(sf, requestFn, refreshAttempted = false) {
+  try {
+    return await requestFn(sf);
+  } catch (error) {
+    if (!refreshAttempted && isSalesforceUnauthorized(error)) {
+      clearCachedToken();
+      const refreshedConnection = await authenticateSalesforce();
+      return withSalesforceReauth(refreshedConnection, requestFn, true);
+    }
+
+    throw error;
+  }
+}
+
 async function runSoqlQuery(sf, soql, retries = 2) {
   try {
-    const response = await axios.get(
-      `${sf.instanceUrl}/services/data/${salesforceConfig.apiVersion}/query`,
-      {
-        httpsAgent,
-        timeout: 30000,
-        headers: {
-          Authorization: `Bearer ${sf.accessToken}`,
+    const response = await withSalesforceReauth(sf, (connection) =>
+      axios.get(
+        `${connection.instanceUrl}/services/data/${salesforceConfig.apiVersion}/query`,
+        {
+          httpsAgent,
+          timeout: 30000,
+          headers: {
+            Authorization: `Bearer ${connection.accessToken}`,
+          },
+          params: { q: soql },
         },
-        params: { q: soql },
-      },
+      ),
     );
 
     return response.data.records;
@@ -32,16 +66,18 @@ async function runSoqlQuery(sf, soql, retries = 2) {
 
 async function runSoqlQueryFull(sf, soql, retries = 2) {
   try {
-    const response = await axios.get(
-      `${sf.instanceUrl}/services/data/${salesforceConfig.apiVersion}/query`,
-      {
-        httpsAgent,
-        timeout: 30000,
-        headers: {
-          Authorization: `Bearer ${sf.accessToken}`,
+    const response = await withSalesforceReauth(sf, (connection) =>
+      axios.get(
+        `${connection.instanceUrl}/services/data/${salesforceConfig.apiVersion}/query`,
+        {
+          httpsAgent,
+          timeout: 30000,
+          headers: {
+            Authorization: `Bearer ${connection.accessToken}`,
+          },
+          params: { q: soql },
         },
-        params: { q: soql },
-      },
+      ),
     );
 
     return response.data;
@@ -56,13 +92,15 @@ async function runSoqlQueryFull(sf, soql, retries = 2) {
 
 async function fetchSalesforceQueryPage(sf, url, retries = 2) {
   try {
-    const response = await axios.get(url, {
-      httpsAgent,
-      timeout: 30000,
-      headers: {
-        Authorization: `Bearer ${sf.accessToken}`,
-      },
-    });
+    const response = await withSalesforceReauth(sf, (connection) =>
+      axios.get(url, {
+        httpsAgent,
+        timeout: 30000,
+        headers: {
+          Authorization: `Bearer ${connection.accessToken}`,
+        },
+      }),
+    );
 
     return response.data;
   } catch (error) {

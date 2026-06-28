@@ -45,13 +45,17 @@ async function forwardInboundPayloadToImgina(payload) {
 
   const parsedBody =
     response.data && typeof response.data === "object" ? response.data : null;
+  const recognizedImginaResponse = parsedBody?.target === "imgina";
+  const statusOk = response.status >= 200 && response.status < 300;
 
   return {
     skipped: false,
     status: response.status,
-    ok: response.status >= 200 && response.status < 300,
+    ok: statusOk && recognizedImginaResponse,
     handled: Boolean(parsedBody?.handled),
-    reason: parsedBody?.reason || null,
+    reason:
+      parsedBody?.reason ||
+      (statusOk ? "unexpected_imgina_response" : "imgina_forward_http_error"),
     target: parsedBody?.target || null,
     body:
       typeof response.data === "string"
