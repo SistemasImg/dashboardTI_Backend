@@ -760,6 +760,40 @@ exports.askModel = async (messages) => {
           },
         },
         {
+          name: "prepareAdReachRidesharePayload",
+          description:
+            "Prepare the JSON payload for adReach Rideshare using a Salesforce case number and tier 12, 13, or 14. No files required.",
+          parameters: {
+            type: "object",
+            properties: {
+              caseNumber: { type: "string" },
+              tier: {
+                type: "string",
+                description:
+                  "Tier value (T12, T13, T14, Tier 12, Tier 13, Tier 14, 12, 13, or 14)",
+              },
+            },
+            required: ["caseNumber", "tier"],
+          },
+        },
+        {
+          name: "sendAdReachRidesharePayload",
+          description:
+            "Send the adReach Rideshare payload to the client API endpoint for tier 12, 13, or 14. No files required.",
+          parameters: {
+            type: "object",
+            properties: {
+              caseNumber: { type: "string" },
+              tier: {
+                type: "string",
+                description:
+                  "Tier value (T12, T13, T14, Tier 12, Tier 13, Tier 14, 12, 13, or 14)",
+              },
+            },
+            required: ["caseNumber", "tier"],
+          },
+        },
+        {
           name: "prepareJdcT3Payload",
           description:
             "Prepare the JSON payload for Phillips Juvenile Detention Center T3 (JDC T3) using a Salesforce case number. This step only builds/validates payload.",

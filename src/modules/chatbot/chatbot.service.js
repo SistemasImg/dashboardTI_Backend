@@ -395,6 +395,37 @@ function detectDepoProveraT8SendIntent(message) {
   return { caseNumber: caseMatch[1] };
 }
 
+function detectAdReachRideshareSendIntent(message) {
+  const text = String(message || "").toLowerCase();
+
+  const mentionsSend =
+    text.includes("envi") ||
+    text.includes("manda") ||
+    text.includes("send") ||
+    text.includes("submit");
+
+  const mentionsAdReach =
+    text.includes("adreach") ||
+    text.includes("ad reach") ||
+    text.includes("rideshare t12") ||
+    text.includes("rideshare t13") ||
+    text.includes("rideshare t14") ||
+    text.includes("tier 12") ||
+    text.includes("tier 13") ||
+    text.includes("tier 14") ||
+    text.includes("t12") ||
+    text.includes("t13") ||
+    text.includes("t14");
+
+  if (!mentionsSend || !mentionsAdReach) return null;
+
+  const caseMatch = /\b(0*\d{5,8})\b/.exec(text);
+  const tierMatch = /\b(?:t|tier\s*)?(12|13|14)\b/.exec(text);
+  if (!caseMatch || !tierMatch?.[1]) return null;
+
+  return { caseNumber: caseMatch[1], tier: tierMatch[1] };
+}
+
 function getPendingBardT2Approval(sessionData) {
   return sessionData?.last_filters?.pendingBardPortT2 || null;
 }
@@ -1232,6 +1263,14 @@ async function revisePendingRuntimePayload(pendingRuntime, editIntent) {
       value: editIntent.value,
     });
   }
+  if (pendingRuntime.kind === "adreach_rideshare") {
+    return apiIntegrations.adReachRideshare.reviseAdReachRidesharePayloadField({
+      caseNumber: pendingRuntime.caseNumber,
+      tier: pendingRuntime.tier,
+      field: editIntent.field,
+      value: editIntent.value,
+    });
+  }
   return apiIntegrations.a4dRideshareT11.reviseA4DRideshareT11PayloadField({
     caseNumber: pendingRuntime.caseNumber,
     field: editIntent.field,
@@ -1269,6 +1308,12 @@ async function sendPendingRuntimePayload(pendingRuntime) {
       tier: pendingRuntime.tier,
     });
   }
+  if (pendingRuntime.kind === "adreach_rideshare") {
+    return apiIntegrations.adReachRideshare.sendAdReachRidesharePayload({
+      caseNumber: pendingRuntime.caseNumber,
+      tier: pendingRuntime.tier,
+    });
+  }
   return apiIntegrations.a4dRideshareT11.sendA4DRideshareT11Payload({
     caseNumber: pendingRuntime.caseNumber,
   });
@@ -1287,6 +1332,10 @@ function formatPendingRuntimeSentMessage(pendingRuntime, sendResult, userLang) {
   }
   if (pendingRuntime.kind === "depo_t8") {
     return formatSendDepoProveraT8PayloadResult(sendResult, userLang).message;
+  }
+  if (pendingRuntime.kind === "adreach_rideshare") {
+    return formatSendAdReachRidesharePayloadResult(sendResult, userLang)
+      .message;
   }
   return formatSendA4DRideshareT11PayloadResult(sendResult, userLang).message;
 }
@@ -1823,6 +1872,21 @@ function getFunctionHandlers(context) {
         attachments: [],
       });
     },
+    prepareAdReachRidesharePayload: async () => {
+      const result =
+        await apiIntegrations.adReachRideshare.prepareAdReachRidesharePayload({
+          caseNumber: args.caseNumber,
+          tier: args.tier,
+        });
+      if (args.caseNumber) {
+        updateSessionLastFilters(sessionData, cacheKey, {
+          caseNumber: args.caseNumber,
+          tier: args.tier,
+          type: "Rideshare",
+        });
+      }
+      return result;
+    },
     prepareA4DRideshareT11Payload: async () => {
       const result =
         await apiIntegrations.a4dRideshareT11.prepareA4DRideshareT11Payload({
@@ -1834,6 +1898,36 @@ function getFunctionHandlers(context) {
         });
       }
       return result;
+    },
+    sendAdReachRidesharePayload: async () => {
+      const prepared =
+        await apiIntegrations.adReachRideshare.prepareAdReachRidesharePayload({
+          caseNumber: args.caseNumber,
+          tier: args.tier,
+        });
+      if (args.caseNumber) {
+        updateSessionLastFilters(sessionData, cacheKey, {
+          caseNumber: args.caseNumber,
+          tier: args.tier,
+          type: "Rideshare",
+        });
+      }
+      if (prepared.found && prepared.ready) {
+        setRuntimePendingApproval(cacheKey, {
+          kind: "adreach_rideshare",
+          apiLabel: `adReach Rideshare T${prepared.tier}`,
+          caseNumber: prepared.caseNumber,
+          tort: "Rideshare",
+          tier: prepared.tier,
+          payload: prepared.payload,
+          attachments: [],
+        });
+      }
+      return buildApprovalResult(prepared, {
+        tort: "Rideshare",
+        tier: prepared.tier,
+        attachments: [],
+      });
     },
     sendA4DRideshareT11Payload: async () => {
       const prepared =
@@ -2063,6 +2157,7 @@ function getApprovalFunctionNames() {
   return new Set([
     "sendBardPortT2Payload",
     "sendT9RidesharePayload",
+    "sendAdReachRidesharePayload",
     "sendA4DRideshareT11Payload",
     "sendJdcT3Payload",
     "sendWomensPrisonerAbuseT1Payload",
@@ -2115,6 +2210,8 @@ function getSuccessfulApiMessage(functionName, functionResult, userLang) {
       buildApiSentMessage(functionResult, userLang),
     sendBardPortT2Payload: () => buildApiSentMessage(functionResult, userLang),
     sendDepoProveraT8Payload: () =>
+      buildApiSentMessage(functionResult, userLang),
+    sendAdReachRidesharePayload: () =>
       buildApiSentMessage(functionResult, userLang),
     sendA4DRideshareT11Payload: () =>
       buildApiSentMessage(functionResult, userLang, false),
@@ -2282,7 +2379,11 @@ async function runSafetyNetIntent(context, config) {
   }
 
   logger.warn(config.logLabel(intent.caseNumber));
-  const prepared = await config.prepare(intent.caseNumber, requestAttachments);
+  const prepared = await config.prepare(
+    intent.caseNumber,
+    requestAttachments,
+    intent,
+  );
   let finalMessage;
   if (!prepared.found || !prepared.ready) {
     finalMessage = config.formatFailed(
@@ -2290,7 +2391,7 @@ async function runSafetyNetIntent(context, config) {
       userLang,
     ).message;
   } else {
-    const pending = config.buildPending(prepared, requestAttachments);
+    const pending = config.buildPending(prepared, requestAttachments, intent);
     setRuntimePendingApproval(cacheKey, pending);
     finalMessage = formatApiApprovalPreviewMessage(pending, userLang);
   }
@@ -2381,6 +2482,26 @@ async function handleSafetyNetTurn(context) {
       }),
       logLabel: (caseNumber) =>
         `[Depo Provera T8 Safety Net] Model skipped function call. Forcing preview workflow for case ${caseNumber}`,
+    },
+    {
+      detect: detectAdReachRideshareSendIntent,
+      prepare: (caseNumber, _attachments, intent) =>
+        apiIntegrations.adReachRideshare.prepareAdReachRidesharePayload({
+          caseNumber,
+          tier: intent.tier,
+        }),
+      formatFailed: formatSendAdReachRidesharePayloadResult,
+      buildPending: (prepared, _attachments, intent) => ({
+        kind: "adreach_rideshare",
+        apiLabel: `adReach Rideshare T${prepared.tier || intent.tier}`,
+        caseNumber: prepared.caseNumber,
+        tort: "Rideshare",
+        tier: prepared.tier || intent.tier,
+        payload: prepared.payload,
+        attachments: [],
+      }),
+      logLabel: (caseNumber) =>
+        `[adReach Rideshare Safety Net] Model skipped function call. Forcing preview workflow for case ${caseNumber}`,
     },
   ];
 
@@ -2721,6 +2842,10 @@ function buildResultFormatterMap(lang) {
       formatPrepareDepoProveraT8PayloadResult(data, lang),
     sendDepoProveraT8Payload: (data) =>
       formatSendDepoProveraT8PayloadResult(data, lang),
+    prepareAdReachRidesharePayload: (data) =>
+      formatPrepareAdReachRidesharePayloadResult(data, lang),
+    sendAdReachRidesharePayload: (data) =>
+      formatSendAdReachRidesharePayloadResult(data, lang),
     prepareA4DRideshareT11Payload: (data) =>
       formatPrepareA4DRideshareT11PayloadResult(data, lang),
     sendA4DRideshareT11Payload: (data) =>
@@ -4102,6 +4227,115 @@ function formatSendDepoProveraT8PayloadResult(data, lang = "en") {
 
   return {
     message: buildApiSuccessMessage(data.caseNumber, lang, [
+      `${i18n(lang, "Respuesta del cliente", "Client response")}: ${data.clientResponse || "N/A"}`,
+      `${i18n(lang, "Guardado en Salesforce", "Saved in Salesforce")}: ${sfText}`,
+    ]),
+  };
+}
+
+function formatPrepareAdReachRidesharePayloadResult(data, lang = "en") {
+  if (!data.found) {
+    return {
+      message: i18n(
+        lang,
+        `No encontré el case ${data.caseNumber} para armar el payload de adReach Rideshare.`,
+        `I couldn't find case ${data.caseNumber} to build the adReach Rideshare payload.`,
+      ),
+    };
+  }
+
+  if (data.invalidTier) {
+    return {
+      message: i18n(
+        lang,
+        "Necesito un tier válido para adReach Rideshare. Usa 12, 13 o 14.",
+        "I need a valid adReach Rideshare tier. Use 12, 13, or 14.",
+      ),
+    };
+  }
+
+  if (!data.ready) {
+    const fields = (data.missingFields || []).join(", ");
+    return {
+      message: i18n(
+        lang,
+        `⚠️ No se puede armar el payload de adReach Rideshare para el case ${data.caseNumber}. Los siguientes campos están vacíos o no tienen datos en Salesforce: **${fields}**. Verifica que el registro esté completo antes de continuar.`,
+        `⚠️ Cannot build adReach Rideshare payload for case ${data.caseNumber}. The following fields are empty or missing in Salesforce: **${fields}**. Please verify the record is complete before proceeding.`,
+      ),
+    };
+  }
+
+  return {
+    message: `
+🧩 **${i18n(lang, "Payload adReach Rideshare preparado", "adReach Rideshare payload prepared")}**
+• **Case:** ${data.caseNumber}
+• **Tort:** ${data.tort}
+• **Tier:** ${data.tier}
+
+${i18n(
+  lang,
+  "La estructura JSON quedó lista para envío al endpoint del cliente.",
+  "The JSON structure is ready to be sent to the client endpoint.",
+)}
+`,
+  };
+}
+
+function formatSendAdReachRidesharePayloadResult(data, lang = "en") {
+  if (!data.found) {
+    return {
+      message: i18n(
+        lang,
+        `No encontré el case ${data.caseNumber}. No pude enviar el payload de adReach Rideshare.`,
+        `I couldn't find case ${data.caseNumber}. I could not send the adReach Rideshare payload.`,
+      ),
+    };
+  }
+
+  if (data.invalidTier) {
+    return {
+      message: i18n(
+        lang,
+        "Necesito un tier válido para enviar a adReach Rideshare. Usa 12, 13 o 14.",
+        "I need a valid tier to send adReach Rideshare. Use 12, 13, or 14.",
+      ),
+    };
+  }
+
+  if (!data.ready) {
+    const fields = (data.missingFields || []).join(", ");
+    return {
+      message: i18n(
+        lang,
+        `⚠️ No se puede enviar el payload de adReach Rideshare para el case ${data.caseNumber}. Los siguientes campos están vacíos o no tienen datos en Salesforce: **${fields}**. Verifica que el registro esté completo antes de continuar.`,
+        `⚠️ Cannot send adReach Rideshare payload for case ${data.caseNumber}. The following fields are empty or missing in Salesforce: **${fields}**. Please verify the record is complete before proceeding.`,
+      ),
+    };
+  }
+
+  if (data.approvalRequired) {
+    return {
+      message: formatApiApprovalPreviewMessage(data, lang),
+    };
+  }
+
+  if (!data.sent) {
+    const sfText = getSalesforceSavedText(data.salesforceUpdated, lang);
+
+    return {
+      message: `${i18n(
+        lang,
+        `No se completó el envío de adReach Rideshare para el case ${data.caseNumber}. ${data.message || data.error || "Revisa la configuración del endpoint"}.`,
+        `adReach Rideshare delivery for case ${data.caseNumber} was not completed. ${data.message || data.error || "Check endpoint configuration"}.`,
+      )}\n\n${i18n(lang, "HTTP", "HTTP")}: ${data.statusCode || "N/A"}\n${i18n(lang, "Respuesta del cliente", "Client response")}: ${data.clientResponse || "N/A"}\n${i18n(lang, "Guardado en Salesforce", "Saved in Salesforce")}: ${sfText}`,
+    };
+  }
+
+  const sfText = getSalesforceSavedText(data.salesforceUpdated, lang);
+
+  return {
+    message: buildApiSuccessMessage(data.caseNumber, lang, [
+      `${i18n(lang, "HTTP", "HTTP")}: ${data.statusCode || "N/A"}`,
       `${i18n(lang, "Respuesta del cliente", "Client response")}: ${data.clientResponse || "N/A"}`,
       `${i18n(lang, "Guardado en Salesforce", "Saved in Salesforce")}: ${sfText}`,
     ]),

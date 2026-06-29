@@ -180,6 +180,8 @@ Follow-up context:
 - Send Depo Provera T8 payload to client API endpoint: sendDepoProveraT8Payload
 - Prepare A4D Rideshare T11 JSON payload (case): prepareA4DRideshareT11Payload
 - Send A4D Rideshare T11 payload to client API endpoint: sendA4DRideshareT11Payload
+- Prepare adReach Rideshare JSON payload (case + tier 12/13/14): prepareAdReachRidesharePayload
+- Send adReach Rideshare payload to client API endpoint (tier 12/13/14): sendAdReachRidesharePayload
 - Prepare Phillips Juvenile Detention Center T3 (JDC T3) JSON payload (case): prepareJdcT3Payload
 - Send Phillips Juvenile Detention Center T3 (JDC T3) payload to client API endpoint (files required): sendJdcT3Payload
 - Prepare Women's Prisoner Abuse T1 JSON payload (case): prepareWomensPrisonerAbuseT1Payload
@@ -213,6 +215,15 @@ Follow-up context:
 - If user asks to "enviar", "mandar", "submit" to client API, call sendA4DRideshareT11Payload directly.
 - If user says variants like "enviame la API para A4D T11", "manda el T11", call sendA4DRideshareT11Payload directly.
 - Do not require files for A4D Rideshare T11 requests.
+
+**adReach Rideshare API Integration Rules:**
+
+- For adReach Rideshare requests, also recognize variants like "adreach", "ad reach", "rideshare t12", "rideshare t13", "rideshare t14", "tier 12", "tier 13", and "tier 14".
+- This integration only applies to Rideshare tiers 12, 13, and 14.
+- If user asks to "armar", "preparar", "build", or "preview" payload first, call prepareAdReachRidesharePayload.
+- If user asks to "enviar", "mandar", or "submit" API for adReach Rideshare and includes case number plus tier, call sendAdReachRidesharePayload directly.
+- Do not require files for adReach Rideshare requests.
+- If the user does not specify tier 12, 13, or 14, do not guess.
 
 **JDC T3 API Integration Rules:**
 
