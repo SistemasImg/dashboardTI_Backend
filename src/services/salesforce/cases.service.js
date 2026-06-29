@@ -1,14 +1,8 @@
 const logger = require("../../utils/logger");
-const salesforceCasesConfig = require("../../config/salesforceCases.config");
-const axios = require("axios");
-const https = require("node:https");
-const crypto = require("node:crypto");
 const { verifyAccessToken } = require("../../utils/verifyAccessToken");
 const { casesSalesforce, User } = require("../../models");
-
-const httpsAgent = new https.Agent({
-  rejectUnauthorized: false,
-});
+const { authenticateSalesforce } = require("./auth.service");
+const { createSalesforceSObject } = require("./client.service");
 
 function sanitizeHeaders(headers = {}) {
   const cloned = { ...headers };
@@ -22,9 +16,9 @@ function buildAxiosErrorDetails(error) {
   return {
     isAxiosError: Boolean(error?.isAxiosError),
     code: error?.code,
-    status: error?.response?.status,
+    status: error?.status || error?.response?.status,
     statusText: error?.response?.statusText,
-    responseData: error?.response?.data,
+    responseData: error?.salesforceErrors || error?.response?.data,
     request: {
       method: error?.config?.method,
       url: error?.config?.url,
@@ -32,78 +26,6 @@ function buildAxiosErrorDetails(error) {
       headers: sanitizeHeaders(error?.config?.headers),
     },
   };
-}
-
-function detectSecurityChallenge(responseData) {
-  if (typeof responseData !== "string") {
-    return false;
-  }
-
-  const normalized = responseData.toLowerCase();
-  return (
-    normalized.includes("/.well-known/sgcaptcha") ||
-    (normalized.includes("<html") && normalized.includes("captcha"))
-  );
-}
-
-function getBasicAuthHeader() {
-  const token = Buffer.from(
-    `${salesforceCasesConfig.username}:${salesforceCasesConfig.password}`,
-  ).toString("base64");
-
-  return `Basic ${token}`;
-}
-
-function buildRequestHeaders(payload) {
-  const headers = {
-    "Content-Type": "application/json",
-    Accept: "application/json, text/plain, */*",
-    Authorization: getBasicAuthHeader(),
-    "User-Agent": salesforceCasesConfig.userAgent,
-  };
-
-  if (salesforceCasesConfig.internalKey) {
-    const timestamp = new Date().toISOString();
-    const body = JSON.stringify(payload);
-
-    headers["X-Api-Internal-Key"] = salesforceCasesConfig.internalKey;
-    headers["X-Api-Timestamp"] = timestamp;
-    headers["X-Api-Checksum"] = crypto
-      .createHash("sha256")
-      .update(`${timestamp}.${body}`)
-      .digest("hex");
-  }
-
-  return headers;
-}
-
-async function postCases(url, payload) {
-  return axios.post(url, payload, {
-    headers: buildRequestHeaders(payload),
-    httpsAgent,
-    timeout: 15000,
-  });
-}
-
-function ensureCasesApiConfig() {
-  if (
-    salesforceCasesConfig.url &&
-    salesforceCasesConfig.username &&
-    salesforceCasesConfig.password
-  ) {
-    return;
-  }
-
-  const error = new Error(
-    "Salesforce cases API is not configured. Check API_USER / API_PASSWORD",
-  );
-  error.status = 500;
-  error.details = {
-    hasUrl: Boolean(salesforceCasesConfig.url),
-    hasUsername: Boolean(salesforceCasesConfig.username),
-    hasPassword: Boolean(salesforceCasesConfig.password),
-  };
-  throw error;
 }
 
 async function getAuthenticatedUser(token) {
@@ -128,153 +50,84 @@ async function getAuthenticatedUser(token) {
   return user;
 }
 
-function resolveSalesforceResult(apiResponse, responseData) {
-  const httpStatusCode = apiResponse?.httpStatusCode ?? 500;
-  const body = apiResponse?.body;
-  const isSuccess = httpStatusCode >= 200 && httpStatusCode < 300;
-  const isSecurityChallenge = detectSecurityChallenge(responseData);
+function cleanDateInput(dateInput) {
+  const time = Date.parse(dateInput);
+  return Number.isNaN(time) ? null : new Date(time).toISOString().slice(0, 10);
+}
 
-  if (isSuccess) {
-    return {
-      httpStatusCode,
-      body,
-      isSuccess,
-      isSecurityChallenge,
-      message: "success",
-    };
+function normalizeStateValue(stateInput) {
+  const normalizedState = String(stateInput || "").trim();
+
+  if (!normalizedState || normalizedState.toLowerCase() === "no state") {
+    return "Null";
   }
 
-  if (isSecurityChallenge) {
-    return {
-      httpStatusCode,
-      body,
-      isSuccess,
-      isSecurityChallenge,
-      message:
-        "Upstream security challenge detected (captcha). The provider is blocking requests from this server origin.",
-    };
-  }
+  return normalizedState;
+}
 
-  if (Array.isArray(body) && body.length > 0) {
-    return {
-      httpStatusCode,
-      body,
-      isSuccess,
-      isSecurityChallenge,
-      message: body[0]?.message || "Request failed",
-    };
-  }
-
-  if (body?.errors && body.errors.length > 0) {
-    return {
-      httpStatusCode,
-      body,
-      isSuccess,
-      isSecurityChallenge,
-      message: body.errors[0]?.message || "Request failed",
-    };
-  }
+function buildSalesforceCasePayload(data) {
+  const phone = String(data.phone || "");
+  const state = normalizeStateValue(data.state);
+  const dateSubscribed = cleanDateInput(data.dateSubscribed);
+  const dateOfBirth = cleanDateInput("1900-01-01") || "1900-01-01";
+  const diagnosisYear = cleanDateInput("1900-01-01") || "1900-01-01";
 
   return {
-    httpStatusCode,
-    body,
-    isSuccess,
-    isSecurityChallenge,
-    message: "Unknown error",
+    Status: "new",
+    Origin: "Coreg",
+    Priority: "High",
+    Trusted_Form__c: "",
+    Jornaya__c: "",
+    ...(dateSubscribed ? { Date_Subscribed__c: dateSubscribed } : {}),
+    Phone_Numbercontact__c: Number(data.phone),
+    Email__c: data.email,
+    FirstName__c: data.firstName || phone,
+    Last_Name__c: data.lastName || phone,
+    Date_of_Birth__c: dateOfBirth,
+    Address_Street__c: phone,
+    City__c: "Unknown",
+    StateUS__c: state,
+    Area_Code__c: "12345",
+    Country__c: "US",
+    Offer_URL__c: "null",
+    Diagnosis__c: "Update after call",
+    Gender__c: data.gender,
+    Type: data.type,
+    OwnerId: data.ownerId,
+    DiagnosisYear__c: diagnosisYear,
   };
 }
 
 const createSalesforceCase = async (data, token) => {
   logger.info("SalesforceCasesService -> createSalesforceCase() started");
 
-  ensureCasesApiConfig();
-
   try {
     const user = await getAuthenticatedUser(token);
     const { dataValues } = user;
 
-    const payload = [
-      {
-        email: data.email,
-        fname: data.firstName || data.phone,
-        lname: data.lastName || data.phone,
-        date_of_birth: "01/00/1900",
-        phone: Number(data.phone),
-        country: "US",
-        ip: "IPv4",
-        address: data.phone,
-        city: "Unknown",
-        state: data.state,
-        zip: "12345",
-        offer_url: "null",
-        date_subscribed: data.dateSubscribed,
-        comments: "",
-        case_type: data.type,
-        Trusted_Form_Alt: "",
-        Jornaya: "",
-        diagnosis: "Update after call",
-        gender: data.gender,
-        ownerid: data.ownerId,
-        diagnosis_year: "01/01/1900",
-        campaign: "",
-        env: "prod",
-      },
-    ];
-
-    let response = await postCases(salesforceCasesConfig.url, payload);
+    const sf = await authenticateSalesforce();
+    const payload = buildSalesforceCasePayload(data);
+    const salesforceResult = await createSalesforceSObject(sf, "Case", payload);
 
     logger.success("SalesforceCasesService -> createSalesforceCase() success");
 
-    let apiResponse = response.data?.data?.resultCasos?.compositeResponse?.[0];
-
-    let result = resolveSalesforceResult(apiResponse, response.data);
-
-    if (
-      result.isSecurityChallenge &&
-      salesforceCasesConfig.fallbackUrl &&
-      salesforceCasesConfig.fallbackUrl !== salesforceCasesConfig.url
-    ) {
-      logger.warn(
-        "SalesforceCasesService -> security challenge on primary URL, retrying fallback URL",
-        {
-          primaryUrl: salesforceCasesConfig.url,
-          fallbackUrl: salesforceCasesConfig.fallbackUrl,
-        },
-      );
-
-      response = await postCases(salesforceCasesConfig.fallbackUrl, payload);
-      apiResponse = response.data?.data?.resultCasos?.compositeResponse?.[0];
-      result = resolveSalesforceResult(apiResponse, response.data);
-    }
-
-    if (result.isSuccess) {
-      await casesSalesforce.create({
-        email: data.email,
-        firstname: data.firstName || data.phone,
-        lastname: data.lastName || data.phone,
-        phoneNumber: data.phone,
-        state: data.state,
-        type: data.type,
-        gender: data.gender,
-        supplier: data.ownerId,
-        userId: dataValues.id,
-      });
-    }
-
-    if (!result.isSuccess) {
-      logger.warn("SalesforceCasesService -> non-success composite response", {
-        httpStatusCode: result.httpStatusCode,
-        body: result.body,
-        responseData: response.data,
-      });
-    }
+    await casesSalesforce.create({
+      email: data.email,
+      firstname: data.firstName || data.phone,
+      lastname: data.lastName || data.phone,
+      phoneNumber: data.phone,
+      state: data.state,
+      type: data.type,
+      gender: data.gender,
+      supplier: data.ownerId,
+      userId: dataValues.id,
+    });
 
     return {
-      statusMessage: result.isSuccess ? 200 : 400,
-      message: result.message,
-      errorType: result.isSecurityChallenge
-        ? "UPSTREAM_SECURITY_CHALLENGE"
-        : null,
+      statusMessage: 200,
+      message: "success",
+      salesforceCaseId: salesforceResult?.id,
+      salesforceResult,
     };
   } catch (error) {
     const details = buildAxiosErrorDetails(error);

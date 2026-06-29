@@ -4,13 +4,13 @@ const {
   normalizePhone,
 } = require("../../services/salesforce/phoneLookup.service");
 
-async function getCaseSubstatusByPhone(req, res, next) {
+async function getCaseLookupByPhone(req, res, next) {
   try {
     const phoneInput = req.query.phone;
     const normalizedPhone = normalizePhone(phoneInput);
 
     logger.info(
-      "ExternalCaseLookupController → getCaseSubstatusByPhone() request received",
+      "ExternalCaseLookupController → getCaseLookupByPhone() request received",
       {
         phoneInput: String(phoneInput || "").trim() || null,
         normalizedPhone,
@@ -46,16 +46,15 @@ async function getCaseSubstatusByPhone(req, res, next) {
       normalizedPhone,
       caseNumber: match.caseNumber,
       status: match.status || null,
-      substatus: match.substatus || null,
     });
 
     return res.status(200).json({
       phone: normalizedPhone,
-      substatus: match.substatus || null,
+      status: match.status || null,
     });
   } catch (error) {
     logger.error(
-      `ExternalCaseLookupController → getCaseSubstatusByPhone() error: ${error.message}`,
+      `ExternalCaseLookupController → getCaseLookupByPhone() error: ${error.message}`,
       { stack: error.stack, origin: "controller" },
     );
     return next(error);
@@ -63,5 +62,5 @@ async function getCaseSubstatusByPhone(req, res, next) {
 }
 
 module.exports = {
-  getCaseSubstatusByPhone,
+  getCaseLookupByPhone,
 };

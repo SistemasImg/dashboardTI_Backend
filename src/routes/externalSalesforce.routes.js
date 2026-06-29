@@ -3,13 +3,14 @@ const {
   externalStaticBearer,
 } = require("../middlewares/externalStaticBearer.middleware");
 const {
-  getCaseSubstatusByPhone,
+  getCaseLookupByPhone,
 } = require("../controllers/salesforce/externalCaseLookup.controller");
 
 const router = express.Router();
 
 router.use(externalStaticBearer);
 
-router.get("/case-substatus", getCaseSubstatusByPhone);
+router.get("/case-lookup", getCaseLookupByPhone);
+router.get("/case-substatus", getCaseLookupByPhone);
 
 module.exports = router;
