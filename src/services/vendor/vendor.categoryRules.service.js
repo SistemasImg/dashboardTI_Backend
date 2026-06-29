@@ -115,9 +115,6 @@ function getProfileDisplayInfo(profile) {
 }
 
 function isAcceptedCaseSnapshot(snapshot) {
-  if (snapshot?.signed_date || snapshot?.Signed_Date__c) return true;
-  if (isValidatedOutflowSnapshot(snapshot)) return true;
-
   return (
     String(snapshot?.sub_status || "")
       .trim()
@@ -176,6 +173,10 @@ function isValidatedOutflowSnapshot(snapshot) {
   return Boolean(
     getSnapshotOutflowDate(snapshot) && snapshot?.outflow_validated,
   );
+}
+
+function isOutflowCaseSnapshot(snapshot) {
+  return Boolean(getSnapshotOutflowDate(snapshot));
 }
 
 // =============================================
@@ -687,9 +688,11 @@ function computeTopEligibility(
   const recentAccepted = recentInflowSnapshots.filter((s) =>
     isAcceptedCaseSnapshot(s),
   );
-  const recentOutflow = recentAccepted.filter((s) =>
-    isValidatedOutflowSnapshot(s),
-  );
+  const recentOutflow = recentAccepted.filter((s) => {
+    if (!isOutflowCaseSnapshot(s)) return false;
+    const outflowDate = new Date(getSnapshotOutflowDate(s));
+    return !Number.isNaN(outflowDate.getTime()) && outflowDate >= cutoff;
+  });
 
   const acceptedCount = recentAccepted.length;
   const inflowCount = recentInflowSnapshots.length;
@@ -974,6 +977,8 @@ function buildAlertFlags(evaluation, newCategory) {
     top_accepted_to_inflow_rate_pct:
       topEligibility.acceptedToInflowRatePercent || 0,
     top_accepted_to_outflow_rate_pct:
+      topEligibility.outflowToAcceptedRatePercent || 0,
+    top_outflow_to_accepted_rate_pct:
       topEligibility.outflowToAcceptedRatePercent || 0,
     top_min_accepted_to_inflow_rate_pct:
       topEligibility.minAcceptedToInflowRatePercent || 0,

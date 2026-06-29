@@ -14,7 +14,7 @@ const { runTimeToLeadSyncJob } = require("./timeToLeadSync.job");
 const { runAttemptsAnalysisSyncJob } = require("./attemptsAnalysisSync.job");
 const isProduction = process.env.NODE_ENV === "production";
 const vendorSyncCronExpression =
-  process.env.VENDOR_SYNC_CRON_EXPRESSION || "0 * * * *";
+  process.env.VENDOR_SYNC_CRON_EXPRESSION || "*/30 * * * *";
 const timeToLeadCronExpression =
   process.env.TIME_TO_LEAD_SYNC_CRON_EXPRESSION || "*/15 * * * *";
 const attemptsAnalysisCronExpression =

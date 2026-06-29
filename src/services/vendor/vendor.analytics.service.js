@@ -1,5 +1,8 @@
 const { Op } = require("sequelize");
 const {
+  getUsBusinessDaysWindowStartDate,
+} = require("../../utils/usBusinessDays");
+const {
   Vendor,
   VendorCountry,
   VendorProfile,
@@ -66,6 +69,13 @@ function endOfUtcDay(date) {
   return d;
 }
 
+function isDateInRange(value, fromDate, toDate) {
+  if (!value) return false;
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return false;
+  return date >= fromDate && date <= toDate;
+}
+
 function normalizeText(value) {
   return String(value || "")
     .trim()
@@ -77,6 +87,10 @@ function resolveCurrentCategory(profile) {
     return profile.manual_category;
   }
   return profile.computed_category;
+}
+
+function isAcceptedCaseSnapshot(row) {
+  return normalizeText(row?.sub_status) === "accepted";
 }
 
 function getProfileVendorInfo(profile) {
@@ -198,8 +212,7 @@ function parseFilters(raw = {}) {
     range = `${days}d`;
   } else {
     toDate = endOfUtcDay(new Date());
-    fromDate = startOfUtcDay(new Date());
-    fromDate.setUTCDate(fromDate.getUTCDate() - RANGE_DAYS_MAP[range] + 1);
+    fromDate = startOfUtcDay(getUsBusinessDaysWindowStartDate(90));
   }
 
   if (fromDate > toDate) {
@@ -402,29 +415,38 @@ function buildVendorMetricsFromSnapshots(snapshots, typeFilter) {
       byVendorId.set(vendorId, {
         inflow: 0,
         accepted: 0,
+        outflow: 0,
         byType: {},
       });
     }
 
     const entry = byVendorId.get(vendorId);
-    entry.inflow += 1;
+    const countsAsInflow = isDateInRange(
+      row.case_created_at,
+      typeFilter.fromDate,
+      typeFilter.toDate,
+    );
+    const countsAsAccepted = countsAsInflow && isAcceptedCaseSnapshot(row);
+    const countsAsOutflow =
+      countsAsAccepted &&
+      isDateInRange(row.sent_date_2, typeFilter.fromDate, typeFilter.toDate);
 
-    if (row.signed_date) {
-      entry.accepted += 1;
-    }
+    if (countsAsInflow) entry.inflow += 1;
+    if (countsAsAccepted) entry.accepted += 1;
+    if (countsAsOutflow) entry.outflow += 1;
 
     if (!entry.byType[typeName]) {
       entry.byType[typeName] = {
         inflow: 0,
         accepted: 0,
+        outflow: 0,
         vendorIds: new Set(),
       };
     }
 
-    entry.byType[typeName].inflow += 1;
-    if (row.signed_date) {
-      entry.byType[typeName].accepted += 1;
-    }
+    if (countsAsInflow) entry.byType[typeName].inflow += 1;
+    if (countsAsAccepted) entry.byType[typeName].accepted += 1;
+    if (countsAsOutflow) entry.byType[typeName].outflow += 1;
     entry.byType[typeName].vendorIds.add(vendorId);
   });
 
@@ -545,15 +567,25 @@ async function loadAnalyticsDataset(rawFilters = {}) {
           vendor_id: {
             [Op.in]: vendorIds,
           },
-          case_created_at: {
-            [Op.between]: [filters.fromDate, filters.toDate],
-          },
+          [Op.or]: [
+            {
+              case_created_at: {
+                [Op.between]: [filters.fromDate, filters.toDate],
+              },
+            },
+            {
+              sent_date_2: {
+                [Op.between]: [filters.fromDate, filters.toDate],
+              },
+            },
+          ],
         },
         attributes: [
           "vendor_id",
           "product_id",
           "case_created_at",
-          "signed_date",
+          "sent_date_2",
+          "sub_status",
         ],
         include: [
           {
@@ -595,7 +627,11 @@ async function loadAnalyticsDataset(rawFilters = {}) {
 
   return {
     filters,
-    typeFilter,
+    typeFilter: {
+      ...typeFilter,
+      fromDate: filters.fromDate,
+      toDate: filters.toDate,
+    },
     productsIndex,
     profiles,
     profileById,
@@ -617,24 +653,38 @@ function buildSummaryResponse(dataset) {
 
   let totalInflow = 0;
   let totalAccepted = 0;
+  let totalOutflow = 0;
   let conversionRateAccumulator = 0;
+  let outflowRateAccumulator = 0;
   let conversionRateContributors = 0;
+  let outflowRateContributors = 0;
 
   const categoryDistributionMap = new Map();
 
   dataset.profiles.forEach((profile) => {
     const vendorId = Number(profile.id);
     const category = resolveCurrentCategory(profile);
-    const metrics = vendorMetrics.get(vendorId) || { inflow: 0, accepted: 0 };
+    const metrics = vendorMetrics.get(vendorId) || {
+      inflow: 0,
+      accepted: 0,
+      outflow: 0,
+    };
 
     totalInflow += metrics.inflow;
     totalAccepted += metrics.accepted;
+    totalOutflow += metrics.outflow;
 
     const conversionRate =
       metrics.inflow > 0 ? (metrics.accepted / metrics.inflow) * 100 : null;
+    const outflowRate =
+      metrics.accepted > 0 ? (metrics.outflow / metrics.accepted) * 100 : null;
     if (conversionRate !== null) {
       conversionRateAccumulator += conversionRate;
       conversionRateContributors += 1;
+    }
+    if (outflowRate !== null) {
+      outflowRateAccumulator += outflowRate;
+      outflowRateContributors += 1;
     }
 
     if (!categoryDistributionMap.has(category)) {
@@ -678,6 +728,7 @@ function buildSummaryResponse(dataset) {
       activeVendors: dataset.profiles.filter((p) => Boolean(p.active)).length,
       totalInflow,
       totalAccepted,
+      totalOutflow,
       totalRejectedOrUnsigned: Math.max(totalInflow - totalAccepted, 0),
       avgConversionRate:
         conversionRateContributors > 0
@@ -685,6 +736,12 @@ function buildSummaryResponse(dataset) {
               (conversionRateAccumulator / conversionRateContributors).toFixed(
                 2,
               ),
+            )
+          : 0,
+      avgOutflowToAcceptedRate:
+        outflowRateContributors > 0
+          ? Number(
+              (outflowRateAccumulator / outflowRateContributors).toFixed(2),
             )
           : 0,
       goalComplianceRate:
@@ -710,6 +767,15 @@ function buildTrendsResponse(dataset) {
   dataset.snapshots.forEach((row) => {
     const typeName = getSnapshotTypeName(row);
     if (!typeFilterAllowsCase(dataset.typeFilter, typeName)) return;
+    if (
+      !isDateInRange(
+        row.case_created_at,
+        dataset.typeFilter.fromDate,
+        dataset.typeFilter.toDate,
+      )
+    ) {
+      return;
+    }
 
     const bucket =
       granularity === "day"
@@ -719,12 +785,23 @@ function buildTrendsResponse(dataset) {
     if (!bucket) return;
 
     if (!inflowByBucket.has(bucket)) {
-      inflowByBucket.set(bucket, { total: 0, accepted: 0 });
+      inflowByBucket.set(bucket, { total: 0, accepted: 0, outflow: 0 });
     }
 
     const entry = inflowByBucket.get(bucket);
     entry.total += 1;
-    if (row.signed_date) entry.accepted += 1;
+    if (isAcceptedCaseSnapshot(row)) {
+      entry.accepted += 1;
+      if (
+        isDateInRange(
+          row.sent_date_2,
+          dataset.typeFilter.fromDate,
+          dataset.typeFilter.toDate,
+        )
+      ) {
+        entry.outflow += 1;
+      }
+    }
   });
 
   const inflowTrend = Array.from(inflowByBucket.entries())
@@ -735,10 +812,15 @@ function buildTrendsResponse(dataset) {
         date,
         total: item.total,
         accepted: item.accepted,
+        outflow: item.outflow,
         rejectedOrUnsigned,
         conversionRate:
           item.total > 0
             ? Number(((item.accepted / item.total) * 100).toFixed(2))
+            : 0,
+        outflowToAcceptedRate:
+          item.accepted > 0
+            ? Number(((item.outflow / item.accepted) * 100).toFixed(2))
             : 0,
       };
     });
@@ -813,6 +895,7 @@ function buildVendorsResponse(dataset) {
     const metrics = metricsByVendor.get(vendorId) || {
       inflow: 0,
       accepted: 0,
+      outflow: 0,
     };
     const rejectedOrUnsigned = Math.max(metrics.inflow - metrics.accepted, 0);
 
@@ -838,10 +921,15 @@ function buildVendorsResponse(dataset) {
       category: resolveCurrentCategory(profile),
       inflow: metrics.inflow,
       accepted: metrics.accepted,
+      outflow: metrics.outflow,
       rejectedOrUnsigned,
       conversionRate:
         metrics.inflow > 0
           ? Number(((metrics.accepted / metrics.inflow) * 100).toFixed(2))
+          : 0,
+      outflowToAcceptedRate:
+        metrics.accepted > 0
+          ? Number(((metrics.outflow / metrics.accepted) * 100).toFixed(2))
           : 0,
       goalStats: baseGoalStats,
       goalRate,
@@ -887,6 +975,7 @@ function buildTypesResponse(dataset) {
         type: typeName,
         inflow: 0,
         accepted: 0,
+        outflow: 0,
         vendorIds: new Set(),
         totalWeeks: 0,
         metWeeks: 0,
@@ -894,8 +983,23 @@ function buildTypesResponse(dataset) {
     }
 
     const entry = typeMap.get(typeName);
-    entry.inflow += 1;
-    if (row.signed_date) entry.accepted += 1;
+    const countsAsInflow = isDateInRange(
+      row.case_created_at,
+      dataset.typeFilter.fromDate,
+      dataset.typeFilter.toDate,
+    );
+    const countsAsAccepted = countsAsInflow && isAcceptedCaseSnapshot(row);
+    const countsAsOutflow =
+      countsAsAccepted &&
+      isDateInRange(
+        row.sent_date_2,
+        dataset.typeFilter.fromDate,
+        dataset.typeFilter.toDate,
+      );
+
+    if (countsAsInflow) entry.inflow += 1;
+    if (countsAsAccepted) entry.accepted += 1;
+    if (countsAsOutflow) entry.outflow += 1;
     entry.vendorIds.add(Number(row.vendor_id));
   });
 
@@ -943,8 +1047,13 @@ function buildTypesResponse(dataset) {
       type: item.type,
       inflow: item.inflow,
       accepted: item.accepted,
+      outflow: item.outflow,
       rejectedOrUnsigned,
       conversionRate,
+      outflowToAcceptedRate:
+        item.accepted > 0
+          ? Number(((item.outflow / item.accepted) * 100).toFixed(2))
+          : 0,
       goalComplianceRate:
         item.totalWeeks > 0
           ? Number((item.metWeeks / item.totalWeeks).toFixed(4))

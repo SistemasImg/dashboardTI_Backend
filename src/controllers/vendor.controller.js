@@ -31,6 +31,7 @@ const {
 } = require("../services/vendor/vendor.analytics.service");
 const {
   listVendorsTable,
+  getVendorTableById,
   listSalesforceVendors,
   syncSalesforceVendorsToMysql,
   listVendorsCountries,
@@ -39,30 +40,19 @@ const {
   updateVendorsTableBulk,
   updateVendorsTableById,
 } = require("../services/vendor/vendors.service");
+const { runVendorSyncJob } = require("../jobs/vendorSync.job");
 
 async function syncVendors(req, res, next) {
   logger.info("VendorController → syncVendors() called");
 
   try {
-    const result = await trackVendorSync(
-      SYNC_KEYS.CLASSIFICATION,
-      "manual:/vendors/sync",
-      () =>
-        syncVendorsAndEvaluateRules({
-          failOnRulesError: false,
-          syncSalesforceData: true,
-          syncSalesforceSupplierSegments: false,
-        }),
-    );
+    const result = await runVendorSyncJob({ source: "manual:/vendors/sync" });
 
     logger.success(
-      `VendorController → syncVendors() success | synced: ${result.synced} | rulesEvaluated: ${result.rules?.evaluated || 0} | rulesChanged: ${result.rules?.changed || 0}`,
+      `VendorController → syncVendors() success | salesforceToMysqlCreated: ${result.salesforceToMysql?.created?.length || 0} | classificationSynced: ${result.classification?.synced || 0} | rulesEvaluated: ${result.classification?.rules?.evaluated || 0}`,
     );
 
-    return res.status(200).json({
-      ...result,
-      syncStatus: getVendorSyncStatus(),
-    });
+    return res.status(200).json(result);
   } catch (error) {
     logger.error(`VendorController → syncVendors() error: ${error.message}`, {
       stack: error.stack,
@@ -481,6 +471,25 @@ async function getVendorsTable(req, res, next) {
   }
 }
 
+async function getVendorTable(req, res, next) {
+  logger.info("VendorController → getVendorTable() called");
+
+  try {
+    const vendorId = Number(req.params.vendorId);
+    const result = await getVendorTableById(vendorId);
+    return res.status(200).json(result);
+  } catch (error) {
+    logger.error(
+      `VendorController → getVendorTable() error: ${error.message}`,
+      {
+        stack: error.stack,
+        origin: "controller",
+      },
+    );
+    next(error);
+  }
+}
+
 async function getSalesforceVendors(req, res, next) {
   logger.info("VendorController → getSalesforceVendors() called");
 
@@ -508,7 +517,7 @@ async function patchSalesforceVendorsToMysql(req, res, next) {
   try {
     const result = await trackVendorSync(
       SYNC_KEYS.SALESFORCE_TO_MYSQL,
-      "manual:PATCH /vendors/table/salesforce",
+      "manual:PATCH /vendor-sync/salesforce/vendors",
       syncSalesforceVendorsToMysql,
     );
     return res.status(200).json({
@@ -518,6 +527,43 @@ async function patchSalesforceVendorsToMysql(req, res, next) {
   } catch (error) {
     logger.error(
       `VendorController → patchSalesforceVendorsToMysql() error: ${error.message}`,
+      {
+        stack: error.stack,
+        origin: "controller",
+      },
+    );
+    next(error);
+  }
+}
+
+async function patchSalesforceVendorCategoriesToMysql(req, res, next) {
+  logger.info(
+    "VendorController → patchSalesforceVendorCategoriesToMysql() called",
+  );
+
+  try {
+    const result = await trackVendorSync(
+      SYNC_KEYS.CLASSIFICATION,
+      "manual:PATCH /vendor-sync/salesforce/vendors-category",
+      () =>
+        syncVendorsAndEvaluateRules({
+          failOnRulesError: false,
+          syncSalesforceData: true,
+          syncSalesforceSupplierSegments: false,
+        }),
+    );
+
+    return res.status(200).json({
+      ...result,
+      salesforceCategoryUpdate: {
+        enabled: false,
+        reason: "Salesforce category push is temporarily disabled",
+      },
+      syncStatus: getVendorSyncStatus(),
+    });
+  } catch (error) {
+    logger.error(
+      `VendorController → patchSalesforceVendorCategoriesToMysql() error: ${error.message}`,
       {
         stack: error.stack,
         origin: "controller",
@@ -633,8 +679,10 @@ module.exports = {
   getVendorsAnalyticsTypes,
   getVendorsAnalyticsCategoryHistory,
   getVendorsTable,
+  getVendorTable,
   getSalesforceVendors,
   patchSalesforceVendorsToMysql,
+  patchSalesforceVendorCategoriesToMysql,
   getVendorsCountries,
   createVendorTable,
   patchVendorTableStatus,

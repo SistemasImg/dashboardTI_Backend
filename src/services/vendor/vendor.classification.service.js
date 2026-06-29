@@ -304,6 +304,9 @@ function buildVendorContactMetadataQuery(contactIds) {
 }
 
 function buildVendorAssignedCasesQuery(salesforceOwnerId) {
+  const windowStart = getCaseSnapshotWindowStart();
+  const windowStartLiteral = toSalesforceDateTimeLiteral(windowStart);
+
   return `
     SELECT
       Id,
@@ -317,8 +320,56 @@ function buildVendorAssignedCasesQuery(salesforceOwnerId) {
       ${VENDOR_CASE_REASON_FIELDS.join(",\n      ")}
     FROM Case
     WHERE OwnerId = '${escapeSoqlString(salesforceOwnerId)}'
+    ${windowStartLiteral ? `AND CreatedDate >= ${windowStartLiteral}` : ""}
     ORDER BY CreatedDate DESC
   `;
+}
+
+function normalizeVendorCaseStatus(value) {
+  return String(value || "")
+    .trim()
+    .toLowerCase();
+}
+
+function incrementCount(map, value) {
+  const key = String(value || "Unknown").trim() || "Unknown";
+  map[key] = (map[key] || 0) + 1;
+}
+
+function getVendorCaseBucket(record) {
+  const status = normalizeVendorCaseStatus(record?.Status);
+  const substatus = normalizeVendorCaseStatus(record?.Substatus__c);
+
+  if (status === "sent") return "sent";
+  if (status === "in progress") return "inProgress";
+  if (substatus === "accepted") return "accepted";
+  if (substatus === "reject" || substatus === "rejected") return "rejected";
+
+  return "other";
+}
+
+function buildVendorCaseStatusSummary(records = []) {
+  const tracked = {
+    sent: 0,
+    inProgress: 0,
+    accepted: 0,
+    rejected: 0,
+    other: 0,
+  };
+  const byStatus = {};
+  const bySubstatus = {};
+
+  for (const record of records) {
+    tracked[getVendorCaseBucket(record)] += 1;
+    incrementCount(byStatus, record?.Status);
+    incrementCount(bySubstatus, record?.Substatus__c);
+  }
+
+  return {
+    tracked,
+    byStatus,
+    bySubstatus,
+  };
 }
 
 function resolveSalesforceAccountMetadata(user) {
@@ -407,9 +458,6 @@ function resolveCaseSubStatus(row) {
 }
 
 function isAcceptedCaseSnapshot(snapshot) {
-  if (snapshot?.signed_date || snapshot?.Signed_Date__c) return true;
-  if (isValidatedOutflowSnapshot(snapshot)) return true;
-
   const subStatus = String(
     snapshot?.sub_status ||
       snapshot?.Substatus__c ||
@@ -427,6 +475,10 @@ function isValidatedOutflowSnapshot(snapshot) {
     (snapshot?.sent_date_2 || snapshot?.Sent_Date2__c) &&
     (snapshot?.outflow_validated || snapshot?.outflowValidated),
   );
+}
+
+function isOutflowCaseSnapshot(snapshot) {
+  return Boolean(snapshot?.sent_date_2 || snapshot?.Sent_Date2__c);
 }
 
 function resolveCaseProduct(row, productMap) {
@@ -1498,14 +1550,35 @@ function buildSnapshotMetricsFromSnapshots(snapshots = [], options = {}) {
   const acceptedSnapshots = inflowSnapshots.filter((snapshot) =>
     isAcceptedCaseSnapshot(snapshot),
   );
-  const outflowSnapshots = acceptedSnapshots.filter((snapshot) =>
-    isValidatedOutflowSnapshot(snapshot),
+  const outflowSnapshots = acceptedSnapshots.filter(
+    (snapshot) =>
+      isOutflowCaseSnapshot(snapshot) &&
+      isSnapshotInsideSentDateWindow(snapshot, windowStart),
   );
   const byType = {};
+  const byTypeMetrics = {};
 
   for (const snapshot of inflowSnapshots) {
     const typeName = getSnapshotProductName(snapshot);
     byType[typeName] = (byType[typeName] || 0) + 1;
+
+    if (!byTypeMetrics[typeName]) {
+      byTypeMetrics[typeName] = {
+        inflow: 0,
+        accepted: 0,
+        outflow: 0,
+      };
+    }
+
+    byTypeMetrics[typeName].inflow += 1;
+    if (isAcceptedCaseSnapshot(snapshot)) byTypeMetrics[typeName].accepted += 1;
+    if (
+      isAcceptedCaseSnapshot(snapshot) &&
+      isOutflowCaseSnapshot(snapshot) &&
+      isSnapshotInsideSentDateWindow(snapshot, windowStart)
+    ) {
+      byTypeMetrics[typeName].outflow += 1;
+    }
   }
 
   const total = inflowSnapshots.length;
@@ -1532,6 +1605,9 @@ function buildSnapshotMetricsFromSnapshots(snapshots = [], options = {}) {
     },
     byType: {
       last90Days: byType,
+    },
+    byTypeMetrics: {
+      last90Days: byTypeMetrics,
     },
     byTypeTier: {
       last90Days: {},
@@ -1609,6 +1685,7 @@ function toPublicAlertFlags(flags = {}, vendor = {}) {
       toNumberSafe(flags.top_accepted_to_inflow_rate_pct),
     topOutflowToAcceptedRatePercent:
       toNumberSafe(totals.outflowToAcceptedRatePercent) ||
+      toNumberSafe(flags.top_outflow_to_accepted_rate_pct) ||
       toNumberSafe(flags.top_accepted_to_outflow_rate_pct),
     topMinAcceptedToInflowRatePercent: toNumberSafe(
       flags.top_min_accepted_to_inflow_rate_pct,
@@ -2726,6 +2803,7 @@ function buildCaseReasonPayload(record) {
 
 function mapVendorAssignedCase(record, { instanceUrl, vendorSalesforceId }) {
   const reasons = buildCaseReasonPayload(record);
+  const bucket = getVendorCaseBucket(record);
 
   return {
     caseId: record.Id || null,
@@ -2735,6 +2813,8 @@ function mapVendorAssignedCase(record, { instanceUrl, vendorSalesforceId }) {
       : null,
     status: record.Status || null,
     substatus: record.Substatus__c || null,
+    trackedStatus: bucket,
+    isTrackedStatus: bucket !== "other",
     type: record.Type || null,
     createdDate: formatDateForPublic(record.CreatedDate),
     createdDateIso: toIsoDateOrNull(record.CreatedDate),
@@ -2785,6 +2865,7 @@ async function getVendorAssignedSalesforceCases(vendorId) {
     sf,
     buildVendorAssignedCasesQuery(salesforceOwnerId),
   );
+  const statusSummary = buildVendorCaseStatusSummary(records);
   const cases = records.map((record) =>
     mapVendorAssignedCase(record, {
       instanceUrl: sf.instanceUrl,
@@ -2803,6 +2884,15 @@ async function getVendorAssignedSalesforceCases(vendorId) {
     },
     summary: {
       total: cases.length,
+      window: {
+        type: SALESFORCE_CASE_SNAPSHOT_WINDOW_TYPE,
+        businessDays: SALESFORCE_CASE_SNAPSHOT_DAYS,
+        field: "CreatedDate",
+        startDate: toSalesforceDateTimeLiteral(getCaseSnapshotWindowStart()),
+      },
+      trackedStatuses: statusSummary.tracked,
+      salesforceStatusCounts: statusSummary.byStatus,
+      salesforceSubstatusCounts: statusSummary.bySubstatus,
     },
     cases,
   };
@@ -2892,16 +2982,20 @@ async function listVendors(filters = {}) {
           );
         });
 
+  const shouldFetchLiveMetrics =
+    parseOptionalBoolean(filters.liveMetrics ?? filters.live) === true;
   let liveSnapshotsByOwnerId = new Map();
-  try {
-    const liveRows = await fetchSalesforceCaseSnapshots(
-      filteredRows.map((row) => row.salesforce_user_id),
-    );
-    liveSnapshotsByOwnerId = groupSalesforceCaseSnapshotsByOwnerId(liveRows);
-  } catch (error) {
-    logger.warn(
-      `VendorClassificationService → listVendors() live Salesforce metrics fallback: ${error.message}`,
-    );
+  if (shouldFetchLiveMetrics) {
+    try {
+      const liveRows = await fetchSalesforceCaseSnapshots(
+        filteredRows.map((row) => row.salesforce_user_id),
+      );
+      liveSnapshotsByOwnerId = groupSalesforceCaseSnapshotsByOwnerId(liveRows);
+    } catch (error) {
+      logger.warn(
+        `VendorClassificationService → listVendors() live Salesforce metrics fallback: ${error.message}`,
+      );
+    }
   }
 
   const vendorIds = filteredRows.map((row) => Number(row.id)).filter(Boolean);
@@ -2990,6 +3084,7 @@ async function listVendors(filters = {}) {
       total: items.length,
       active: activeCount,
       categories: categoryCount,
+      metricsSource: shouldFetchLiveMetrics ? "salesforce_live" : "local_cache",
     },
     vendors: items,
   };

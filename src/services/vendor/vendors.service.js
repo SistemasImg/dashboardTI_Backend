@@ -136,6 +136,29 @@ async function listVendorsTable() {
   };
 }
 
+async function getVendorTableById(vendorId) {
+  await ensureVendorsTable();
+
+  const row = await Vendor.findByPk(vendorId, {
+    include: [
+      {
+        model: VendorCountry,
+        as: "countryInfo",
+        attributes: ["id", "name", "status"],
+        required: false,
+      },
+    ],
+  });
+
+  if (!row) {
+    const error = new Error("Vendor not found");
+    error.status = 404;
+    throw error;
+  }
+
+  return toPublicVendor(row);
+}
+
 async function listVendorsCountries() {
   await ensureVendorsTable();
 
@@ -1237,6 +1260,7 @@ async function toggleVendorTableStatus(vendorId, newStatus) {
 
 module.exports = {
   listVendorsTable,
+  getVendorTableById,
   listSalesforceVendors,
   syncSalesforceVendorsToMysql,
   listVendorsCountries,
