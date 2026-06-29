@@ -18,7 +18,7 @@ const vendorSyncCronExpression =
 const timeToLeadCronExpression =
   process.env.TIME_TO_LEAD_SYNC_CRON_EXPRESSION || "*/15 * * * *";
 const attemptsAnalysisCronExpression =
-  process.env.ATTEMPTS_ANALYSIS_SYNC_CRON_EXPRESSION || "*/10 * * * *";
+  process.env.ATTEMPTS_ANALYSIS_SYNC_CRON_EXPRESSION || "*/15 * * * *";
 
 function buildTranscriptionCronExpression() {
   const rawValue = Number(

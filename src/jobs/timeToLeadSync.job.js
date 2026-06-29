@@ -4,10 +4,14 @@ const {
   refreshRecentTimeToLeadSnapshotMetrics,
 } = require("../services/salesforce/timeToLead.service");
 
+const DEFAULT_SYNC_DAYS_BACK = 29;
+
 async function runTimeToLeadSyncJob(options = {}) {
   const source = options.source || "scheduled";
   const daysBack = Number(
-    options.daysBack ?? process.env.TIME_TO_LEAD_SYNC_DAYS_BACK ?? 1,
+    options.daysBack ??
+      process.env.TIME_TO_LEAD_SYNC_DAYS_BACK ??
+      DEFAULT_SYNC_DAYS_BACK,
   );
   const limit = Number(
     options.limit ?? process.env.TIME_TO_LEAD_METRICS_BATCH_LIMIT ?? 3,

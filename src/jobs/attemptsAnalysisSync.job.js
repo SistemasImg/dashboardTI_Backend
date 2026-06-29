@@ -4,10 +4,18 @@ const {
   syncAttemptsAnalysisReport,
 } = require("../services/salesforce/rideshareReport.service");
 
+const DEFAULT_SYNC_DAYS_BACK = 29;
+
 let isRunning = false;
 
 async function runAttemptsAnalysisSyncJob(options = {}) {
   const source = options.source || "scheduled";
+  const rawDaysBack = Number(
+    options.daysBack ??
+      process.env.ATTEMPTS_ANALYSIS_SYNC_DAYS_BACK ??
+      DEFAULT_SYNC_DAYS_BACK,
+  );
+  const daysBack = Math.max(0, rawDaysBack || 0);
 
   if (isRunning) {
     logger.info(
@@ -22,18 +30,24 @@ async function runAttemptsAnalysisSyncJob(options = {}) {
   isRunning = true;
 
   try {
-    const today = DateTime.now().setZone("America/Lima").toFormat("yyyy-LL-dd");
+    const today = DateTime.now().setZone("America/Lima").startOf("day");
+    const startDate = today.minus({ days: daysBack }).toFormat("yyyy-LL-dd");
+    const endDate = today.toFormat("yyyy-LL-dd");
 
     logger.info("AttemptsAnalysisSyncJob -> started", {
       source,
-      date: today,
+      startDate,
+      endDate,
+      daysBack,
     });
 
-    const result = await syncAttemptsAnalysisReport({ date: today });
+    const result = await syncAttemptsAnalysisReport({ startDate, endDate });
 
     logger.success("AttemptsAnalysisSyncJob -> completed", {
       source,
-      date: today,
+      startDate,
+      endDate,
+      daysBack,
       total: result.total,
       syncedAt: result.syncedAt,
     });
@@ -42,6 +56,7 @@ async function runAttemptsAnalysisSyncJob(options = {}) {
   } catch (error) {
     logger.error("AttemptsAnalysisSyncJob -> failed", {
       source,
+      daysBack,
       message: error.message,
       stack: error.stack,
     });
