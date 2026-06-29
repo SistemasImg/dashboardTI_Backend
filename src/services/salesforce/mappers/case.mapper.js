@@ -1,3 +1,12 @@
+const { DateTime } = require("luxon");
+
+function formatSalesforceDateTime(value) {
+  if (!value) return null;
+
+  const parsed = DateTime.fromISO(String(value), { setZone: true });
+  return parsed.isValid ? parsed.toFormat("dd/MM/yyyy HH:mm:ss") : value;
+}
+
 function mapMonitoringCase(record) {
   return {
     caseNumber: record.CaseNumber,
@@ -12,7 +21,7 @@ function mapMonitoringCase(record) {
     supplierSegment: record.Supplier_Segment__c,
     substatus: record.Substatus__c,
     reasonForCallback: record.Reason_for_Callback__c,
-    createdDate: record.CreatedDate ? record.CreatedDate.split("T")[0] : null,
+    createdDate: formatSalesforceDateTime(record.CreatedDate),
   };
 }
 
