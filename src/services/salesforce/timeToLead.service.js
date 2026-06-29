@@ -44,6 +44,7 @@ const TIME_RANGE_LABELS = [
   "[60,+)",
 ];
 const SLA_THRESHOLDS_MINUTES = [5, 10, 15];
+const MAX_INCLUDED_RESPONSE_DELAY_MINUTES = 90;
 const LOOKUP_CONCURRENCY = Math.min(
   3,
   Math.max(1, Number(process.env.TIME_TO_LEAD_LOOKUP_CONCURRENCY) || 2),
@@ -90,6 +91,13 @@ async function ensureTimeToLeadSnapshotColumns() {
         allowNull: true,
       },
     );
+  }
+
+  if (!tableDefinition.case_id) {
+    await queryInterface.addColumn("time_to_lead_snapshots", "case_id", {
+      type: DataTypes.STRING(40),
+      allowNull: true,
+    });
   }
 
   if (!tableDefinition.ttl_start_source) {
@@ -205,6 +213,17 @@ function responseDelayToMinutes(responseDelay) {
 
   const [hours, minutes, seconds] = responseDelay.split(":").map(Number);
   return hours * 60 + minutes + seconds / 60;
+}
+
+function hasExceededIncludedResponseDelay(row) {
+  const minutes = Number(row.response_delay_minutes);
+
+  return (
+    row.first_contact_at &&
+    row.response_delay_minutes !== null &&
+    Number.isFinite(minutes) &&
+    minutes > MAX_INCLUDED_RESPONSE_DELAY_MINUTES
+  );
 }
 
 function computeRangeTime(minutes) {
@@ -805,6 +824,7 @@ async function fetchFirstContactForCase({
 
 function getSnapshotBaseUpdateFields() {
   return [
+    "case_id",
     "case_created_at",
     "original_case_created_at",
     "case_created_date",
@@ -852,6 +872,7 @@ function buildSnapshotBaseRow({ item, syncedAt, hasPotentialPhoneReuse }) {
 
   return {
     case_number: item.caseNumber,
+    case_id: item.caseId,
     case_created_at: item.dateReceived.toJSDate(),
     original_case_created_at: item.originalDateReceived?.isValid
       ? item.originalDateReceived.toJSDate()
@@ -1558,6 +1579,7 @@ function mapSnapshotRowToCase(row, nowInLima) {
 
   return {
     caseNumber: row.case_number,
+    caseId: row.case_id,
     fullName: row.full_name,
     phoneNumber: row.phone_number,
     email: row.email,
@@ -1718,6 +1740,14 @@ async function getTimeToLead({ startDate, endDate, businessHoursOnly = true }) {
       );
     }
 
+    const excludedOverResponseDelayRows = eligibleRows.filter(
+      hasExceededIncludedResponseDelay,
+    );
+    const excludedOverResponseDelayLimit = excludedOverResponseDelayRows.length;
+    eligibleRows = eligibleRows.filter(
+      (row) => !hasExceededIncludedResponseDelay(row),
+    );
+
     const nowInLima = DateTime.now().setZone(LIMA_TIMEZONE);
     const snapshotCoverage = buildSnapshotCoverage({
       rows,
@@ -1729,6 +1759,12 @@ async function getTimeToLead({ startDate, endDate, businessHoursOnly = true }) {
     const mappedCases = eligibleRows.map((row) =>
       mapSnapshotRowToCase(row, nowInLima),
     );
+    const excludedOverResponseDelayItems = excludedOverResponseDelayRows
+      .map((row) => mapSnapshotRowToCase(row, nowInLima))
+      .sort(
+        (left, right) =>
+          (right.responseDelayMinutes || 0) - (left.responseDelayMinutes || 0),
+      );
 
     const completedItems = mappedCases.filter(
       (item) => item.firstContact && item.responseDelay !== null,
@@ -1737,6 +1773,7 @@ async function getTimeToLead({ startDate, endDate, businessHoursOnly = true }) {
       .filter((item) => !item.firstContact || item.responseDelay === null)
       .map((item) => ({
         caseNumber: item.caseNumber,
+        caseId: item.caseId,
         fullName: item.fullName,
         phoneNumber: item.phoneNumber,
         email: item.email,
@@ -1816,6 +1853,8 @@ async function getTimeToLead({ startDate, endDate, businessHoursOnly = true }) {
           missingOrInvalidPhone: excludedMissingPhone,
           tcpaHistory: excludedByTcpaHistory,
           outsideBusinessHours: excludedOutsideBusinessHours,
+          overResponseDelayLimit: excludedOverResponseDelayLimit,
+          responseDelayLimitMinutes: MAX_INCLUDED_RESPONSE_DELAY_MINUTES,
           withoutFirstContact: pendingItems.length,
         },
         responseDelay: buildLatencyStats(responseDelayValues),
@@ -1854,6 +1893,11 @@ async function getTimeToLead({ startDate, endDate, businessHoursOnly = true }) {
       pendingFirstContact: {
         total: pendingItems.length,
         data: pendingItems,
+      },
+      excludedOverResponseDelayLimit: {
+        total: excludedOverResponseDelayItems.length,
+        responseDelayLimitMinutes: MAX_INCLUDED_RESPONSE_DELAY_MINUTES,
+        data: excludedOverResponseDelayItems,
       },
       data: completedItems,
     };

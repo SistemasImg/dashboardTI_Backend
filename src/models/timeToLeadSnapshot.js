@@ -9,6 +9,10 @@ const TimeToLeadSnapshot = sequelize.define(
       allowNull: false,
       primaryKey: true,
     },
+    case_id: {
+      type: DataTypes.STRING(40),
+      allowNull: true,
+    },
     case_created_at: {
       type: DataTypes.DATE,
       allowNull: false,
@@ -162,6 +166,10 @@ const TimeToLeadSnapshot = sequelize.define(
       {
         name: "idx_ttl_case_created_date",
         fields: ["case_created_date"],
+      },
+      {
+        name: "idx_ttl_case_id",
+        fields: ["case_id"],
       },
       {
         name: "idx_ttl_start_source",
