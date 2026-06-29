@@ -11,11 +11,14 @@ const {
 } = require("./transcriptionStatusPoll.job");
 const { runVendorSyncJob } = require("./vendorSync.job");
 const { runTimeToLeadSyncJob } = require("./timeToLeadSync.job");
+const { runAttemptsAnalysisSyncJob } = require("./attemptsAnalysisSync.job");
 const isProduction = process.env.NODE_ENV === "production";
 const vendorSyncCronExpression =
   process.env.VENDOR_SYNC_CRON_EXPRESSION || "0 * * * *";
 const timeToLeadCronExpression =
   process.env.TIME_TO_LEAD_SYNC_CRON_EXPRESSION || "*/15 * * * *";
+const attemptsAnalysisCronExpression =
+  process.env.ATTEMPTS_ANALYSIS_SYNC_CRON_EXPRESSION || "*/10 * * * *";
 
 function buildTranscriptionCronExpression() {
   const rawValue = Number(
@@ -125,6 +128,23 @@ logger.info(
   `Time To Lead sync job enabled with cron: ${timeToLeadCronExpression}`,
 );
 
+cron.schedule(attemptsAnalysisCronExpression, async () => {
+  logger.info("Cron triggered: runAttemptsAnalysisSyncJob");
+
+  try {
+    await runAttemptsAnalysisSyncJob();
+    logger.info("Cron runAttemptsAnalysisSyncJob completed");
+  } catch (error) {
+    logger.error("Cron runAttemptsAnalysisSyncJob failed", {
+      message: error.message,
+      stack: error.stack,
+    });
+  }
+});
+logger.info(
+  `Attempts analysis sync job enabled with cron: ${attemptsAnalysisCronExpression}`,
+);
+
 if (isProduction) {
   // Configure cron to run every minute
   cron.schedule("* * * * *", async () => {
@@ -211,6 +231,17 @@ if (hasTranscriptionConfig()) {
     logger.info("Initial Time To Lead sync completed");
   } catch (error) {
     logger.error("Initial Time To Lead sync failed", error);
+  }
+})();
+
+(async () => {
+  logger.info("Initial runAttemptsAnalysisSyncJob on server start");
+
+  try {
+    await runAttemptsAnalysisSyncJob({ source: "startup" });
+    logger.info("Initial Attempts Analysis sync completed");
+  } catch (error) {
+    logger.error("Initial Attempts Analysis sync failed", error);
   }
 })();
 

@@ -51,17 +51,30 @@ function parseVicidialLeadSearch(html, phoneInput) {
     const rowDigits = normalizeDigits(rowText);
     if (!hasMatchingPhoneDigits(rowDigits, phoneDigits)) return;
 
-    const tds = $(row)
+    const rawCells = $(row)
       .find("td")
       .map((__, td) => $(td).text().replaceAll(/\s+/g, " ").trim())
-      .get()
-      .filter(Boolean);
+      .get();
+    const tds = rawCells.filter(Boolean);
+    const headerCells = $(row)
+      .closest("table")
+      .find("tr")
+      .first()
+      .find("th,td")
+      .map((__, cell) => normalizeHeader($(cell).text()))
+      .get();
+    const idxLeadId = getHeaderIndex(headerCells, ["LEAD ID", "LEAD"]);
+    const idxLastAgent = getHeaderIndex(headerCells, ["LAST AGENT"]);
+    const idxLastCall = getHeaderIndex(headerCells, ["LAST CALL"]);
 
     const firstLink = $(row).find("a[href]").first();
     const href = firstLink.attr("href") || null;
 
     const leadId =
-      extractLeadIdFromHref(href) || extractLeadIdFromText(rowText) || null;
+      extractLeadIdFromHref(href) ||
+      valueAt(rawCells, idxLeadId) ||
+      extractLeadIdFromText(rowText) ||
+      null;
 
     const key = `${leadId || "NA"}-${rowText}`;
     if (seen.has(key)) return;
@@ -71,6 +84,10 @@ function parseVicidialLeadSearch(html, phoneInput) {
       leadId,
       phone: phoneDigits || null,
       columns: tds,
+      lastAgent: idxLastAgent >= 0 ? valueAt(rawCells, idxLastAgent) : null,
+      lastCall: idxLastCall >= 0 ? valueAt(rawCells, idxLastCall) : null,
+      hasLastAgentColumn: idxLastAgent >= 0,
+      hasLastCallColumn: idxLastCall >= 0,
       rowText,
       link: href,
     });
@@ -278,10 +295,139 @@ function parseVicidialLeadCallDates(html) {
   return [...new Set(dates)];
 }
 
+function parseVicidialLeadDetailAttempts(html, fallbackLeadId = null) {
+  const $ = cheerio.load(String(html || ""));
+  const attempts = [];
+  const resolvedFallbackLeadId =
+    fallbackLeadId ||
+    extractLeadIdFromText($("body").text().replaceAll(/\s+/g, " ").trim());
+
+  $("table").each((_, table) => {
+    const headerCells = $(table)
+      .find("tr")
+      .first()
+      .find("th,td")
+      .map((__, cell) => normalizeHeader($(cell).text()))
+      .get();
+
+    const idxDateTime = getHeaderIndex(headerCells, [
+      "DATE/TIME",
+      "DATETIME",
+      "DATE TIME",
+      "DATE",
+      "PARK TIME",
+      "GRAB TIME",
+    ]);
+    const idxTsr = getHeaderIndex(headerCells, ["TSR", "USER", "AGENT"]);
+    const idxLead = getHeaderIndex(headerCells, ["LEAD", "LEAD ID"]);
+
+    if (idxDateTime < 0 || idxTsr < 0) return;
+
+    const isCallTable =
+      headerCells.includes("LENGTH") ||
+      headerCells.includes("TALK") ||
+      headerCells.includes("PARK TIME") ||
+      headerCells.includes("GRAB TIME");
+
+    if (!isCallTable) return;
+
+    const idxStatus = getHeaderIndex(headerCells, ["STATUS", "DISPOSITION"]);
+    const idxCampaign = getHeaderIndex(headerCells, ["CAMPAIGN"]);
+    const idxPhone = getHeaderIndex(headerCells, ["PHONE", "PHONE NUMBER"]);
+
+    $(table)
+      .find("tr")
+      .slice(1)
+      .each((__, row) => {
+        const values = $(row)
+          .find("td")
+          .map((___, cell) => $(cell).text().replaceAll(/\s+/g, " ").trim())
+          .get();
+
+        const dateTime = valueAt(values, idxDateTime);
+        const agentName = valueAt(values, idxTsr);
+        const leadId = valueAt(values, idxLead) || resolvedFallbackLeadId;
+
+        if (!dateTime || !agentName || !leadId) return;
+
+        attempts.push({
+          dateTime,
+          agentName,
+          leadId,
+          status: valueAt(values, idxStatus),
+          campaign: valueAt(values, idxCampaign),
+          phone: valueAt(values, idxPhone),
+        });
+      });
+  });
+
+  return attempts;
+}
+
+function parseVicidialLeadFirstAgentLogAttempt(html, fallbackLeadId = null) {
+  const $ = cheerio.load(String(html || ""));
+  const resolvedFallbackLeadId =
+    fallbackLeadId ||
+    extractLeadIdFromText($("body").text().replaceAll(/\s+/g, " ").trim());
+
+  let firstAttempt = null;
+
+  $("table").each((_, table) => {
+    if (firstAttempt) return;
+
+    const headerCells = $(table)
+      .find("tr")
+      .first()
+      .find("th,td")
+      .map((__, cell) => normalizeHeader($(cell).text()))
+      .get();
+
+    const idxDateTime = getHeaderIndex(headerCells, [
+      "DATE/TIME",
+      "DATETIME",
+      "DATE TIME",
+      "DATE",
+    ]);
+    const idxTsr = getHeaderIndex(headerCells, ["TSR"]);
+    const isAgentLogTable =
+      idxDateTime >= 0 &&
+      idxTsr >= 0 &&
+      headerCells.includes("PAUSE") &&
+      headerCells.includes("WAIT") &&
+      headerCells.includes("TALK") &&
+      headerCells.includes("DISPO");
+
+    if (!isAgentLogTable) return;
+
+    const firstRowValues = $(table)
+      .find("tr")
+      .slice(1)
+      .first()
+      .find("td")
+      .map((__, cell) => $(cell).text().replaceAll(/\s+/g, " ").trim())
+      .get();
+
+    const dateTime = valueAt(firstRowValues, idxDateTime);
+    const agentName = valueAt(firstRowValues, idxTsr);
+
+    if (!dateTime && !agentName) return;
+
+    firstAttempt = {
+      dateTime,
+      agentName,
+      leadId: resolvedFallbackLeadId,
+    };
+  });
+
+  return firstAttempt;
+}
+
 module.exports = {
   parseVicidialLeadSearch,
   parseVicidialLeadRecordings,
   parseVicidialLeadCallDates,
+  parseVicidialLeadDetailAttempts,
+  parseVicidialLeadFirstAgentLogAttempt,
   normalizeDigits,
   normalizeComparablePhoneDigits,
 };

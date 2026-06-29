@@ -5,6 +5,8 @@ const {
   parseVicidialLeadSearch,
   parseVicidialLeadRecordings,
   parseVicidialLeadCallDates,
+  parseVicidialLeadDetailAttempts,
+  parseVicidialLeadFirstAgentLogAttempt,
   normalizeComparablePhoneDigits,
 } = require("../../utils/vicidialLeadSearchParser");
 const {
@@ -183,6 +185,20 @@ async function requestVicidialLeadDetail(leadId, options = {}) {
   return response.data;
 }
 
+async function getVicidialLeadDetailAttempts(leadId, options = {}) {
+  if (!leadId) return [];
+
+  const detailHtml = await requestVicidialLeadDetail(leadId, options);
+  return parseVicidialLeadDetailAttempts(detailHtml, String(leadId));
+}
+
+async function getVicidialLeadFirstAgentLogAttempt(leadId, options = {}) {
+  if (!leadId) return null;
+
+  const detailHtml = await requestVicidialLeadDetail(leadId, options);
+  return parseVicidialLeadFirstAgentLogAttempt(detailHtml, String(leadId));
+}
+
 async function resolveRecordingLocation(recording, resolutionStats) {
   if (!recording?.location) {
     return recording;
@@ -318,9 +334,9 @@ async function searchVicidialLeadByPhone(phone, options = {}) {
   // (last_local_call_time) in its row, so callers that only need call datetimes
   // (e.g. Time To Lead) can skip the expensive per-lead detail enrichment.
   if (options.enrichRecords === false) {
-    const searchOnlyRecords = merged.filter((item) =>
-      hasSearchRowDateTime(item),
-    );
+    const searchOnlyRecords = options.keepRecordsWithoutDate
+      ? merged
+      : merged.filter((item) => hasSearchRowDateTime(item));
 
     logger.info(
       `VicidialLeadSearchService → returning ${searchOnlyRecords.length} search-row matches without enrichment for ${phoneDigits}`,
@@ -367,4 +383,6 @@ async function searchVicidialLeadByPhone(phone, options = {}) {
 
 module.exports = {
   searchVicidialLeadByPhone,
+  getVicidialLeadDetailAttempts,
+  getVicidialLeadFirstAgentLogAttempt,
 };

@@ -1,10 +1,17 @@
 const { DateTime } = require("luxon");
 
+const SALESFORCE_DISPLAY_TIMEZONE =
+  process.env.SALESFORCE_TIMEZONE || "America/Los_Angeles";
+
 function formatSalesforceDateTime(value) {
   if (!value) return null;
 
   const parsed = DateTime.fromISO(String(value), { setZone: true });
-  return parsed.isValid ? parsed.toFormat("dd/MM/yyyy HH:mm:ss") : value;
+  return parsed.isValid
+    ? parsed
+        .setZone(SALESFORCE_DISPLAY_TIMEZONE)
+        .toFormat("dd/MM/yyyy HH:mm:ss")
+    : value;
 }
 
 function normalizeOperationalFlowTier(value) {

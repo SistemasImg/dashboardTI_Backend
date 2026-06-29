@@ -89,8 +89,69 @@ async function getDailyOutflowReport(req, res, next) {
   }
 }
 
+async function getAttemptsAnalysisReport(req, res, next) {
+  logger.info("RideshareReportController → getAttemptsAnalysisReport() called");
+
+  try {
+    const result = await rideshareReportService.getAttemptsAnalysisReport({
+      date: req.query.date,
+      startDate: req.query.startDate,
+      endDate: req.query.endDate,
+    });
+
+    logger.success(
+      `RideshareReportController → getAttemptsAnalysisReport() success | total: ${result.total}`,
+    );
+
+    return res.json(result);
+  } catch (error) {
+    logger.error(
+      `RideshareReportController → getAttemptsAnalysisReport() error: ${error.message}`,
+      {
+        stack: error.stack,
+        origin: "controller",
+      },
+    );
+
+    next(error);
+  }
+}
+
+async function syncAttemptsAnalysisReport(req, res, next) {
+  logger.info(
+    "RideshareReportController → syncAttemptsAnalysisReport() called",
+  );
+
+  try {
+    const body = req.body || {};
+    const result = await rideshareReportService.syncAttemptsAnalysisReport({
+      date: body.date ?? req.query.date,
+      startDate: body.startDate ?? req.query.startDate,
+      endDate: body.endDate ?? req.query.endDate,
+    });
+
+    logger.success(
+      `RideshareReportController → syncAttemptsAnalysisReport() success | total: ${result.total}`,
+    );
+
+    return res.json(result);
+  } catch (error) {
+    logger.error(
+      `RideshareReportController → syncAttemptsAnalysisReport() error: ${error.message}`,
+      {
+        stack: error.stack,
+        origin: "controller",
+      },
+    );
+
+    next(error);
+  }
+}
+
 module.exports = {
   getRideshareReport,
   getDailyInflowReport,
   getDailyOutflowReport,
+  getAttemptsAnalysisReport,
+  syncAttemptsAnalysisReport,
 };

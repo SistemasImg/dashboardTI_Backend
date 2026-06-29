@@ -7,6 +7,8 @@ const {
   getRideshareReport,
   getDailyInflowReport,
   getDailyOutflowReport,
+  getAttemptsAnalysisReport,
+  syncAttemptsAnalysisReport,
 } = require("../controllers/salesforce/rideshareReport.controller");
 const {
   postAudienceExport,
@@ -39,6 +41,8 @@ const {
 router.use(authMiddleware);
 
 router.get("/attempts/report", getRideshareReport);
+router.get("/attempts/analysis", getAttemptsAnalysisReport);
+router.post("/attempts/analysis/sync", syncAttemptsAnalysisReport);
 router.get("/attempts/inflow", getDailyInflowReport);
 router.get("/attempts/outflow", getDailyOutflowReport);
 router.get("/time-to-lead", getTimeToLeadController);
