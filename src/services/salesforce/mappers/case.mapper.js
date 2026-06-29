@@ -7,6 +7,24 @@ function formatSalesforceDateTime(value) {
   return parsed.isValid ? parsed.toFormat("dd/MM/yyyy HH:mm:ss") : value;
 }
 
+function normalizeOperationalFlowTier(value) {
+  const normalized = String(value ?? "").trim();
+
+  if (!normalized) {
+    return value ?? null;
+  }
+
+  if (/^T\d+$/i.test(normalized)) {
+    return `T${normalized.slice(1)}`;
+  }
+
+  if (/^\d+$/.test(normalized)) {
+    return `T${normalized}`;
+  }
+
+  return normalized;
+}
+
 function mapMonitoringCase(record) {
   return {
     caseNumber: record.CaseNumber,
@@ -38,7 +56,7 @@ function mapOperationalFlowCase(record, ownerName = null) {
     status: record.Status ?? null,
     substatus: record.Substatus__c ?? null,
     type: record.Type ?? null,
-    tier: record.Tier__c ?? null,
+    tier: normalizeOperationalFlowTier(record.Tier__c),
     supplierSegment: record.Supplier_Segment__c ?? null,
     reasonForCallback: record.Reason_for_Callback__c ?? null,
     createdDate: record.CreatedDate ?? null,
