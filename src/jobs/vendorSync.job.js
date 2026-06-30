@@ -17,20 +17,10 @@ async function runVendorSyncJob(options = {}) {
 
   try {
     const result = await trackVendorSync(SYNC_KEYS.FULL, source, async () => {
-      const salesforceToMysql = await trackVendorSync(
-        SYNC_KEYS.SALESFORCE_TO_MYSQL,
+      const salesforceToMysql = await runSalesforceVendorsToMysqlJob({
         source,
-        syncSalesforceVendorsToMysql,
-      );
-
-      const classification = await trackVendorSync(
-        SYNC_KEYS.CLASSIFICATION,
-        source,
-        () =>
-          syncVendorsAndEvaluateRules({
-            failOnRulesError: false,
-          }),
-      );
+      });
+      const classification = await runVendorCategorySyncJob({ source });
 
       return {
         salesforceToMysql,
@@ -52,7 +42,71 @@ async function runVendorSyncJob(options = {}) {
   }
 }
 
+async function runSalesforceVendorsToMysqlJob(options = {}) {
+  const source =
+    options.source || "scheduled:PATCH /vendor-sync/salesforce/vendors";
+  logger.info(`Starting runSalesforceVendorsToMysqlJob | source: ${source}`);
+
+  try {
+    const result = await trackVendorSync(
+      SYNC_KEYS.SALESFORCE_TO_MYSQL,
+      source,
+      syncSalesforceVendorsToMysql,
+    );
+
+    logger.info("runSalesforceVendorsToMysqlJob completed", result);
+
+    return {
+      ...result,
+      syncStatus: getVendorSyncStatus(),
+    };
+  } catch (error) {
+    logger.error("runSalesforceVendorsToMysqlJob failed", {
+      message: error.message,
+      stack: error.stack,
+    });
+    throw error;
+  }
+}
+
+async function runVendorCategorySyncJob(options = {}) {
+  const source =
+    options.source ||
+    "scheduled:PATCH /vendor-sync/salesforce/vendors-category";
+  logger.info(`Starting runVendorCategorySyncJob | source: ${source}`);
+
+  try {
+    const result = await trackVendorSync(SYNC_KEYS.CLASSIFICATION, source, () =>
+      syncVendorsAndEvaluateRules({
+        failOnRulesError: false,
+        syncSalesforceData: true,
+        syncSalesforceSupplierSegments: true,
+      }),
+    );
+
+    logger.info("runVendorCategorySyncJob completed", result);
+
+    return {
+      ...result,
+      salesforceCategoryUpdate: {
+        enabled: true,
+        field: "Contact.Supplier_segment__c",
+        scope: "supplier segment only",
+      },
+      syncStatus: getVendorSyncStatus(),
+    };
+  } catch (error) {
+    logger.error("runVendorCategorySyncJob failed", {
+      message: error.message,
+      stack: error.stack,
+    });
+    throw error;
+  }
+}
+
 module.exports = {
   runVendorSyncJob,
+  runSalesforceVendorsToMysqlJob,
+  runVendorCategorySyncJob,
   getVendorSyncStatus,
 };

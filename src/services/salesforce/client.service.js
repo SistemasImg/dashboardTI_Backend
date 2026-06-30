@@ -90,6 +90,118 @@ async function runSoqlQueryFull(sf, soql, retries = 2) {
   }
 }
 
+async function runToolingQuery(sf, soql, retries = 2) {
+  try {
+    const response = await withSalesforceReauth(sf, (connection) =>
+      axios.get(
+        `${connection.instanceUrl}/services/data/${salesforceConfig.apiVersion}/tooling/query`,
+        {
+          httpsAgent,
+          timeout: 30000,
+          headers: {
+            Authorization: `Bearer ${connection.accessToken}`,
+          },
+          params: { q: soql },
+        },
+      ),
+    );
+
+    return response.data.records;
+  } catch (error) {
+    if (retries > 0) {
+      console.warn("Retrying Salesforce Tooling query...", retries);
+      return runToolingQuery(sf, soql, retries - 1);
+    }
+    throw error;
+  }
+}
+
+function formatSalesforceError(error, fallbackMessage) {
+  const sfErrors = error?.response?.data;
+  const sfDetail = Array.isArray(sfErrors)
+    ? sfErrors.map((e) => `[${e.errorCode}] ${e.message}`).join(" | ")
+    : String(sfErrors || error.message);
+
+  const enriched = new Error(`${fallbackMessage}: ${sfDetail}`);
+  enriched.status = error?.response?.status || 500;
+  enriched.salesforceErrors = sfErrors || null;
+  return enriched;
+}
+
+async function getSalesforceToolingSObject(sf, objectName, recordId) {
+  const endpoint = `${sf.instanceUrl}/services/data/${salesforceConfig.apiVersion}/tooling/sobjects/${objectName}/${recordId}`;
+
+  try {
+    const response = await withSalesforceReauth(sf, (connection) =>
+      axios.get(endpoint, {
+        httpsAgent,
+        timeout: 30000,
+        headers: {
+          Authorization: `Bearer ${connection.accessToken}`,
+        },
+      }),
+    );
+
+    return response.data;
+  } catch (error) {
+    throw formatSalesforceError(
+      error,
+      `Salesforce Tooling GET ${objectName}/${recordId} failed`,
+    );
+  }
+}
+
+async function createSalesforceToolingSObject(sf, objectName, payload) {
+  const endpoint = `${sf.instanceUrl}/services/data/${salesforceConfig.apiVersion}/tooling/sobjects/${objectName}`;
+
+  try {
+    const response = await withSalesforceReauth(sf, (connection) =>
+      axios.post(endpoint, payload, {
+        httpsAgent,
+        timeout: 30000,
+        headers: {
+          Authorization: `Bearer ${connection.accessToken}`,
+          "Content-Type": "application/json",
+        },
+      }),
+    );
+
+    return response.data;
+  } catch (error) {
+    throw formatSalesforceError(
+      error,
+      `Salesforce Tooling POST ${objectName} failed`,
+    );
+  }
+}
+
+async function patchSalesforceToolingSObject(
+  sf,
+  objectName,
+  recordId,
+  payload,
+) {
+  const endpoint = `${sf.instanceUrl}/services/data/${salesforceConfig.apiVersion}/tooling/sobjects/${objectName}/${recordId}`;
+
+  try {
+    await withSalesforceReauth(sf, (connection) =>
+      axios.patch(endpoint, payload, {
+        httpsAgent,
+        timeout: 30000,
+        headers: {
+          Authorization: `Bearer ${connection.accessToken}`,
+          "Content-Type": "application/json",
+        },
+      }),
+    );
+  } catch (error) {
+    throw formatSalesforceError(
+      error,
+      `Salesforce Tooling PATCH ${objectName}/${recordId} failed`,
+    );
+  }
+}
+
 async function fetchSalesforceQueryPage(sf, url, retries = 2) {
   try {
     const response = await withSalesforceReauth(sf, (connection) =>
@@ -185,6 +297,34 @@ async function createSalesforceSObject(sf, objectName, payload) {
   }
 }
 
+async function deleteSalesforceSObject(sf, objectName, recordId) {
+  const endpoint = `${sf.instanceUrl}/services/data/${salesforceConfig.apiVersion}/sobjects/${objectName}/${recordId}`;
+
+  try {
+    await axios.delete(endpoint, {
+      httpsAgent,
+      timeout: 30000,
+      headers: {
+        Authorization: `Bearer ${sf.accessToken}`,
+      },
+    });
+
+    return { success: true, id: recordId };
+  } catch (error) {
+    const sfErrors = error?.response?.data;
+    const sfDetail = Array.isArray(sfErrors)
+      ? sfErrors.map((e) => `[${e.errorCode}] ${e.message}`).join(" | ")
+      : String(sfErrors || error.message);
+
+    const enriched = new Error(
+      `Salesforce DELETE ${objectName}/${recordId} failed: ${sfDetail}`,
+    );
+    enriched.status = error?.response?.status || 500;
+    enriched.salesforceErrors = sfErrors || null;
+    throw enriched;
+  }
+}
+
 async function resetSalesforceUserPassword(sf, userId) {
   const endpoint = `${sf.instanceUrl}/services/data/${salesforceConfig.apiVersion}/sobjects/User/${userId}/password`;
 
@@ -217,7 +357,12 @@ module.exports = {
   runSoqlQuery,
   runSoqlQueryFull,
   runSoqlQueryAll,
+  runToolingQuery,
   patchSalesforceSObject,
   createSalesforceSObject,
+  deleteSalesforceSObject,
+  getSalesforceToolingSObject,
+  createSalesforceToolingSObject,
+  patchSalesforceToolingSObject,
   resetSalesforceUserPassword,
 };

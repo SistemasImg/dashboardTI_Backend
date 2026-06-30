@@ -39,6 +39,7 @@ const {
   toggleVendorTableStatus,
   updateVendorsTableBulk,
   updateVendorsTableById,
+  hardDeleteVendorTableEntry,
 } = require("../services/vendor/vendors.service");
 const { runVendorSyncJob } = require("../jobs/vendorSync.job");
 
@@ -549,15 +550,16 @@ async function patchSalesforceVendorCategoriesToMysql(req, res, next) {
         syncVendorsAndEvaluateRules({
           failOnRulesError: false,
           syncSalesforceData: true,
-          syncSalesforceSupplierSegments: false,
+          syncSalesforceSupplierSegments: true,
         }),
     );
 
     return res.status(200).json({
       ...result,
       salesforceCategoryUpdate: {
-        enabled: false,
-        reason: "Salesforce category push is temporarily disabled",
+        enabled: true,
+        field: "Contact.Supplier_segment__c",
+        scope: "supplier segment only",
       },
       syncStatus: getVendorSyncStatus(),
     });
@@ -659,6 +661,25 @@ async function patchVendorsTableBulk(req, res, next) {
   }
 }
 
+async function hardDeleteVendorTable(req, res, next) {
+  logger.info("VendorController → hardDeleteVendorTable() called");
+
+  try {
+    const vendorId = Number(req.params.vendorId);
+    const result = await hardDeleteVendorTableEntry(vendorId);
+    return res.status(200).json(result);
+  } catch (error) {
+    logger.error(
+      `VendorController → hardDeleteVendorTable() error: ${error.message}`,
+      {
+        stack: error.stack,
+        origin: "controller",
+      },
+    );
+    next(error);
+  }
+}
+
 module.exports = {
   syncVendors,
   getVendorSyncStatusSnapshot,
@@ -688,4 +709,5 @@ module.exports = {
   patchVendorTableStatus,
   patchVendorsTableBulk,
   patchVendorTableById,
+  hardDeleteVendorTable,
 };

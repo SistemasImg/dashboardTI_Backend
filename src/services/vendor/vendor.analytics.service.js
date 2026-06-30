@@ -90,6 +90,13 @@ function resolveCurrentCategory(profile) {
 }
 
 function isAcceptedCaseSnapshot(row) {
+  return (
+    normalizeText(row?.case_status) === "closed" &&
+    normalizeText(row?.sub_status) === "accepted"
+  );
+}
+
+function isOutflowCaseSnapshot(row) {
   return normalizeText(row?.sub_status) === "accepted";
 }
 
@@ -426,9 +433,11 @@ function buildVendorMetricsFromSnapshots(snapshots, typeFilter) {
       typeFilter.fromDate,
       typeFilter.toDate,
     );
-    const countsAsAccepted = countsAsInflow && isAcceptedCaseSnapshot(row);
+    const countsAsAccepted =
+      isAcceptedCaseSnapshot(row) &&
+      isDateInRange(row.signed_date, typeFilter.fromDate, typeFilter.toDate);
     const countsAsOutflow =
-      countsAsAccepted &&
+      isOutflowCaseSnapshot(row) &&
       isDateInRange(row.sent_date_2, typeFilter.fromDate, typeFilter.toDate);
 
     if (countsAsInflow) entry.inflow += 1;
@@ -574,6 +583,11 @@ async function loadAnalyticsDataset(rawFilters = {}) {
               },
             },
             {
+              signed_date: {
+                [Op.between]: [filters.fromDate, filters.toDate],
+              },
+            },
+            {
               sent_date_2: {
                 [Op.between]: [filters.fromDate, filters.toDate],
               },
@@ -584,8 +598,10 @@ async function loadAnalyticsDataset(rawFilters = {}) {
           "vendor_id",
           "product_id",
           "case_created_at",
+          "signed_date",
           "sent_date_2",
           "sub_status",
+          "case_status",
         ],
         include: [
           {
@@ -767,40 +783,60 @@ function buildTrendsResponse(dataset) {
   dataset.snapshots.forEach((row) => {
     const typeName = getSnapshotTypeName(row);
     if (!typeFilterAllowsCase(dataset.typeFilter, typeName)) return;
+
+    const ensureBucket = (bucket) => {
+      if (!bucket) return null;
+      if (!inflowByBucket.has(bucket)) {
+        inflowByBucket.set(bucket, { total: 0, accepted: 0, outflow: 0 });
+      }
+      return inflowByBucket.get(bucket);
+    };
+
     if (
-      !isDateInRange(
+      isDateInRange(
         row.case_created_at,
         dataset.typeFilter.fromDate,
         dataset.typeFilter.toDate,
       )
     ) {
-      return;
+      const bucket =
+        granularity === "day"
+          ? toDateOnlyIso(row.case_created_at)
+          : getWeekStartIso(row.case_created_at);
+      const entry = ensureBucket(bucket);
+      if (entry) entry.total += 1;
     }
 
-    const bucket =
-      granularity === "day"
-        ? toDateOnlyIso(row.case_created_at)
-        : getWeekStartIso(row.case_created_at);
-
-    if (!bucket) return;
-
-    if (!inflowByBucket.has(bucket)) {
-      inflowByBucket.set(bucket, { total: 0, accepted: 0, outflow: 0 });
+    if (
+      isAcceptedCaseSnapshot(row) &&
+      isDateInRange(
+        row.signed_date,
+        dataset.typeFilter.fromDate,
+        dataset.typeFilter.toDate,
+      )
+    ) {
+      const bucket =
+        granularity === "day"
+          ? toDateOnlyIso(row.signed_date)
+          : getWeekStartIso(row.signed_date);
+      const entry = ensureBucket(bucket);
+      if (entry) entry.accepted += 1;
     }
 
-    const entry = inflowByBucket.get(bucket);
-    entry.total += 1;
-    if (isAcceptedCaseSnapshot(row)) {
-      entry.accepted += 1;
-      if (
-        isDateInRange(
-          row.sent_date_2,
-          dataset.typeFilter.fromDate,
-          dataset.typeFilter.toDate,
-        )
-      ) {
-        entry.outflow += 1;
-      }
+    if (
+      isOutflowCaseSnapshot(row) &&
+      isDateInRange(
+        row.sent_date_2,
+        dataset.typeFilter.fromDate,
+        dataset.typeFilter.toDate,
+      )
+    ) {
+      const bucket =
+        granularity === "day"
+          ? toDateOnlyIso(row.sent_date_2)
+          : getWeekStartIso(row.sent_date_2);
+      const entry = ensureBucket(bucket);
+      if (entry) entry.outflow += 1;
     }
   });
 
@@ -988,9 +1024,15 @@ function buildTypesResponse(dataset) {
       dataset.typeFilter.fromDate,
       dataset.typeFilter.toDate,
     );
-    const countsAsAccepted = countsAsInflow && isAcceptedCaseSnapshot(row);
+    const countsAsAccepted =
+      isAcceptedCaseSnapshot(row) &&
+      isDateInRange(
+        row.signed_date,
+        dataset.typeFilter.fromDate,
+        dataset.typeFilter.toDate,
+      );
     const countsAsOutflow =
-      countsAsAccepted &&
+      isOutflowCaseSnapshot(row) &&
       isDateInRange(
         row.sent_date_2,
         dataset.typeFilter.fromDate,

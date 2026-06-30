@@ -9,12 +9,17 @@ const {
 const {
   runTranscriptionStatusPollJob,
 } = require("./transcriptionStatusPoll.job");
-const { runVendorSyncJob } = require("./vendorSync.job");
+const {
+  runSalesforceVendorsToMysqlJob,
+  runVendorCategorySyncJob,
+} = require("./vendorSync.job");
 const { runTimeToLeadSyncJob } = require("./timeToLeadSync.job");
 const { runAttemptsAnalysisSyncJob } = require("./attemptsAnalysisSync.job");
 const isProduction = process.env.NODE_ENV === "production";
-const vendorSyncCronExpression =
-  process.env.VENDOR_SYNC_CRON_EXPRESSION || "*/30 * * * *";
+const vendorSalesforceVendorsCronExpression =
+  process.env.VENDOR_SALESFORCE_VENDORS_SYNC_CRON_EXPRESSION || "0 * * * *";
+const vendorCategoriesCronExpression =
+  process.env.VENDOR_CATEGORIES_SYNC_CRON_EXPRESSION || "10 * * * *";
 const timeToLeadCronExpression =
   process.env.TIME_TO_LEAD_SYNC_CRON_EXPRESSION || "*/15 * * * *";
 const attemptsAnalysisCronExpression =
@@ -93,22 +98,40 @@ cron.schedule("*/2 * * * *", async () => {
   }
 });
 
-// Configure cron for vendor sync and category monitoring
-cron.schedule(vendorSyncCronExpression, async () => {
-  logger.info("Cron triggered: runVendorSyncJob");
+// Configure cron for Salesforce vendors sync, equivalent to PATCH /vendor-sync/salesforce/vendors
+cron.schedule(vendorSalesforceVendorsCronExpression, async () => {
+  logger.info("Cron triggered: runSalesforceVendorsToMysqlJob");
 
   try {
-    await runVendorSyncJob();
-    logger.info("Cron runVendorSyncJob completed");
+    await runSalesforceVendorsToMysqlJob();
+    logger.info("Cron runSalesforceVendorsToMysqlJob completed");
   } catch (error) {
-    logger.error("Cron runVendorSyncJob failed", {
+    logger.error("Cron runSalesforceVendorsToMysqlJob failed", {
       message: error.message,
       stack: error.stack,
     });
   }
 });
 logger.info(
-  `Vendor monitoring job enabled with cron: ${vendorSyncCronExpression}`,
+  `Vendor Salesforce sync job enabled with cron: ${vendorSalesforceVendorsCronExpression}`,
+);
+
+// Configure cron for vendor categories sync, equivalent to PATCH /vendor-sync/salesforce/vendors-category
+cron.schedule(vendorCategoriesCronExpression, async () => {
+  logger.info("Cron triggered: runVendorCategorySyncJob");
+
+  try {
+    await runVendorCategorySyncJob();
+    logger.info("Cron runVendorCategorySyncJob completed");
+  } catch (error) {
+    logger.error("Cron runVendorCategorySyncJob failed", {
+      message: error.message,
+      stack: error.stack,
+    });
+  }
+});
+logger.info(
+  `Vendor categories sync job enabled with cron: ${vendorCategoriesCronExpression}`,
 );
 
 cron.schedule(timeToLeadCronExpression, async () => {
@@ -213,13 +236,24 @@ if (hasTranscriptionConfig()) {
 })();
 
 (async () => {
-  logger.info("Initial runVendorSyncJob on server start");
+  logger.info("Initial runSalesforceVendorsToMysqlJob on server start");
 
   try {
-    await runVendorSyncJob();
-    logger.info("Initial vendor sync completed");
+    await runSalesforceVendorsToMysqlJob({ source: "startup" });
+    logger.info("Initial Salesforce vendors sync completed");
   } catch (error) {
-    logger.error("Initial vendor sync failed", error);
+    logger.error("Initial Salesforce vendors sync failed", error);
+  }
+})();
+
+(async () => {
+  logger.info("Initial runVendorCategorySyncJob on server start");
+
+  try {
+    await runVendorCategorySyncJob({ source: "startup" });
+    logger.info("Initial vendor categories sync completed");
+  } catch (error) {
+    logger.error("Initial vendor categories sync failed", error);
   }
 })();
 

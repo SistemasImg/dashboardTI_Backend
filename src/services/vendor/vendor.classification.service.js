@@ -457,7 +457,14 @@ function resolveCaseSubStatus(row) {
   return row?.Substatus__c || row?.Sub_Status__c || row?.Sub_Status || null;
 }
 
+function resolveCaseStatus(row) {
+  return row?.case_status || row?.Status || row?.status || null;
+}
+
 function isAcceptedCaseSnapshot(snapshot) {
+  const status = String(resolveCaseStatus(snapshot) || "")
+    .trim()
+    .toLowerCase();
   const subStatus = String(
     snapshot?.sub_status ||
       snapshot?.Substatus__c ||
@@ -467,7 +474,7 @@ function isAcceptedCaseSnapshot(snapshot) {
     .trim()
     .toLowerCase();
 
-  return subStatus === ACCEPTED_CASE_SUBSTATUS;
+  return status === "closed" && subStatus === ACCEPTED_CASE_SUBSTATUS;
 }
 
 function isValidatedOutflowSnapshot(snapshot) {
@@ -602,6 +609,7 @@ async function syncVendorCaseSnapshots(
       sent_date_2: row.Sent_Date2__c || null,
       outflow_validated: Boolean(row.outflowValidated),
       sub_status: resolveCaseSubStatus(row),
+      case_status: resolveCaseStatus(row),
     };
 
     const existing = await VendorCaseSnapshot.findOne({
@@ -942,6 +950,13 @@ async function ensureVendorClassificationTables() {
     );
   }
 
+  if (!caseSnapshotsDefinition.case_status) {
+    await queryInterface.addColumn("vendor_case_snapshots", "case_status", {
+      type: DataTypes.STRING(120),
+      allowNull: true,
+    });
+  }
+
   const topRewardsDefinition =
     await queryInterface.describeTable("vendor_top_rewards");
 
@@ -1235,6 +1250,7 @@ async function syncVendorSupplierSegmentsFromProfiles(options = {}) {
     salesforceSkipped: 0,
     failures: [],
   };
+  const changedRows = [];
 
   for (const item of rowsToSync) {
     if (item.currentLocalSupplierSegment !== item.supplierSegment) {
@@ -1243,6 +1259,7 @@ async function syncVendorSupplierSegmentsFromProfiles(options = {}) {
         { where: { id: item.vendorId } },
       );
       result.localUpdated += 1;
+      changedRows.push(item);
     }
   }
 
@@ -1257,12 +1274,23 @@ async function syncVendorSupplierSegmentsFromProfiles(options = {}) {
     return result;
   }
 
+  if (!changedRows.length) {
+    result.skipped = rowsToSync.length;
+    result.salesforceSkipped = rowsToSync.length;
+
+    logger.info(
+      `VendorClassificationService → syncVendorSupplierSegmentsFromProfiles() no local supplier segment changes | attempted: ${result.attempted} | salesforceSkipped: ${result.salesforceSkipped}`,
+    );
+
+    return result;
+  }
+
   let salesforceContactMap;
   let sf;
 
   try {
     const contactResult = await fetchSalesforceContactSegmentMap(
-      rowsToSync.map((item) => item.salesforceUserId),
+      changedRows.map((item) => item.salesforceUserId),
     );
     salesforceContactMap = contactResult.contactByUserId;
     sf = contactResult.sf;
@@ -1274,8 +1302,10 @@ async function syncVendorSupplierSegmentsFromProfiles(options = {}) {
 
     return {
       ...result,
-      failed: rowsToSync.length,
-      failures: rowsToSync.map((item) => ({
+      failed: changedRows.length,
+      skipped: rowsToSync.length - changedRows.length,
+      salesforceSkipped: rowsToSync.length - changedRows.length,
+      failures: changedRows.map((item) => ({
         vendorId: item.vendorId,
         profileId: item.profileId,
         salesforceUserId: item.salesforceUserId,
@@ -1284,10 +1314,14 @@ async function syncVendorSupplierSegmentsFromProfiles(options = {}) {
     };
   }
 
-  for (const item of rowsToSync) {
+  result.salesforceSkipped = rowsToSync.length - changedRows.length;
+  result.skipped = rowsToSync.length - changedRows.length;
+
+  for (const item of changedRows) {
     const contactInfo = salesforceContactMap.get(item.salesforceUserId);
     if (!contactInfo?.contactId) {
       result.skipped += 1;
+      result.salesforceSkipped += 1;
       result.failures.push({
         vendorId: item.vendorId,
         profileId: item.profileId,
@@ -1299,6 +1333,7 @@ async function syncVendorSupplierSegmentsFromProfiles(options = {}) {
 
     if (String(contactInfo.supplierSegment || "") === item.supplierSegment) {
       result.skipped += 1;
+      result.salesforceSkipped += 1;
       continue;
     }
 
@@ -1510,6 +1545,10 @@ function getSnapshotCreatedAt(snapshot) {
   return snapshot?.case_created_at || snapshot?.CreatedDate || null;
 }
 
+function getSnapshotSignedAt(snapshot) {
+  return snapshot?.signed_date || snapshot?.Signed_Date__c || null;
+}
+
 function getSnapshotSentAt(snapshot) {
   return snapshot?.sent_date_2 || snapshot?.Sent_Date2__c || null;
 }
@@ -1522,6 +1561,16 @@ function isSnapshotInsideCreatedDateWindow(snapshot, windowStart) {
   if (Number.isNaN(createdDate.getTime())) return false;
 
   return createdDate >= windowStart;
+}
+
+function isSnapshotInsideSignedDateWindow(snapshot, windowStart) {
+  const signedAt = getSnapshotSignedAt(snapshot);
+  if (!signedAt) return false;
+
+  const signedDate = new Date(signedAt);
+  if (Number.isNaN(signedDate.getTime())) return false;
+
+  return signedDate >= windowStart;
 }
 
 function isSnapshotInsideSentDateWindow(snapshot, windowStart) {
@@ -1547,20 +1596,43 @@ function buildSnapshotMetricsFromSnapshots(snapshots = [], options = {}) {
   const inflowSnapshots = scopedSnapshots.filter((snapshot) =>
     isSnapshotInsideCreatedDateWindow(snapshot, windowStart),
   );
-  const acceptedSnapshots = inflowSnapshots.filter((snapshot) =>
-    isAcceptedCaseSnapshot(snapshot),
+  const acceptedSnapshots = scopedSnapshots.filter(
+    (snapshot) =>
+      isAcceptedCaseSnapshot(snapshot) &&
+      isSnapshotInsideSignedDateWindow(snapshot, windowStart),
   );
-  const outflowSnapshots = acceptedSnapshots.filter(
+  const outflowSnapshots = scopedSnapshots.filter(
     (snapshot) =>
       isOutflowCaseSnapshot(snapshot) &&
+      normalizeTextKey(
+        snapshot?.sub_status ||
+          snapshot?.Substatus__c ||
+          snapshot?.Sub_Status__c,
+      ) === ACCEPTED_CASE_SUBSTATUS &&
       isSnapshotInsideSentDateWindow(snapshot, windowStart),
   );
   const byType = {};
   const byTypeMetrics = {};
 
-  for (const snapshot of inflowSnapshots) {
+  for (const snapshot of scopedSnapshots) {
     const typeName = getSnapshotProductName(snapshot);
-    byType[typeName] = (byType[typeName] || 0) + 1;
+    const countsAsInflow = isSnapshotInsideCreatedDateWindow(
+      snapshot,
+      windowStart,
+    );
+    const countsAsAccepted =
+      isAcceptedCaseSnapshot(snapshot) &&
+      isSnapshotInsideSignedDateWindow(snapshot, windowStart);
+    const countsAsOutflow =
+      isOutflowCaseSnapshot(snapshot) &&
+      normalizeTextKey(
+        snapshot?.sub_status ||
+          snapshot?.Substatus__c ||
+          snapshot?.Sub_Status__c,
+      ) === ACCEPTED_CASE_SUBSTATUS &&
+      isSnapshotInsideSentDateWindow(snapshot, windowStart);
+
+    if (countsAsInflow) byType[typeName] = (byType[typeName] || 0) + 1;
 
     if (!byTypeMetrics[typeName]) {
       byTypeMetrics[typeName] = {
@@ -1570,15 +1642,9 @@ function buildSnapshotMetricsFromSnapshots(snapshots = [], options = {}) {
       };
     }
 
-    byTypeMetrics[typeName].inflow += 1;
-    if (isAcceptedCaseSnapshot(snapshot)) byTypeMetrics[typeName].accepted += 1;
-    if (
-      isAcceptedCaseSnapshot(snapshot) &&
-      isOutflowCaseSnapshot(snapshot) &&
-      isSnapshotInsideSentDateWindow(snapshot, windowStart)
-    ) {
-      byTypeMetrics[typeName].outflow += 1;
-    }
+    if (countsAsInflow) byTypeMetrics[typeName].inflow += 1;
+    if (countsAsAccepted) byTypeMetrics[typeName].accepted += 1;
+    if (countsAsOutflow) byTypeMetrics[typeName].outflow += 1;
   }
 
   const total = inflowSnapshots.length;
@@ -2360,6 +2426,11 @@ function buildCaseSnapshotInclude() {
           },
         },
         {
+          signed_date: {
+            [Op.gte]: getLast90DaysStart(),
+          },
+        },
+        {
           sent_date_2: {
             [Op.gte]: getLast90DaysStart(),
           },
@@ -2375,6 +2446,7 @@ function buildCaseSnapshotInclude() {
       "sent_date_2",
       "outflow_validated",
       "sub_status",
+      "case_status",
     ],
     include: [
       {
@@ -2429,6 +2501,25 @@ function getDefaultGoalOverview() {
       windowWeeks: GOAL_COMPLETED_EVALUATION_WEEKS,
     }),
   };
+}
+
+function getActiveAssignmentProductIds(assignments = []) {
+  return new Set(
+    (assignments || [])
+      .filter((assignment) => assignment?.status === "active")
+      .map((assignment) =>
+        Number(assignment.product_id || assignment.productId),
+      )
+      .filter((productId) => productId > 0),
+  );
+}
+
+function filterGoalsByActiveAssignments(
+  rows = [],
+  activeProductIds = new Set(),
+) {
+  if (!activeProductIds.size) return [];
+  return rows.filter((row) => activeProductIds.has(Number(row.product_id)));
 }
 
 function buildGoalCompensationFromRows(
@@ -3037,7 +3128,19 @@ async function listVendors(filters = {}) {
         ],
       })
     : [];
-  const goalOverviewMap = buildGoalOverviewMap(weeklyGoalRows);
+  const activeProductIdsByVendorId = new Map(
+    filteredRows.map((row) => [
+      Number(row.id),
+      getActiveAssignmentProductIds(row.tortAssignments || []),
+    ]),
+  );
+  const activeWeeklyGoalRows = weeklyGoalRows.filter((row) => {
+    const activeProductIds = activeProductIdsByVendorId.get(
+      Number(row.vendor_id),
+    );
+    return activeProductIds?.has(Number(row.product_id));
+  });
+  const goalOverviewMap = buildGoalOverviewMap(activeWeeklyGoalRows);
 
   const items = filteredRows.map((row) => {
     const metricsOverride = buildMetricsOverrideFromLiveSnapshots(
@@ -3206,6 +3309,11 @@ async function getVendorInsightsById(vendorId) {
               },
             },
             {
+              signed_date: {
+                [Op.gte]: getLast90DaysStart(),
+              },
+            },
+            {
               sent_date_2: {
                 [Op.gte]: getLast90DaysStart(),
               },
@@ -3222,6 +3330,7 @@ async function getVendorInsightsById(vendorId) {
           "sent_date_2",
           "outflow_validated",
           "sub_status",
+          "case_status",
         ],
         include: [
           {
@@ -3307,12 +3416,16 @@ async function getVendorInsightsById(vendorId) {
   const caseEntriesByTypeLast90Days = buildCaseEntriesByTypeMap(caseRows, {
     assignments: row.tortAssignments || [],
   });
+  const activeWeeklyGoals = filterGoalsByActiveAssignments(
+    row.weeklyGoals || [],
+    getActiveAssignmentProductIds(row.tortAssignments || []),
+  );
   const goalOverview =
-    buildGoalOverviewMap(row.weeklyGoals || []).get(Number(vendorId)) ||
+    buildGoalOverviewMap(activeWeeklyGoals).get(Number(vendorId)) ||
     getDefaultGoalOverview();
 
   return buildVendorInsights(vendor, caseEntriesByTypeLast90Days, {
-    weeklyGoals: row.weeklyGoals || [],
+    weeklyGoals: activeWeeklyGoals,
     topReward: row.topReward || null,
     categoryLogs: row.categoryLogs || [],
     goalStats: goalOverview.summary,

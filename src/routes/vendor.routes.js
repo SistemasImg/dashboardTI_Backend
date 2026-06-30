@@ -16,6 +16,7 @@ const {
   patchVendorTableStatus,
   patchVendorsTableBulk,
   patchVendorTableById,
+  hardDeleteVendorTable,
 } = require("../controllers/vendor.controller");
 
 router.use(authMiddleware);
@@ -35,6 +36,7 @@ router.get("/table", getVendorsTable);
 router.get("/table/countries", getVendorsCountries);
 router.get("/table/:vendorId/cases", getVendorSalesforceCases);
 router.post("/table", validate(vendorTableCreateSchema), createVendorTable);
+router.delete("/table/:vendorId/hard", hardDeleteVendorTable);
 router.patch(
   "/table/:vendorId/status",
   validate(vendorTableStatusSchema),
@@ -55,6 +57,7 @@ router.patch(
 router.get("/:vendorId", getVendorTable);
 router.get("/:vendorId/cases", getVendorSalesforceCases);
 router.post("/:vendorId/reset-password", resetVendorPassword);
+router.delete("/:vendorId/hard", hardDeleteVendorTable);
 router.patch(
   "/:vendorId/status",
   validate(vendorTableStatusSchema),

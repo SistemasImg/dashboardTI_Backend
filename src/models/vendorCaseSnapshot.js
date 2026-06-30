@@ -47,6 +47,10 @@ const VendorCaseSnapshot = sequelize.define(
       type: DataTypes.STRING(120),
       allowNull: true,
     },
+    case_status: {
+      type: DataTypes.STRING(120),
+      allowNull: true,
+    },
   },
   {
     tableName: "vendor_case_snapshots",

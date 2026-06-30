@@ -115,11 +115,14 @@ function getProfileDisplayInfo(profile) {
 }
 
 function isAcceptedCaseSnapshot(snapshot) {
-  return (
-    String(snapshot?.sub_status || "")
-      .trim()
-      .toLowerCase() === "accepted"
-  );
+  const status = String(snapshot?.case_status || snapshot?.Status || "")
+    .trim()
+    .toLowerCase();
+  const substatus = String(snapshot?.sub_status || snapshot?.Substatus__c || "")
+    .trim()
+    .toLowerCase();
+
+  return status === "closed" && substatus === "accepted";
 }
 
 // =============================================
@@ -169,6 +172,10 @@ function getSnapshotCreatedDate(snapshot) {
   return snapshot?.case_created_at || snapshot?.CreatedDate || null;
 }
 
+function getSnapshotSignedDate(snapshot) {
+  return snapshot?.signed_date || snapshot?.Signed_Date__c || null;
+}
+
 function isValidatedOutflowSnapshot(snapshot) {
   return Boolean(
     getSnapshotOutflowDate(snapshot) && snapshot?.outflow_validated,
@@ -176,7 +183,11 @@ function isValidatedOutflowSnapshot(snapshot) {
 }
 
 function isOutflowCaseSnapshot(snapshot) {
-  return Boolean(getSnapshotOutflowDate(snapshot));
+  const substatus = String(snapshot?.sub_status || snapshot?.Substatus__c || "")
+    .trim()
+    .toLowerCase();
+
+  return Boolean(getSnapshotOutflowDate(snapshot)) && substatus === "accepted";
 }
 
 // =============================================
@@ -685,10 +696,12 @@ function computeTopEligibility(
     const d = new Date(createdDate);
     return d >= cutoff;
   });
-  const recentAccepted = recentInflowSnapshots.filter((s) =>
-    isAcceptedCaseSnapshot(s),
-  );
-  const recentOutflow = recentAccepted.filter((s) => {
+  const recentAccepted = scopedSnapshots.filter((s) => {
+    if (!isAcceptedCaseSnapshot(s)) return false;
+    const signedDate = new Date(getSnapshotSignedDate(s));
+    return !Number.isNaN(signedDate.getTime()) && signedDate >= cutoff;
+  });
+  const recentOutflow = scopedSnapshots.filter((s) => {
     if (!isOutflowCaseSnapshot(s)) return false;
     const outflowDate = new Date(getSnapshotOutflowDate(s));
     return !Number.isNaN(outflowDate.getTime()) && outflowDate >= cutoff;
@@ -1186,6 +1199,38 @@ function emitMonitoringAlerts(
 // =============================================
 
 async function upsertWeeklyGoals(evaluation, transaction) {
+  const weekStarts = Array.from(
+    new Set(
+      (evaluation.weeklyResults || []).length
+        ? (evaluation.weeklyResults || []).map((item) => item.week.startStr)
+        : Array.from(
+            { length: GOAL_RULE_LOOKBACK_WEEKS },
+            (_item, index) => getWeekBoundaries(index).startStr,
+          ),
+    ),
+  );
+  const activeProductIds = Array.from(
+    new Set(
+      (evaluation.weeklyResults || [])
+        .flatMap((weekResult) => weekResult.goals || [])
+        .map((goal) => Number(goal.productId))
+        .filter((productId) => productId > 0),
+    ),
+  );
+
+  if (weekStarts.length) {
+    await VendorWeeklyGoal.destroy({
+      where: {
+        vendor_id: evaluation.profileId,
+        week_start: { [Op.in]: weekStarts },
+        ...(activeProductIds.length
+          ? { product_id: { [Op.notIn]: activeProductIds } }
+          : {}),
+      },
+      transaction,
+    });
+  }
+
   for (const weekResult of evaluation.weeklyResults) {
     for (const goal of weekResult.goals) {
       await VendorWeeklyGoal.upsert(
@@ -1294,21 +1339,31 @@ async function ensureVendorTopRewardColumns() {
   }
 }
 
-async function ensureVendorCaseSnapshotOutflowValidatedColumn() {
+async function ensureVendorCaseSnapshotPerformanceColumns() {
   await VendorCaseSnapshot.sync();
 
-  const tableDefinition = await sequelize
-    .getQueryInterface()
-    .describeTable("vendor_case_snapshots");
+  const queryInterface = sequelize.getQueryInterface();
+  const tableDefinition = await queryInterface.describeTable(
+    "vendor_case_snapshots",
+  );
 
   if (!tableDefinition.outflow_validated) {
-    await sequelize
-      .getQueryInterface()
-      .addColumn("vendor_case_snapshots", "outflow_validated", {
+    await queryInterface.addColumn(
+      "vendor_case_snapshots",
+      "outflow_validated",
+      {
         type: DataTypes.BOOLEAN,
         allowNull: false,
         defaultValue: false,
-      });
+      },
+    );
+  }
+
+  if (!tableDefinition.case_status) {
+    await queryInterface.addColumn("vendor_case_snapshots", "case_status", {
+      type: DataTypes.STRING(120),
+      allowNull: true,
+    });
   }
 }
 
@@ -1316,7 +1371,7 @@ async function evaluateCategoryRules() {
   logger.info("VendorCategoryRules → evaluateCategoryRules() started");
 
   await ensureVendorTopRewardColumns();
-  await ensureVendorCaseSnapshotOutflowValidatedColumn();
+  await ensureVendorCaseSnapshotPerformanceColumns();
 
   const profiles = await VendorProfile.findAll({
     include: [
@@ -1350,6 +1405,7 @@ async function evaluateCategoryRules() {
           "sent_date_2",
           "outflow_validated",
           "sub_status",
+          "case_status",
         ],
         include: [
           {

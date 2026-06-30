@@ -4,14 +4,48 @@ const { Op, DataTypes } = require("sequelize");
 const { authenticateSalesforce } = require("../salesforce/auth.service");
 const {
   runSoqlQuery,
+  runToolingQuery,
   patchSalesforceSObject,
   createSalesforceSObject,
+  deleteSalesforceSObject,
+  getSalesforceToolingSObject,
+  createSalesforceToolingSObject,
+  patchSalesforceToolingSObject,
 } = require("../salesforce/client.service");
 const {
   buildDashboardVendorsQuery,
 } = require("../salesforce/queries/user.query");
 const { mapDashboardVendor } = require("../salesforce/mappers/users.mapper");
-const { Vendor, Product, VendorCountry } = require("../../models");
+const {
+  Vendor,
+  Product,
+  VendorCountry,
+  VendorProfile,
+  VendorTortAssignment,
+  VendorCaseSnapshot,
+  VendorWeeklyGoal,
+  VendorCategoryLog,
+  VendorTopReward,
+} = require("../../models");
+
+const SALESFORCE_DEFAULTS = {
+  accountType: "Supplier",
+  supplierSegment: "New Vendor",
+  qualitySegment: "Average",
+  contactTitle: "Provider",
+  imgPartnerAccountId: "0018Y000031YBucQAG",
+  imgPartnerAccountName: "IMG Partner account",
+  partnerCommunityLicenseName: "Partner Community",
+  permissionSetLabel: "Proveedor Users",
+  flowLabelsBySource: {
+    "Host & Post": "Assign Origin to a New Lead Follow Up sent by Host & Post",
+    "Buffer Calls":
+      "Assign Origin to a New Lead Follow Up sent by Buffer Calls",
+    Campaign_p: "Assign Origin to a New Lead Follow Up sent by Campaign_p",
+    supplier: "Assign Origin to a New Lead Follow Up sent by supplier",
+    Transfer: "Assign Origin to a New Lead Follow Up sent by Transfer",
+  },
+};
 
 function toPublicVendor(row) {
   const communicationChannels = parseCommunicationChannels(
@@ -456,6 +490,404 @@ function escapeSoqlString(value) {
     .replace(/'/g, "\\'");
 }
 
+function toSalesforceDateOnly(value = new Date()) {
+  return new Date(value).toISOString().split("T")[0];
+}
+
+function normalizeSalesforceNamePart(value) {
+  const text = String(value || "").trim();
+  return text || null;
+}
+
+function buildContactNameParts(payload = {}) {
+  const split = splitContactName(payload.contactName || payload.name);
+  const firstName =
+    normalizeSalesforceNamePart(payload.firstName) || split.firstName;
+  const lastName =
+    normalizeSalesforceNamePart(payload.lastName) || split.lastName;
+
+  if (!lastName) {
+    const error = new Error(
+      "lastName or contactName is required for Salesforce Contact",
+    );
+    error.status = 400;
+    throw error;
+  }
+
+  return {
+    salutation: normalizeSalesforceNamePart(payload.salutation),
+    firstName,
+    middleName: normalizeSalesforceNamePart(payload.middleName),
+    lastName,
+    suffix: normalizeSalesforceNamePart(payload.suffix),
+  };
+}
+
+function buildSalesforceUserAlias(contactName, email) {
+  const source = String(contactName || email || "vendor")
+    .replace(/[^a-zA-Z0-9]/g, "")
+    .toLowerCase();
+  return (source || "vendor").slice(0, 8);
+}
+
+function buildSalesforceCommunityNickname(contactName, email) {
+  const source = String(contactName || email || "vendor")
+    .replace(/[^a-zA-Z0-9]/g, "")
+    .toLowerCase()
+    .slice(0, 30);
+  return `${source || "vendor"}${Date.now().toString(36).slice(-6)}`;
+}
+
+async function assertNoLocalVendorDuplicate({
+  email,
+  vendorName,
+  contactName,
+}) {
+  const existing = await Vendor.findOne({
+    where: {
+      [Op.or]: [{ email }, { name: vendorName }, { contact_name: contactName }],
+    },
+  });
+
+  if (!existing) return null;
+
+  const error = new Error("Vendor already exists in local database");
+  error.status = 409;
+  error.details = {
+    id: existing.id,
+    salesforceId: existing.salesforce_id,
+    name: existing.name,
+    contactName: existing.contact_name,
+    email: existing.email,
+    status: existing.status,
+  };
+  throw error;
+}
+
+async function getPartnerCommunityLicenseAvailability(sf) {
+  const licenseName = escapeSoqlString(
+    process.env.SALESFORCE_VENDOR_LICENSE_NAME ||
+      SALESFORCE_DEFAULTS.partnerCommunityLicenseName,
+  );
+  const rows = await runSoqlQuery(
+    sf,
+    `SELECT Id, Name, TotalLicenses, UsedLicenses FROM UserLicense WHERE Name = '${licenseName}' LIMIT 1`,
+  );
+  const license = rows?.[0] || null;
+
+  if (!license) {
+    const error = new Error(`Salesforce UserLicense not found: ${licenseName}`);
+    error.status = 502;
+    throw error;
+  }
+
+  const total = Number(license.TotalLicenses || 0);
+  const used = Number(license.UsedLicenses || 0);
+  return {
+    id: license.Id,
+    name: license.Name,
+    total,
+    used,
+    available: Math.max(total - used, 0),
+  };
+}
+
+function assertPartnerCommunityLicenseAvailable(license) {
+  if (license.available > 0) return;
+
+  const error = new Error(
+    `No Salesforce ${license.name} licenses available (${license.used}/${license.total} used)`,
+  );
+  error.status = 409;
+  error.license = license;
+  throw error;
+}
+
+async function resolveImgPartnerAccountId(sf) {
+  const configuredAccountId =
+    process.env.SALESFORCE_IMG_PARTNER_ACCOUNT_ID ||
+    SALESFORCE_DEFAULTS.imgPartnerAccountId;
+
+  if (configuredAccountId) {
+    return configuredAccountId;
+  }
+
+  const accountName = escapeSoqlString(
+    process.env.SALESFORCE_IMG_PARTNER_ACCOUNT_NAME ||
+      SALESFORCE_DEFAULTS.imgPartnerAccountName,
+  );
+  const rows = await runSoqlQuery(
+    sf,
+    `SELECT Id, Name FROM Account WHERE Name = '${accountName}' LIMIT 1`,
+  );
+
+  if (!rows?.[0]?.Id) {
+    const error = new Error(`Salesforce Account not found: ${accountName}`);
+    error.status = 502;
+    throw error;
+  }
+
+  return rows[0].Id;
+}
+
+async function resolvePartnerCommunityProfileId(sf) {
+  if (process.env.SALESFORCE_VENDOR_PROFILE_ID) {
+    return process.env.SALESFORCE_VENDOR_PROFILE_ID;
+  }
+
+  const profileName = normalizeStringOrNull(
+    process.env.SALESFORCE_VENDOR_PROFILE_NAME,
+  );
+  const query = profileName
+    ? `SELECT Id, Name FROM Profile WHERE Name = '${escapeSoqlString(profileName)}' LIMIT 1`
+    : `SELECT Id, Name FROM Profile WHERE UserLicense.Name = '${escapeSoqlString(
+        process.env.SALESFORCE_VENDOR_LICENSE_NAME ||
+          SALESFORCE_DEFAULTS.partnerCommunityLicenseName,
+      )}' LIMIT 1`;
+  const rows = await runSoqlQuery(sf, query);
+
+  if (!rows?.[0]?.Id) {
+    const error = new Error(
+      "Salesforce Profile for vendor user was not found. Configure SALESFORCE_VENDOR_PROFILE_ID if needed.",
+    );
+    error.status = 502;
+    throw error;
+  }
+
+  return rows[0].Id;
+}
+
+async function resolveProveedorPermissionSetId(sf) {
+  if (process.env.SALESFORCE_VENDOR_PERMISSION_SET_ID) {
+    return process.env.SALESFORCE_VENDOR_PERMISSION_SET_ID;
+  }
+
+  const label = escapeSoqlString(
+    process.env.SALESFORCE_VENDOR_PERMISSION_SET_LABEL ||
+      SALESFORCE_DEFAULTS.permissionSetLabel,
+  );
+  const rows = await runSoqlQuery(
+    sf,
+    `SELECT Id, Name, Label FROM PermissionSet WHERE Label = '${label}' OR Name = 'Proveedor_Users' LIMIT 1`,
+  );
+
+  if (!rows?.[0]?.Id) {
+    const error = new Error(`Salesforce PermissionSet not found: ${label}`);
+    error.status = 502;
+    throw error;
+  }
+
+  return rows[0].Id;
+}
+
+function normalizeFlowEnvKey(flowSource) {
+  return String(flowSource || "")
+    .replace(/[^a-zA-Z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "")
+    .toUpperCase();
+}
+
+function resolveFlowLabel(flowSource) {
+  const envKey = normalizeFlowEnvKey(flowSource);
+  return (
+    normalizeStringOrNull(
+      process.env[`SALESFORCE_VENDOR_FLOW_${envKey}_LABEL`],
+    ) ||
+    SALESFORCE_DEFAULTS.flowLabelsBySource[flowSource] ||
+    null
+  );
+}
+
+function cloneFlowMetadata(metadata) {
+  return JSON.parse(JSON.stringify(metadata || {}));
+}
+
+function getFlowFilterValue(filter) {
+  if (!filter) return null;
+  if (filter.value && typeof filter.value === "object") {
+    return filter.value.stringValue || filter.value.value || null;
+  }
+  return filter.value || null;
+}
+
+function ensureOwnerIdFilter(metadata, userId) {
+  const nextMetadata = cloneFlowMetadata(metadata);
+  nextMetadata.start = nextMetadata.start || {};
+  nextMetadata.start.filters = Array.isArray(nextMetadata.start.filters)
+    ? nextMetadata.start.filters
+    : [];
+
+  const alreadyAssigned = nextMetadata.start.filters.some(
+    (filter) =>
+      String(filter?.field || "").toLowerCase() === "ownerid" &&
+      String(getFlowFilterValue(filter) || "") === String(userId),
+  );
+
+  if (alreadyAssigned) {
+    return { metadata: nextMetadata, changed: false };
+  }
+
+  nextMetadata.start.filters.push({
+    field: "OwnerId",
+    operator: "EqualTo",
+    value: {
+      stringValue: userId,
+    },
+  });
+
+  const filterCount = nextMetadata.start.filters.length;
+  if (filterCount > 1) {
+    nextMetadata.start.filterLogic = Array.from(
+      { length: filterCount },
+      (_item, index) => String(index + 1),
+    ).join(" OR ");
+  }
+
+  return { metadata: nextMetadata, changed: true };
+}
+
+async function findActiveFlowByLabel(sf, flowLabel) {
+  const escapedFlowLabel = escapeSoqlString(flowLabel);
+  const rows = await runToolingQuery(
+    sf,
+    `SELECT Id, DefinitionId, MasterLabel, VersionNumber, Status FROM Flow WHERE MasterLabel = '${escapedFlowLabel}' AND Status = 'Active' ORDER BY VersionNumber DESC LIMIT 1`,
+  );
+
+  return rows?.[0] || null;
+}
+
+async function assignOwnerIdToSalesforceFlow({ sf, flowSource, userId }) {
+  if (!flowSource) {
+    return {
+      requested: false,
+      source: null,
+      status: "not_requested",
+      message: null,
+    };
+  }
+
+  const flowLabel = resolveFlowLabel(flowSource);
+  if (!flowLabel) {
+    return {
+      requested: true,
+      source: flowSource,
+      status: "failed",
+      message: `No Salesforce Flow label configured for source: ${flowSource}`,
+    };
+  }
+
+  try {
+    const activeFlow = await findActiveFlowByLabel(sf, flowLabel);
+    if (!activeFlow?.Id) {
+      return {
+        requested: true,
+        source: flowSource,
+        flowLabel,
+        status: "failed",
+        message: `Active Salesforce Flow not found: ${flowLabel}`,
+      };
+    }
+
+    const flowRecord = await getSalesforceToolingSObject(
+      sf,
+      "Flow",
+      activeFlow.Id,
+    );
+    const fullName = flowRecord.FullName || flowRecord.DeveloperName;
+    const metadata = flowRecord.Metadata || null;
+
+    if (!fullName || !metadata?.start) {
+      return {
+        requested: true,
+        source: flowSource,
+        flowLabel,
+        flowId: activeFlow.Id,
+        status: "failed",
+        message:
+          "Salesforce Flow metadata did not include FullName or start filters.",
+      };
+    }
+
+    const { metadata: nextMetadata, changed } = ensureOwnerIdFilter(
+      metadata,
+      userId,
+    );
+
+    if (!changed) {
+      return {
+        requested: true,
+        source: flowSource,
+        flowLabel,
+        flowId: activeFlow.Id,
+        status: "already_assigned",
+        message: `OwnerId ${userId} already exists in the active Flow conditions.`,
+      };
+    }
+
+    const createdFlow = await createSalesforceToolingSObject(sf, "Flow", {
+      FullName: fullName,
+      Metadata: nextMetadata,
+    });
+    const newFlowId = createdFlow?.id;
+
+    if (!newFlowId) {
+      return {
+        requested: true,
+        source: flowSource,
+        flowLabel,
+        flowId: activeFlow.Id,
+        status: "failed",
+        message: "Salesforce did not return a new Flow version id.",
+      };
+    }
+
+    const newFlowRows = await runToolingQuery(
+      sf,
+      `SELECT Id, VersionNumber, Status FROM Flow WHERE Id = '${escapeSoqlString(
+        newFlowId,
+      )}' LIMIT 1`,
+    );
+    const newFlowVersion = newFlowRows?.[0]?.VersionNumber || null;
+
+    if (activeFlow.DefinitionId && newFlowVersion) {
+      await patchSalesforceToolingSObject(
+        sf,
+        "FlowDefinition",
+        activeFlow.DefinitionId,
+        {
+          Metadata: {
+            activeVersionNumber: Number(newFlowVersion),
+          },
+        },
+      );
+    }
+
+    return {
+      requested: true,
+      source: flowSource,
+      flowLabel,
+      previousFlowId: activeFlow.Id,
+      previousVersionNumber: activeFlow.VersionNumber,
+      newFlowId,
+      newVersionNumber: newFlowVersion,
+      status: "assigned",
+      message: `OwnerId ${userId} was added to ${flowLabel}.`,
+    };
+  } catch (error) {
+    logger.warn(
+      `VendorsService → assignOwnerIdToSalesforceFlow() failed: ${error.message}`,
+    );
+    return {
+      requested: true,
+      source: flowSource,
+      flowLabel,
+      status: "failed",
+      message: error.message,
+      salesforceErrors: error.salesforceErrors || null,
+    };
+  }
+}
+
 function normalizeTortsInput(tortsValue) {
   if (!tortsValue) return null;
 
@@ -593,6 +1025,140 @@ async function syncProductTiersByTorts(torts, transaction) {
       );
     }
   }
+}
+
+async function loadProductMapByTortNames(torts = [], transaction) {
+  const tortNames = Array.from(
+    new Set(
+      (torts || [])
+        .map((item) => String(item?.tort || "").trim())
+        .filter(Boolean),
+    ),
+  );
+
+  if (!tortNames.length) return new Map();
+
+  const products = await Product.findAll({
+    where: {
+      name: {
+        [Op.in]: tortNames,
+      },
+    },
+    attributes: ["id", "name"],
+    transaction,
+  });
+
+  return new Map(
+    products.map((product) => [
+      String(product.name || "")
+        .trim()
+        .toLowerCase(),
+      product,
+    ]),
+  );
+}
+
+async function assertTortProductsExist(torts = []) {
+  const tortNames = Array.from(
+    new Set(
+      (torts || [])
+        .map((item) => String(item?.tort || "").trim())
+        .filter(Boolean),
+    ),
+  );
+
+  if (!tortNames.length) return;
+
+  const products = await Product.findAll({
+    where: {
+      name: {
+        [Op.in]: tortNames,
+      },
+    },
+    attributes: ["name"],
+  });
+  const existingNames = new Set(
+    products.map((item) =>
+      String(item.name || "")
+        .trim()
+        .toLowerCase(),
+    ),
+  );
+  const missingTorts = tortNames.filter(
+    (name) => !existingNames.has(name.toLowerCase()),
+  );
+
+  if (missingTorts.length) {
+    const error = new Error(
+      `Torts not found in products table: ${missingTorts.join(", ")}`,
+    );
+    error.status = 400;
+    throw error;
+  }
+}
+
+async function createVendorClassificationLocals({
+  localVendor,
+  countryName,
+  torts,
+  transaction,
+}) {
+  const profile = await VendorProfile.create(
+    {
+      salesforce_user_id: localVendor.salesforce_id,
+      username: localVendor.email || null,
+      account: localVendor.name,
+      supplier: localVendor.contact_name,
+      country: countryName || null,
+      supplier_segment: localVendor.supplier_segment || null,
+      active: localVendor.status === "active",
+      first_seen_at: new Date(),
+      last_synced_at: new Date(),
+      computed_category: "new_vendor",
+      category_source: "auto",
+      performance_score: 0,
+      metrics_json: {
+        source: {
+          vendorsTableId: localVendor.id,
+          createdBy: "api:POST /vendors",
+        },
+        vendorFreshness: {
+          isNewVendor: true,
+          windowDays: 30,
+        },
+      },
+      consecutive_missed_weeks: 0,
+      alert_flags: null,
+    },
+    { transaction },
+  );
+
+  const productByName = await loadProductMapByTortNames(torts, transaction);
+  const assignments = [];
+
+  for (const item of torts || []) {
+    const product = productByName.get(
+      String(item.tort || "")
+        .trim()
+        .toLowerCase(),
+    );
+    if (!product) continue;
+
+    assignments.push(
+      await VendorTortAssignment.create(
+        {
+          vendor_id: profile.id,
+          product_id: Number(product.id),
+          status: item.status || "active",
+          notes: "Created from POST /vendors",
+          assigned_by: null,
+        },
+        { transaction },
+      ),
+    );
+  }
+
+  return { profile, assignments };
 }
 
 async function resolveSalesforceContactContext(sf, salesforceRefId) {
@@ -1010,9 +1576,10 @@ async function updateVendorsTableBulk(vendorIds = [], payload = {}) {
 
 async function createVendorTableEntry(payload = {}) {
   await ensureVendorsTable();
+  await VendorProfile.sync();
+  await VendorTortAssignment.sync();
 
-  const contactName = String(payload.contactName || "").trim();
-  const vendorName = String(payload.name || "").trim();
+  const vendorName = String(payload.accountName || payload.name || "").trim();
   const email = String(payload.email || "").trim();
   const status = String(payload.status || "active").toLowerCase();
   const communicationChannels = normalizeCommunicationChannelsInput(
@@ -1020,8 +1587,12 @@ async function createVendorTableEntry(payload = {}) {
   );
   const nextTorts = normalizeTortsInput(payload.torts);
   const nextPostingMethods = normalizePostingMethodsInput(
-    payload.postingMethods,
+    payload.postingMethods ?? payload.postingMethod,
   );
+  const contactParts = buildContactNameParts(payload);
+  const contactName =
+    String(payload.contactName || "").trim() ||
+    [contactParts.firstName, contactParts.lastName].filter(Boolean).join(" ");
 
   // Resolve country
   let nextCountryId = null;
@@ -1063,53 +1634,54 @@ async function createVendorTableEntry(payload = {}) {
     nextCountryName = countryRow.name;
   }
 
-  // Check duplicate by email in local DB
-  const existing = await Vendor.findOne({ where: { email } });
-  if (existing) {
-    const err = new Error(`A vendor with email "${email}" already exists`);
-    err.status = 409;
-    throw err;
-  }
-
-  // Split contactName into FirstName + LastName (first word / rest)
-  const nameParts = contactName.split(/\s+/);
-  const sfFirstName = nameParts.length > 1 ? nameParts[0] : "";
-  const sfLastName =
-    nameParts.length > 1 ? nameParts.slice(1).join(" ") : nameParts[0];
+  await assertNoLocalVendorDuplicate({ email, vendorName, contactName });
+  await assertTortProductsExist(nextTorts || []);
 
   logger.info(
-    `VendorsService → createVendorTableEntry() creating SF Contact | contactName: ${contactName} | vendorName: ${vendorName}`,
+    `VendorsService → createVendorTableEntry() creating Salesforce vendor | contactName: ${contactName} | vendorName: ${vendorName}`,
   );
 
   const sf = await authenticateSalesforce();
+  const license = await getPartnerCommunityLicenseAvailability(sf);
+  assertPartnerCommunityLicenseAvailable(license);
+  const imgAccountId = await resolveImgPartnerAccountId(sf);
+  const profileId = await resolvePartnerCommunityProfileId(sf);
+  const permissionSetId = await resolveProveedorPermissionSetId(sf);
 
-  // 1. Fetch the fixed AccountId for "IMG Partner account"
-  const imgAccountRows = await runSoqlQuery(
+  const accountPayload = {
+    Name: vendorName,
+    Type: SALESFORCE_DEFAULTS.accountType,
+    Email__c: email,
+    Supplier_segment__c: SALESFORCE_DEFAULTS.supplierSegment,
+    Quality_segment__c: SALESFORCE_DEFAULTS.qualitySegment,
+    Supplier_entry_date__c: toSalesforceDateOnly(),
+    Active__c: true,
+  };
+  const sfAccount = await createSalesforceSObject(
     sf,
-    `SELECT Id FROM Account WHERE Name = 'IMG Partner account' LIMIT 1`,
+    "Account",
+    accountPayload,
   );
-
-  if (!imgAccountRows?.length) {
-    const err = new Error(
-      'Salesforce Account "IMG Partner account" not found. Cannot create Contact.',
+  if (!sfAccount?.success || !sfAccount?.id) {
+    const error = new Error(
+      "Salesforce Account creation did not return a valid id",
     );
-    err.status = 502;
-    throw err;
+    error.status = 502;
+    throw error;
   }
+  const sfVendorAccountId = sfAccount.id;
 
-  const sfAccountId = imgAccountRows[0].Id;
-  logger.info(
-    `VendorsService → createVendorTableEntry() IMG Partner account found: ${sfAccountId}`,
-  );
-
-  // 2. Create Contact in Salesforce
   const contactPayload = {
-    FirstName: sfFirstName || undefined,
-    LastName: sfLastName,
-    AccountId: sfAccountId,
-    Title: "Provider",
+    Salutation: contactParts.salutation || undefined,
+    FirstName: contactParts.firstName || undefined,
+    MiddleName: contactParts.middleName || undefined,
+    LastName: contactParts.lastName,
+    Suffix: contactParts.suffix || undefined,
+    Parent_Account__c: sfVendorAccountId,
+    AccountId: imgAccountId,
+    Title: SALESFORCE_DEFAULTS.contactTitle,
+    Supplier_segment__c: SALESFORCE_DEFAULTS.supplierSegment,
     Email: email,
-    Supplier_segment__c: "New Vendor",
   };
 
   if (nextCountryName) {
@@ -1121,22 +1693,59 @@ async function createVendorTableEntry(payload = {}) {
     "Contact",
     contactPayload,
   );
-
   if (!sfContact?.success || !sfContact?.id) {
-    const err = new Error(
+    const error = new Error(
       "Salesforce Contact creation did not return a valid id",
     );
-    err.status = 502;
-    throw err;
+    error.status = 502;
+    throw error;
   }
-
   const sfContactId = sfContact.id;
-  logger.info(
-    `VendorsService → createVendorTableEntry() SF Contact created: ${sfContactId}`,
+
+  const userPayload = {
+    ContactId: sfContactId,
+    ProfileId: profileId,
+    Username: email,
+    Email: email,
+    FirstName: contactParts.firstName || undefined,
+    LastName: contactParts.lastName,
+    Alias: buildSalesforceUserAlias(contactName, email),
+    CommunityNickname: buildSalesforceCommunityNickname(contactName, email),
+    TimeZoneSidKey:
+      process.env.SALESFORCE_VENDOR_TIMEZONE || "America/Los_Angeles",
+    LocaleSidKey: process.env.SALESFORCE_VENDOR_LOCALE || "en_US",
+    EmailEncodingKey: process.env.SALESFORCE_VENDOR_EMAIL_ENCODING || "UTF-8",
+    LanguageLocaleKey: process.env.SALESFORCE_VENDOR_LANGUAGE || "en_US",
+    IsActive: status === "active",
+  };
+  const sfUser = await createSalesforceSObject(sf, "User", userPayload);
+  if (!sfUser?.success || !sfUser?.id) {
+    const error = new Error(
+      "Salesforce User creation did not return a valid id",
+    );
+    error.status = 502;
+    throw error;
+  }
+  const sfUserId = sfUser.id;
+
+  const sfPermissionAssignment = await createSalesforceSObject(
+    sf,
+    "PermissionSetAssignment",
+    {
+      AssigneeId: sfUserId,
+      PermissionSetId: permissionSetId,
+    },
   );
 
-  // 3. Create in local DB
+  const flowAssignment = await assignOwnerIdToSalesforceFlow({
+    sf,
+    flowSource: payload.flowSource,
+    userId: sfUserId,
+  });
+
   let newVendor;
+  let newProfile;
+  let newAssignments = [];
   await sequelize.transaction(async (transaction) => {
     if (nextTorts && nextTorts.length) {
       await syncProductTiersByTorts(nextTorts, transaction);
@@ -1144,13 +1753,13 @@ async function createVendorTableEntry(payload = {}) {
 
     newVendor = await Vendor.create(
       {
-        salesforce_id: sfContactId,
+        salesforce_id: sfUserId,
         name: vendorName,
         contact_name: contactName,
         email,
         country_id: nextCountryId,
         status,
-        supplier_segment: "New Vendor",
+        supplier_segment: SALESFORCE_DEFAULTS.supplierSegment,
         communication_channel: serializeCommunicationChannels(
           communicationChannels,
         ),
@@ -1159,6 +1768,15 @@ async function createVendorTableEntry(payload = {}) {
       },
       { transaction },
     );
+
+    const localClassification = await createVendorClassificationLocals({
+      localVendor: newVendor,
+      countryName: nextCountryName,
+      torts: nextTorts || [],
+      transaction,
+    });
+    newProfile = localClassification.profile;
+    newAssignments = localClassification.assignments;
   });
 
   const refreshed = await Vendor.findByPk(newVendor.id, {
@@ -1173,10 +1791,251 @@ async function createVendorTableEntry(payload = {}) {
   });
 
   logger.success(
-    `VendorsService → createVendorTableEntry() success | id: ${newVendor.id} | sfContactId: ${sfContactId}`,
+    `VendorsService → createVendorTableEntry() success | id: ${newVendor.id} | sfUserId: ${sfUserId}`,
   );
 
-  return toPublicVendor(refreshed || newVendor);
+  return {
+    vendor: toPublicVendor(refreshed || newVendor),
+    salesforce: {
+      accountId: sfVendorAccountId,
+      contactId: sfContactId,
+      userId: sfUserId,
+      imgPartnerAccountId: imgAccountId,
+      permissionSetAssignmentId: sfPermissionAssignment?.id || null,
+      license,
+      flowAssignment,
+    },
+    classification: {
+      profileId: newProfile?.id || null,
+      assignments: newAssignments.map((item) => ({
+        id: item.id,
+        productId: item.product_id,
+        status: item.status,
+      })),
+    },
+  };
+}
+
+async function safelyDeleteSalesforceRecord(sf, objectName, recordId, deleted) {
+  if (!recordId) return;
+
+  try {
+    await deleteSalesforceSObject(sf, objectName, recordId);
+    deleted.push({ object: objectName, id: recordId, status: "deleted" });
+  } catch (error) {
+    if (error.status === 404) {
+      deleted.push({ object: objectName, id: recordId, status: "not_found" });
+      return;
+    }
+    throw error;
+  }
+}
+
+function buildDeletedVendorEmail(recordId) {
+  const suffix = String(recordId || Date.now())
+    .replace(/[^a-zA-Z0-9]/g, "")
+    .toLowerCase();
+  return `deleted.vendor.${suffix}@example.invalid`;
+}
+
+async function deleteOrAnonymizeSalesforceUser(sf, userId, deleted) {
+  if (!userId) return;
+
+  try {
+    await safelyDeleteSalesforceRecord(sf, "User", userId, deleted);
+    return;
+  } catch (deleteError) {
+    const deletedEmail = buildDeletedVendorEmail(userId);
+    try {
+      await patchSalesforceSObject(sf, "User", userId, {
+        IsActive: false,
+        Username: deletedEmail,
+        Email: deletedEmail,
+        FirstName: "Deleted",
+        LastName: "Vendor",
+        Alias: "delvend",
+        CommunityNickname: `deleted${String(userId).slice(-8).toLowerCase()}`,
+      });
+      deleted.push({
+        object: "User",
+        id: userId,
+        status: "deactivated_anonymized",
+        reason: deleteError.message,
+      });
+    } catch (patchError) {
+      patchError.message = `${deleteError.message}; fallback User anonymization failed: ${patchError.message}`;
+      throw patchError;
+    }
+  }
+}
+
+async function deleteOrAnonymizeSalesforceContact(sf, contactId, deleted) {
+  if (!contactId) return;
+
+  try {
+    await safelyDeleteSalesforceRecord(sf, "Contact", contactId, deleted);
+    return;
+  } catch (deleteError) {
+    try {
+      await patchSalesforceSObject(sf, "Contact", contactId, {
+        FirstName: "Deleted",
+        LastName: `Vendor ${String(contactId).slice(-6)}`,
+        Email: buildDeletedVendorEmail(contactId),
+      });
+      deleted.push({
+        object: "Contact",
+        id: contactId,
+        status: "anonymized",
+        reason: deleteError.message,
+      });
+    } catch (patchError) {
+      patchError.message = `${deleteError.message}; fallback Contact anonymization failed: ${patchError.message}`;
+      throw patchError;
+    }
+  }
+}
+
+async function deleteOrAnonymizeSalesforceAccount(sf, accountId, deleted) {
+  if (!accountId) return;
+
+  try {
+    await safelyDeleteSalesforceRecord(sf, "Account", accountId, deleted);
+    return;
+  } catch (deleteError) {
+    if (deleteError.status === 404) {
+      deleted.push({ object: "Account", id: accountId, status: "not_found" });
+      return;
+    }
+
+    try {
+      await patchSalesforceSObject(sf, "Account", accountId, {
+        Name: `Deleted Vendor ${String(accountId).slice(-6)}`,
+        Email__c: buildDeletedVendorEmail(accountId),
+        Active__c: false,
+      });
+      deleted.push({
+        object: "Account",
+        id: accountId,
+        status: "anonymized",
+        reason: deleteError.message,
+      });
+    } catch (patchError) {
+      patchError.message = `${deleteError.message}; fallback Account anonymization failed: ${patchError.message}`;
+      throw patchError;
+    }
+  }
+}
+
+async function deleteSalesforceVendorRecords(sf, localVendor) {
+  const salesforceContext = await resolveSalesforceContactContext(
+    sf,
+    localVendor.salesforce_id,
+  );
+  const { userId, contactId, parentAccountId } = salesforceContext;
+  const deleted = [];
+
+  if (userId) {
+    const assignmentRows = await runSoqlQuery(
+      sf,
+      `SELECT Id FROM PermissionSetAssignment WHERE AssigneeId = '${escapeSoqlString(
+        userId,
+      )}'`,
+    );
+
+    for (const assignment of assignmentRows || []) {
+      await safelyDeleteSalesforceRecord(
+        sf,
+        "PermissionSetAssignment",
+        assignment.Id,
+        deleted,
+      );
+    }
+
+    await deleteOrAnonymizeSalesforceUser(sf, userId, deleted);
+  }
+
+  await deleteOrAnonymizeSalesforceContact(sf, contactId, deleted);
+  await deleteOrAnonymizeSalesforceAccount(sf, parentAccountId, deleted);
+
+  return {
+    userId,
+    contactId,
+    accountId: parentAccountId,
+    deleted,
+  };
+}
+
+async function hardDeleteVendorTableEntry(vendorId) {
+  await ensureVendorsTable();
+
+  const row = await Vendor.findByPk(vendorId, {
+    include: [
+      {
+        model: VendorProfile,
+        as: "classificationProfile",
+        required: false,
+      },
+    ],
+  });
+
+  if (!row) {
+    const error = new Error("Vendor not found");
+    error.status = 404;
+    throw error;
+  }
+
+  const sf = await authenticateSalesforce();
+  const salesforceDeletion = await deleteSalesforceVendorRecords(sf, row);
+  const profileId = row.classificationProfile?.id || null;
+
+  await sequelize.transaction(async (transaction) => {
+    if (profileId) {
+      await VendorTopReward.destroy({
+        where: { vendor_id: profileId },
+        transaction,
+      });
+      await VendorCategoryLog.destroy({
+        where: { vendor_id: profileId },
+        transaction,
+      });
+      await VendorWeeklyGoal.destroy({
+        where: { vendor_id: profileId },
+        transaction,
+      });
+      await VendorCaseSnapshot.destroy({
+        where: { vendor_id: profileId },
+        transaction,
+      });
+      await VendorTortAssignment.destroy({
+        where: { vendor_id: profileId },
+        transaction,
+      });
+      await VendorProfile.destroy({ where: { id: profileId }, transaction });
+    }
+
+    await row.destroy({ transaction });
+  });
+
+  logger.success(
+    `VendorsService → hardDeleteVendorTableEntry() success | id: ${vendorId}`,
+  );
+
+  return {
+    deleted: true,
+    vendor: {
+      id: row.id,
+      salesforceId: row.salesforce_id,
+      name: row.name,
+      contactName: row.contact_name,
+      email: row.email,
+    },
+    salesforce: salesforceDeletion,
+    local: {
+      vendorDeleted: true,
+      profileId,
+      relatedTablesCleared: Boolean(profileId),
+    },
+  };
 }
 
 async function toggleVendorTableStatus(vendorId, newStatus) {
@@ -1268,4 +2127,5 @@ module.exports = {
   toggleVendorTableStatus,
   updateVendorsTableBulk,
   updateVendorsTableById,
+  hardDeleteVendorTableEntry,
 };
