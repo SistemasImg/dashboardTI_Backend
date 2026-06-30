@@ -18,7 +18,7 @@ exports.login = async (req, res, next) => {
 };
 
 exports.getCurrentUser = async (req, res, next) => {
-  logger.info("AuthController → getCurrentUser() called");
+  logger.info("AuthController → getCurrentUser(-) called");
 
   try {
     const result = await authService.getCurrentUser(req.user.id);
