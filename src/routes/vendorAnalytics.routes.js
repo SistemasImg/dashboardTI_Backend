@@ -2,6 +2,7 @@ const express = require("express");
 const router = express.Router();
 const authMiddleware = require("../middlewares/authMiddleware");
 const {
+  getVendorsAnalyticsOverview,
   getVendorsAnalyticsSummary,
   getVendorsAnalyticsTrends,
   getVendorsAnalyticsVendors,
@@ -12,6 +13,7 @@ const {
 router.use(authMiddleware);
 
 // Vendor analytics reports
+router.get("/", getVendorsAnalyticsOverview);
 router.get("/summary", getVendorsAnalyticsSummary);
 router.get("/trends", getVendorsAnalyticsTrends);
 router.get("/vendors", getVendorsAnalyticsVendors);

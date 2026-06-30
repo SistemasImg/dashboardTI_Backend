@@ -100,6 +100,11 @@ function isOutflowCaseSnapshot(row) {
   return normalizeText(row?.sub_status) === "accepted";
 }
 
+function isRejectedCaseSnapshot(row) {
+  const subStatus = normalizeText(row?.sub_status);
+  return subStatus === "reject" || subStatus === "rejected";
+}
+
 function getProfileVendorInfo(profile) {
   return profile?.vendorInfo || null;
 }
@@ -423,6 +428,7 @@ function buildVendorMetricsFromSnapshots(snapshots, typeFilter) {
         inflow: 0,
         accepted: 0,
         outflow: 0,
+        rejected: 0,
         byType: {},
       });
     }
@@ -439,16 +445,25 @@ function buildVendorMetricsFromSnapshots(snapshots, typeFilter) {
     const countsAsOutflow =
       isOutflowCaseSnapshot(row) &&
       isDateInRange(row.sent_date_2, typeFilter.fromDate, typeFilter.toDate);
+    const countsAsRejected =
+      isRejectedCaseSnapshot(row) &&
+      isDateInRange(
+        row.case_created_at,
+        typeFilter.fromDate,
+        typeFilter.toDate,
+      );
 
     if (countsAsInflow) entry.inflow += 1;
     if (countsAsAccepted) entry.accepted += 1;
     if (countsAsOutflow) entry.outflow += 1;
+    if (countsAsRejected) entry.rejected += 1;
 
     if (!entry.byType[typeName]) {
       entry.byType[typeName] = {
         inflow: 0,
         accepted: 0,
         outflow: 0,
+        rejected: 0,
         vendorIds: new Set(),
       };
     }
@@ -456,6 +471,7 @@ function buildVendorMetricsFromSnapshots(snapshots, typeFilter) {
     if (countsAsInflow) entry.byType[typeName].inflow += 1;
     if (countsAsAccepted) entry.byType[typeName].accepted += 1;
     if (countsAsOutflow) entry.byType[typeName].outflow += 1;
+    if (countsAsRejected) entry.byType[typeName].rejected += 1;
     entry.byType[typeName].vendorIds.add(vendorId);
   });
 
@@ -592,6 +608,14 @@ async function loadAnalyticsDataset(rawFilters = {}) {
                 [Op.between]: [filters.fromDate, filters.toDate],
               },
             },
+            {
+              case_created_at: {
+                [Op.between]: [filters.fromDate, filters.toDate],
+              },
+              sub_status: {
+                [Op.in]: ["Reject", "Rejected", "reject", "rejected"],
+              },
+            },
           ],
         },
         attributes: [
@@ -670,6 +694,7 @@ function buildSummaryResponse(dataset) {
   let totalInflow = 0;
   let totalAccepted = 0;
   let totalOutflow = 0;
+  let totalRejected = 0;
   let conversionRateAccumulator = 0;
   let outflowRateAccumulator = 0;
   let conversionRateContributors = 0;
@@ -684,11 +709,13 @@ function buildSummaryResponse(dataset) {
       inflow: 0,
       accepted: 0,
       outflow: 0,
+      rejected: 0,
     };
 
     totalInflow += metrics.inflow;
     totalAccepted += metrics.accepted;
     totalOutflow += metrics.outflow;
+    totalRejected += metrics.rejected;
 
     const conversionRate =
       metrics.inflow > 0 ? (metrics.accepted / metrics.inflow) * 100 : null;
@@ -707,6 +734,11 @@ function buildSummaryResponse(dataset) {
       categoryDistributionMap.set(category, {
         category,
         count: 0,
+        activeVendors: 0,
+        inflow: 0,
+        accepted: 0,
+        outflow: 0,
+        rejected: 0,
         goalMetCount: 0,
         goalMissCount: 0,
       });
@@ -714,6 +746,11 @@ function buildSummaryResponse(dataset) {
 
     const categoryEntry = categoryDistributionMap.get(category);
     categoryEntry.count += 1;
+    if (Boolean(profile.active)) categoryEntry.activeVendors += 1;
+    categoryEntry.inflow += metrics.inflow;
+    categoryEntry.accepted += metrics.accepted;
+    categoryEntry.outflow += metrics.outflow;
+    categoryEntry.rejected += metrics.rejected;
 
     const latestStatus = latestGoalStatusByVendor.get(vendorId);
     if (latestStatus) {
@@ -740,11 +777,17 @@ function buildSummaryResponse(dataset) {
 
   return {
     summary: {
+      window: {
+        type: dataset.filters.range === "90d" ? "us_business_days" : "custom",
+        from: toDateOnlyIso(dataset.filters.fromDate),
+        to: toDateOnlyIso(dataset.filters.toDate),
+      },
       totalVendors: dataset.profiles.length,
-      activeVendors: dataset.profiles.filter((p) => Boolean(p.active)).length,
+      activeVendors: dataset.profiles.length,
       totalInflow,
       totalAccepted,
       totalOutflow,
+      totalRejected,
       totalRejectedOrUnsigned: Math.max(totalInflow - totalAccepted, 0),
       avgConversionRate:
         conversionRateContributors > 0
@@ -771,6 +814,29 @@ function buildSummaryResponse(dataset) {
   };
 }
 
+function buildOverviewResponse(dataset) {
+  const summaryResponse = buildSummaryResponse(dataset);
+  const typesResponse = buildTypesResponse(dataset);
+  const vendorsResponse = buildVendorsResponse(dataset);
+
+  return {
+    ...summaryResponse,
+    tortDistribution: typesResponse.items,
+    vendors: vendorsResponse.items,
+    pagination: vendorsResponse.pagination,
+    definitions: {
+      inflow: "Case.CreatedDate within the selected window",
+      accepted:
+        "Case.Signed_Date__c within the selected window, Status='Closed', Substatus__c='Accepted'",
+      outflow:
+        "Case.Sent_Date2__c within the selected window and Substatus__c='Accepted'",
+      rejected:
+        "Case.CreatedDate within the selected window and Substatus__c in Reject/Rejected",
+      activeVendors: "Local vendors with status='active'",
+    },
+  };
+}
+
 function buildTrendsResponse(dataset) {
   const days = computeDateDiffInDays(
     dataset.filters.fromDate,
@@ -787,7 +853,12 @@ function buildTrendsResponse(dataset) {
     const ensureBucket = (bucket) => {
       if (!bucket) return null;
       if (!inflowByBucket.has(bucket)) {
-        inflowByBucket.set(bucket, { total: 0, accepted: 0, outflow: 0 });
+        inflowByBucket.set(bucket, {
+          total: 0,
+          accepted: 0,
+          outflow: 0,
+          rejected: 0,
+        });
       }
       return inflowByBucket.get(bucket);
     };
@@ -838,6 +909,22 @@ function buildTrendsResponse(dataset) {
       const entry = ensureBucket(bucket);
       if (entry) entry.outflow += 1;
     }
+
+    if (
+      isRejectedCaseSnapshot(row) &&
+      isDateInRange(
+        row.case_created_at,
+        dataset.typeFilter.fromDate,
+        dataset.typeFilter.toDate,
+      )
+    ) {
+      const bucket =
+        granularity === "day"
+          ? toDateOnlyIso(row.case_created_at)
+          : getWeekStartIso(row.case_created_at);
+      const entry = ensureBucket(bucket);
+      if (entry) entry.rejected += 1;
+    }
   });
 
   const inflowTrend = Array.from(inflowByBucket.entries())
@@ -849,6 +936,7 @@ function buildTrendsResponse(dataset) {
         total: item.total,
         accepted: item.accepted,
         outflow: item.outflow,
+        rejected: item.rejected,
         rejectedOrUnsigned,
         conversionRate:
           item.total > 0
@@ -932,6 +1020,7 @@ function buildVendorsResponse(dataset) {
       inflow: 0,
       accepted: 0,
       outflow: 0,
+      rejected: 0,
     };
     const rejectedOrUnsigned = Math.max(metrics.inflow - metrics.accepted, 0);
 
@@ -958,6 +1047,7 @@ function buildVendorsResponse(dataset) {
       inflow: metrics.inflow,
       accepted: metrics.accepted,
       outflow: metrics.outflow,
+      rejected: metrics.rejected,
       rejectedOrUnsigned,
       conversionRate:
         metrics.inflow > 0
@@ -1012,6 +1102,7 @@ function buildTypesResponse(dataset) {
         inflow: 0,
         accepted: 0,
         outflow: 0,
+        rejected: 0,
         vendorIds: new Set(),
         totalWeeks: 0,
         metWeeks: 0,
@@ -1038,10 +1129,18 @@ function buildTypesResponse(dataset) {
         dataset.typeFilter.fromDate,
         dataset.typeFilter.toDate,
       );
+    const countsAsRejected =
+      isRejectedCaseSnapshot(row) &&
+      isDateInRange(
+        row.case_created_at,
+        dataset.typeFilter.fromDate,
+        dataset.typeFilter.toDate,
+      );
 
     if (countsAsInflow) entry.inflow += 1;
     if (countsAsAccepted) entry.accepted += 1;
     if (countsAsOutflow) entry.outflow += 1;
+    if (countsAsRejected) entry.rejected += 1;
     entry.vendorIds.add(Number(row.vendor_id));
   });
 
@@ -1090,6 +1189,7 @@ function buildTypesResponse(dataset) {
       inflow: item.inflow,
       accepted: item.accepted,
       outflow: item.outflow,
+      rejected: item.rejected,
       rejectedOrUnsigned,
       conversionRate,
       outflowToAcceptedRate:
@@ -1184,6 +1284,11 @@ async function getVendorAnalyticsSummary(rawFilters = {}) {
   return buildSummaryResponse(dataset);
 }
 
+async function getVendorAnalyticsOverview(rawFilters = {}) {
+  const dataset = await loadAnalyticsDataset(rawFilters);
+  return buildOverviewResponse(dataset);
+}
+
 async function getVendorAnalyticsTrends(rawFilters = {}) {
   const dataset = await loadAnalyticsDataset(rawFilters);
   return buildTrendsResponse(dataset);
@@ -1205,6 +1310,7 @@ async function getVendorAnalyticsCategoryHistory(rawFilters = {}) {
 }
 
 module.exports = {
+  getVendorAnalyticsOverview,
   getVendorAnalyticsSummary,
   getVendorAnalyticsTrends,
   getVendorAnalyticsVendors,

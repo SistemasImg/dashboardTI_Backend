@@ -23,6 +23,7 @@ const {
   getVendorMonitoringSummary,
 } = require("../services/vendor/vendor.alerts.service");
 const {
+  getVendorAnalyticsOverview,
   getVendorAnalyticsSummary,
   getVendorAnalyticsTrends,
   getVendorAnalyticsVendors,
@@ -379,6 +380,24 @@ async function getVendorsAnalyticsSummary(req, res, next) {
   }
 }
 
+async function getVendorsAnalyticsOverview(req, res, next) {
+  logger.info("VendorController → getVendorsAnalyticsOverview() called");
+
+  try {
+    const result = await getVendorAnalyticsOverview(req.query);
+    return res.status(200).json(result);
+  } catch (error) {
+    logger.error(
+      `VendorController → getVendorsAnalyticsOverview() error: ${error.message}`,
+      {
+        stack: error.stack,
+        origin: "controller",
+      },
+    );
+    next(error);
+  }
+}
+
 async function getVendorsAnalyticsTrends(req, res, next) {
   logger.info("VendorController → getVendorsAnalyticsTrends() called");
 
@@ -694,6 +713,7 @@ module.exports = {
   getVendorMonitoringSnapshot,
   getVendorMonitoringAlertsFeed,
   streamVendorMonitoringEvents,
+  getVendorsAnalyticsOverview,
   getVendorsAnalyticsSummary,
   getVendorsAnalyticsTrends,
   getVendorsAnalyticsVendors,
